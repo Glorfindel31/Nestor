@@ -7,9 +7,11 @@ fn main() {
         .manage(commands::NestCancelFlag::default())
         .invoke_handler(tauri::generate_handler![
             commands::import_dxf_command,
+            commands::import_svg_command,
             commands::run_nest_command,
             commands::cancel_nest_command,
             commands::export_dxf_command,
+            commands::export_svg_command,
             commands::repack_sheet_command,
             commands::append_log_command,
             commands::save_config_command,

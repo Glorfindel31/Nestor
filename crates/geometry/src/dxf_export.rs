@@ -31,6 +31,7 @@ use dxf::entities::{Entity, EntityCommon, EntityType, LwPolyline, MText, Text};
 use dxf::{Drawing, LwPolylineVertex, Point as DxfPoint};
 
 use crate::dxf_import::{rotate_layered_polygon, shift_layered_polygon, LayeredPolygon, TextAnnotation};
+use crate::point::Point;
 use crate::polygon::get_polygon_bounds;
 
 /// One part's true (unpadded) geometry plus where the engine placed it -
@@ -50,6 +51,63 @@ pub struct PlacedShape {
 pub struct SheetLayout {
     pub sheet: LayeredPolygon,
     pub parts: Vec<PlacedShape>,
+}
+
+/// Widest a packed row of unplaced parts is allowed to grow before wrapping
+/// to a new row - arbitrary but generous (most real jobs' individual parts
+/// are well under this), just enough to keep a long run of small parts from
+/// producing one absurdly wide single row.
+const UNPLACED_MAX_ROW_WIDTH: f64 = 1000.0;
+
+/// Lays a flat list of never-placed parts out in a simple non-overlapping,
+/// row-wrapping grid - **not** a nesting pass (no rotation search, no NFP,
+/// no attempt to pack tightly). These parts are "unplaced" precisely
+/// because the real engine couldn't fit them anywhere on any sheet; this
+/// only needs to keep them from overlapping each other so a caller can see
+/// and manually handle them, not nest them well.
+///
+/// Returns a `SheetLayout` whose own `sheet` is a synthetic bounding
+/// rectangle sized to the packed result, on a `"UNPLACED"` layer so it
+/// reads as distinct from a real sheet if `include_sheet_outline` is on.
+/// Handing this back as one more `SheetLayout` (appended to the real ones)
+/// lets both `export_dxf`/`svg_export::export_svg` place it automatically
+/// via their own existing left-to-right multi-sheet layout - no separate
+/// code path needed in either exporter.
+pub fn pack_unplaced_parts(parts: &[LayeredPolygon], spacing: f64) -> SheetLayout {
+    let mut placed = Vec::new();
+    let mut cursor_x = 0.0;
+    let mut cursor_y = 0.0;
+    let mut row_height = 0.0f64;
+    let mut max_x = 0.0f64;
+
+    for shape in parts {
+        let Some(b) = get_polygon_bounds(&shape.points) else { continue };
+        if cursor_x > 0.0 && cursor_x + b.width > UNPLACED_MAX_ROW_WIDTH {
+            cursor_x = 0.0;
+            cursor_y += row_height + spacing;
+            row_height = 0.0;
+        }
+        // Shift so this part's own bounding-box corner lands at
+        // (cursor_x, cursor_y) - same "x/y is a translation of the shape's
+        // own raw points" convention `export_dxf`'s `placed.x/y` already
+        // uses below, not "the target position of its bounding box".
+        placed.push(PlacedShape { shape: shape.clone(), x: cursor_x - b.x, y: cursor_y - b.y, rotation: 0.0 });
+        cursor_x += b.width + spacing;
+        row_height = row_height.max(b.height);
+        max_x = max_x.max(cursor_x - spacing);
+    }
+    let total_height = cursor_y + row_height;
+
+    let sheet_points = vec![
+        Point::new(0.0, 0.0),
+        Point::new(max_x, 0.0),
+        Point::new(max_x, total_height),
+        Point::new(0.0, total_height),
+    ];
+    SheetLayout {
+        sheet: LayeredPolygon { points: sheet_points, layer: "UNPLACED".to_string(), is_circle: None, children: Vec::new(), texts: Vec::new() },
+        parts: placed,
+    }
 }
 
 /// Lays every sheet out left-to-right (separated by `sheet_spacing`) and
@@ -271,5 +329,51 @@ mod tests {
         assert_eq!(mtexts.len(), 1);
         assert_eq!(mtexts[0].text, "MULTI");
         assert!((mtexts[0].rotation_angle - std::f64::consts::FRAC_PI_2).abs() < 1e-9, "MTEXT rotation must be written back in radians, got {}", mtexts[0].rotation_angle);
+    }
+
+    #[test]
+    fn pack_unplaced_parts_lays_parts_out_without_overlapping() {
+        let parts = vec![square(10.0), square(20.0), square(15.0)];
+        let layout = pack_unplaced_parts(&parts, 5.0);
+
+        assert_eq!(layout.sheet.layer, "UNPLACED");
+        assert_eq!(layout.parts.len(), 3);
+
+        // every placed part's actual (shifted) bounds, so overlap can be
+        // checked directly instead of trusting the packer's own bookkeeping
+        let bounds: Vec<_> = layout
+            .parts
+            .iter()
+            .map(|p| {
+                let shifted = shift_layered_polygon(&p.shape, p.x, p.y);
+                get_polygon_bounds(&shifted.points).unwrap()
+            })
+            .collect();
+        for i in 0..bounds.len() {
+            for j in (i + 1)..bounds.len() {
+                let a = &bounds[i];
+                let b = &bounds[j];
+                let overlap_x = a.x < b.x + b.width && b.x < a.x + a.width;
+                let overlap_y = a.y < b.y + b.height && b.y < a.y + a.height;
+                assert!(!(overlap_x && overlap_y), "parts {i} and {j} overlap: {a:?} vs {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn pack_unplaced_parts_wraps_to_a_new_row_past_the_max_width() {
+        // Ten parts of 150mm each (1500mm total) must not fit in one 1000mm
+        // row - the packer should wrap to at least a second row, i.e. the
+        // synthetic sheet's height must exceed a single part's own height.
+        let parts: Vec<_> = (0..10).map(|_| square(150.0)).collect();
+        let layout = pack_unplaced_parts(&parts, 5.0);
+        let sheet_bounds = get_polygon_bounds(&layout.sheet.points).unwrap();
+        assert!(sheet_bounds.height > 150.0, "expected wrapping to a second row, got height {}", sheet_bounds.height);
+    }
+
+    #[test]
+    fn pack_unplaced_parts_handles_an_empty_list() {
+        let layout = pack_unplaced_parts(&[], 5.0);
+        assert!(layout.parts.is_empty());
     }
 }

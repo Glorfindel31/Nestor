@@ -50,16 +50,16 @@
 
     <main>
       <section class="panel" id="panel-import">
-        <h2><span class="step-num">01</span> / <span data-i18n="heading_import_text">IMPORT DXF</span></h2>
+        <h2><span class="step-num">01</span> / <span data-i18n="heading_import_text">IMPORT DXF / SVG</span></h2>
         <div class="row">
-          <label for="import-tolerance" data-i18n="tolerance_label" data-i18n-title="tolerance_tooltip" title="How closely curves (arcs/circles) are approximated with straight line segments. Lower = more accurate but more points; higher = fewer points but a coarser shape.">TOLERANCE</label>
-          <input id="import-tolerance" type="number" value="0.1" step="0.05" min="0.01" data-i18n-title="tolerance_tooltip" title="How closely curves (arcs/circles) are approximated with straight line segments. Lower = more accurate but more points; higher = fewer points but a coarser shape." />
+          <label for="import-tolerance" data-i18n="tolerance_label" data-i18n-title="tolerance_tooltip" title="How closely curves (arcs/circles) are approximated with straight line segments, in millimeters. Lower = more accurate but more points; higher = fewer points but a coarser shape.">TOLERANCE (mm)</label>
+          <input id="import-tolerance" type="number" value="0.1" step="0.05" min="0.01" data-i18n-title="tolerance_tooltip" title="How closely curves (arcs/circles) are approximated with straight line segments, in millimeters. Lower = more accurate but more points; higher = fewer points but a coarser shape." />
           <button id="btn-import" class="primary" data-i18n="btn_browse">BROWSE...</button>
           <span class="spinner" id="import-spinner" hidden></span>
         </div>
-        <div id="dropzone" class="dropzone" data-i18n="dropzone_text">or drag one or more .dxf files here</div>
+        <div id="dropzone" class="dropzone" data-i18n="dropzone_text">or drag one or more .dxf/.svg files here</div>
 
-        <p class="hint" data-i18n="rect_hint">or add a rectangle directly (a stock sheet size, or a simple rectangular part) without a DXF file:</p>
+        <p class="hint" data-i18n="rect_hint">or add a rectangle directly (a stock sheet size, or a simple rectangular part) without a DXF/SVG file:</p>
         <div class="row">
           <label for="rect-width" data-i18n="rect_width_label">WIDTH (mm)</label>
           <input id="rect-width" type="number" value="2440" min="0.1" step="1" />
@@ -116,15 +116,24 @@
         </div>
         <div id="sheets"></div>
 
-        <p class="hint" style="margin-top: 16px;" data-i18n="export_hint">Export the attempt currently shown above to a DXF file:</p>
+        <p class="hint" style="margin-top: 16px;" data-i18n="export_hint">Export the attempt currently shown above to a file:</p>
         <div class="row">
-          <label for="export-spacing" data-i18n="export_spacing_label" data-i18n-title="export_spacing_tooltip" title="A DXF file has no separate concept of 'sheets' - every sheet used gets written into the same drawing, laid out left to right. This is the gap kept between each one so they don't overlap.">SHEET SPACING (mm)</label>
-          <input id="export-spacing" type="number" value="20" min="0" step="1" data-i18n-title="export_spacing_tooltip" title="A DXF file has no separate concept of 'sheets' - every sheet used gets written into the same drawing, laid out left to right. This is the gap kept between each one so they don't overlap." />
+          <label for="export-format" data-i18n="export_format_label">FORMAT</label>
+          <select id="export-format">
+            <option value="dxf">DXF</option>
+            <option value="svg">SVG</option>
+          </select>
+          <label for="export-spacing" data-i18n="export_spacing_label" data-i18n-title="export_spacing_tooltip" title="Neither DXF nor SVG has a separate concept of 'sheets' - every sheet used gets written into the same drawing, laid out left to right. This is the gap kept between each one so they don't overlap.">SHEET SPACING (mm)</label>
+          <input id="export-spacing" type="number" value="20" min="0" step="1" data-i18n-title="export_spacing_tooltip" title="Neither DXF nor SVG has a separate concept of 'sheets' - every sheet used gets written into the same drawing, laid out left to right. This is the gap kept between each one so they don't overlap." />
           <label for="export-outline" data-i18n-title="export_outline_tooltip" title="Also write each sheet's own rectangle as a shape in the export, not just the parts placed on it.">
             <input id="export-outline" type="checkbox" checked />
             <span data-i18n="export_outline_label">INCLUDE SHEET OUTLINE</span>
           </label>
-          <button id="btn-export" class="primary" data-i18n="btn_export">EXPORT DXF</button>
+          <label for="export-unplaced" data-i18n-title="export_unplaced_tooltip" title="Also write every part that never got placed on any sheet, laid out in a simple non-overlapping grid after the last sheet (not nested - just kept from overlapping so you can see and handle them).">
+            <input id="export-unplaced" type="checkbox" />
+            <span data-i18n="export_unplaced_label">INCLUDE UNPLACED PARTS</span>
+          </label>
+          <button id="btn-export" class="primary" data-i18n="btn_export">EXPORT</button>
         </div>
         <p class="status" id="export-status"></p>
       </section>
@@ -226,7 +235,7 @@
         </div>
         <p data-i18n="help_intro">RustyNesting nests parts onto stock sheets before cutting.</p>
         <ul class="help-steps">
-          <li data-i18n="help_step_import">01 IMPORT — load DXF file(s), or add a rectangle by hand.</li>
+          <li data-i18n="help_step_import">01 IMPORT — load DXF/SVG file(s), or add a rectangle by hand.</li>
           <li data-i18n="help_step_roles">02 ASSIGN ROLES — mark each shape SHEET (stock) or PART (to cut), set quantities.</li>
           <li data-i18n="help_step_configure">03 CONFIGURE — adjust margin/spacing etc. at the bottom if needed (optional).</li>
           <li data-i18n="help_step_run">RUN NEST — then review and EXPORT the result.</li>
@@ -238,6 +247,31 @@
             <span data-i18n="help_dont_show">Don't show this again</span>
           </label>
           <button type="button" id="btn-help-close" class="primary" data-i18n="help_close">GOT IT</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay" id="svg-unit-overlay" hidden>
+      <div class="modal" id="svg-unit-modal" role="dialog" aria-modal="true">
+        <div class="modal-header">
+          <h2 data-i18n="svg_unit_title">SVG UNITS</h2>
+        </div>
+        <p data-i18n="svg_unit_intro">
+          What does one coordinate unit in this SVG file represent in real life?
+        </p>
+        <div class="row">
+          <label for="svg-unit-select" data-i18n="svg_unit_label">FILE UNIT</label>
+          <select id="svg-unit-select">
+            <option value="" data-i18n="svg_unit_auto">Auto-detect from file (recommended)</option>
+            <option value="mm" data-i18n="svg_unit_mm">Millimeters (mm)</option>
+            <option value="cm" data-i18n="svg_unit_cm">Centimeters (cm)</option>
+            <option value="m" data-i18n="svg_unit_m">Meters (m)</option>
+            <option value="px" data-i18n="svg_unit_px">Pixels (px, 96/inch)</option>
+          </select>
+        </div>
+        <div class="modal-footer">
+          <button type="button" id="btn-svg-unit-cancel" data-i18n="svg_unit_cancel">CANCEL</button>
+          <button type="button" id="btn-svg-unit-ok" class="primary" data-i18n="svg_unit_ok">IMPORT</button>
         </div>
       </div>
     </div>

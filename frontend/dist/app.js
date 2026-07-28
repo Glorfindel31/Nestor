@@ -1,11 +1,14 @@
 // Minimal UI: talks directly to the Rust engine via Tauri's
-// import_dxf_command/run_nest_command. Deliberately not an adaptation of
-// the legacy Ractive UI (frontend/deepnest.js, frontend/ui/**) - that code
-// assumes a Node-integrated Electron renderer (require("electron"),
-// require("@electron/remote"), require("axios"), etc.) that doesn't exist
-// in Tauri's webview, and much of it (SVG import, a remote DXF-conversion
-// service) targets features this project's DXF-only scope already dropped.
-// Kept as reference, not wired up.
+// import_dxf_command/import_svg_command/run_nest_command. Deliberately not
+// an adaptation of the legacy Ractive UI (frontend/deepnest.js,
+// frontend/ui/**) - that code assumes a Node-integrated Electron renderer
+// (require("electron"), require("@electron/remote"), require("axios"),
+// etc.) that doesn't exist in Tauri's webview, and its own SVG import
+// (svgparser.js) targets the DOM parser (`DOMParser`/imperial-unit-aware
+// CSS length resolution) that isn't available/desired here - this UI's SVG
+// import goes through the native `geometry::svg_import` module instead
+// (metric-only, see that module's doc comment). Legacy files kept as
+// reference, not wired up.
 
 import { boundsOf, toSvgPoints, pointsToPath, rotatedTranslatedPoints, colorForLayer, renderShapeSvg, UNPLACED_COLOR } from "./render.js";
 import { t, getLang, setLang, applyStaticTranslations } from "./i18n.js";
@@ -139,11 +142,12 @@ function shapeThumbnailSvg(shape, strokeOverride = null) {
   return `<svg class="thumb" viewBox="0 0 ${vbW.toFixed(2)} ${vbH.toFixed(2)}" width="56" height="56">${renderShapeSvg(shape, transform, true, strokeOverride)}</svg>`;
 }
 
-// Imports every path in `paths` (one import_dxf_command call each - the
-// command only reads a single file) and appends their shapes onto whatever
-// was already imported, so multiple files/drops accumulate into one part
-// pool instead of each import replacing the last. A failure on one file is
-// logged and skipped rather than aborting the rest of the batch.
+// Imports every path in `paths` (one import_dxf_command/import_svg_command
+// call each, picked by extension - each command only reads a single file)
+// and appends their shapes onto whatever was already imported, so multiple
+// files/drops accumulate into one part pool instead of each import replacing
+// the last. A failure on one file is logged and skipped rather than aborting
+// the rest of the batch.
 // Strips directory and extension from an import path, e.g.
 // "C:\foo\bar\Untitled.dxf" -> "Untitled" - used to build each row's
 // [filename-{number}] NAME column so a part can be told apart from same-
@@ -153,18 +157,88 @@ function fileBaseName(path) {
   return base.replace(/\.[^.]+$/, "");
 }
 
+// DXF stays the primary/first-class import path; SVG import is additive
+// (see geometry::svg_import's module doc - metric-only, imperial units are
+// rejected with an error, not silently converted). Both commands return the
+// same PolygonDto tree shape, so nothing past this dispatch needs to know
+// which format a given shape came from.
+function importCommandFor(path) {
+  const ext = path.split(".").pop()?.toLowerCase();
+  if (ext === "dxf") return "import_dxf_command";
+  if (ext === "svg") return "import_svg_command";
+  return null;
+}
+
+// A real SVG's width/height/viewBox often isn't a trustworthy physical
+// size - plenty of design tools export unitless or arbitrary user units -
+// so rather than trust auto-detection silently, every SVG import (browse or
+// drag-drop, once per batch, not once per file) asks the user to confirm or
+// override what one file unit represents. Resolves to "" for "auto-detect
+// from file" (see index.html's <select> options), a concrete unit string
+// ("mm"/"cm"/"m"/"px"), or `null` if the user cancelled - imperial units
+// are never offered as a choice in the first place (see svg-unit-select's
+// options), so there's nothing to reject here that geometry::svg_import
+// wouldn't reject anyway.
+let svgUnitPromptResolve = null;
+
+function openSvgUnitPrompt() {
+  return new Promise((resolve) => {
+    svgUnitPromptResolve = resolve;
+    el("svg-unit-select").value = "";
+    el("svg-unit-overlay").hidden = false;
+  });
+}
+
+function closeSvgUnitPrompt(result) {
+  el("svg-unit-overlay").hidden = true;
+  if (svgUnitPromptResolve) {
+    svgUnitPromptResolve(result);
+    svgUnitPromptResolve = null;
+  }
+}
+
+el("btn-svg-unit-ok").addEventListener("click", () => closeSvgUnitPrompt(el("svg-unit-select").value));
+el("btn-svg-unit-cancel").addEventListener("click", () => closeSvgUnitPrompt(null));
+el("svg-unit-overlay").addEventListener("click", (event) => {
+  if (event.target === el("svg-unit-overlay")) closeSvgUnitPrompt(null);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !el("svg-unit-overlay").hidden) closeSvgUnitPrompt(null);
+});
+
 async function importPaths(paths) {
   if (paths.length === 0) return;
   const tolerance = Number(el("import-tolerance").value);
+
+  // One prompt per batch, not per file - every .svg in this batch shares
+  // whatever unit the user picks (or "auto-detect" left as-is).
+  let svgUnitOverride = null;
+  if (paths.some((p) => p.toLowerCase().endsWith(".svg"))) {
+    const choice = await openSvgUnitPrompt();
+    if (choice === null) {
+      logLine("import cancelled: SVG unit prompt dismissed");
+      return;
+    }
+    svgUnitOverride = choice || null; // "" (auto-detect) -> no override sent to the backend
+  }
 
   setStatus("import-status", t("import_importing", { n: paths.length }), false);
   el("btn-import").disabled = true;
   setBusy("import-spinner", true);
   let imported = 0;
   for (const path of paths) {
-    logLine(`import: ${path} (tolerance ${tolerance})`);
+    const command = importCommandFor(path);
+    if (!command) {
+      logLine(`import skipped for ${path}: unsupported file type (expected .dxf or .svg)`);
+      continue;
+    }
+    logLine(`import: ${path} (tolerance ${tolerance}mm)`);
     try {
-      const shapes = await invoke("import_dxf_command", { path, curve_tolerance: tolerance });
+      const args = { path, curve_tolerance: tolerance };
+      if (command === "import_svg_command") {
+        args.unit_override = svgUnitOverride;
+      }
+      const shapes = await invoke(command, args);
       const fileName = fileBaseName(path);
       for (const shape of shapes) {
         shape._uiId = nextShapeUiId++;
@@ -264,7 +338,7 @@ async function handleBrowse() {
   try {
     selected = await window.__TAURI__.dialog.open({
       multiple: true,
-      filters: [{ name: "DXF", extensions: ["dxf"] }],
+      filters: [{ name: "DXF/SVG", extensions: ["dxf", "svg"] }],
     });
   } catch (err) {
     logLine(`file dialog failed: ${err}`, "error");
@@ -687,6 +761,16 @@ function renderResult(response, request) {
   renderSnapshot(history[history.length - 1], request);
 }
 
+// DXF stays the primary/first-class export format too (matches import);
+// SVG is the additive second option, both going through the exact same
+// ExportRequest shape (geometry::svg_export mirrors geometry::dxf_export's
+// input) - this map is the only place format choice turns into "which
+// Tauri command / which file extension".
+const EXPORT_FORMATS = {
+  dxf: { command: "export_dxf_command", extension: "dxf", filterName: "DXF" },
+  svg: { command: "export_svg_command", extension: "svg", filterName: "SVG" },
+};
+
 async function handleExport() {
   if (!currentSnapshot || !lastNestRequest || !lastPartsById) return;
 
@@ -696,12 +780,14 @@ async function handleExport() {
     return;
   }
   const includeSheetOutline = el("export-outline").checked;
+  const includeUnplaced = el("export-unplaced").checked;
+  const format = EXPORT_FORMATS[el("export-format").value] ?? EXPORT_FORMATS.dxf;
 
   let path;
   try {
     path = await window.__TAURI__.dialog.save({
-      defaultPath: "nest.dxf",
-      filters: [{ name: "DXF", extensions: ["dxf"] }],
+      defaultPath: `nest.${format.extension}`,
+      filters: [{ name: format.filterName, extensions: [format.extension] }],
     });
   } catch (err) {
     setStatus("export-status", t("export_dialog_failed", { err }), true);
@@ -713,19 +799,22 @@ async function handleExport() {
     sheets: lastNestRequest.sheets,
     // The authoritative id -> shape mapping run_nest_command itself built
     // (RunNestResponse::parts_by_id), not a re-sent parts/quantity list for
-    // export_dxf to re-derive its own mapping from - see that DTO field's
-    // doc comment for the silent-corruption risk this avoids.
+    // export_dxf/export_svg to re-derive its own mapping from - see that DTO
+    // field's doc comment for the silent-corruption risk this avoids. It's
+    // also what makes include_unplaced work: parts_by_id already covers
+    // every part copy from the run, placed or not.
     parts_by_id: lastPartsById,
     placements: currentSnapshot.placements,
     sheet_spacing: sheetSpacing,
     include_sheet_outline: includeSheetOutline,
+    include_unplaced: includeUnplaced,
   };
 
   setStatus("export-status", t("export_status_running"), false);
-  logLine(`export: ${path} (sheet spacing ${sheetSpacing}mm, sheet outline ${includeSheetOutline ? "on" : "off"})`);
+  logLine(`export: ${path} (sheet spacing ${sheetSpacing}mm, sheet outline ${includeSheetOutline ? "on" : "off"}, unplaced parts ${includeUnplaced ? "on" : "off"})`);
   el("btn-export").disabled = true;
   try {
-    await invoke("export_dxf_command", { path, request });
+    await invoke(format.command, { path, request });
     setStatus("export-status", t("export_status_done"), false);
     logLine(`export ok: ${path}`);
   } catch (err) {
@@ -1047,7 +1136,7 @@ window.__TAURI__.event.listen("nest-tick", (event) => {
   }
 });
 
-// Drag-and-drop DXF import - Tauri delivers dropped-file paths as a core
+// Drag-and-drop DXF/SVG import - Tauri delivers dropped-file paths as a core
 // window event (needs `dragDropEnabled: true` in tauri.conf.json's window
 // config; not a plugin, so no extra capability beyond core:event:default).
 const dropzone = el("dropzone");
@@ -1055,9 +1144,9 @@ window.__TAURI__.event.listen("tauri://drag-enter", () => dropzone.classList.add
 window.__TAURI__.event.listen("tauri://drag-leave", () => dropzone.classList.remove("drag-over"));
 window.__TAURI__.event.listen("tauri://drag-drop", (event) => {
   dropzone.classList.remove("drag-over");
-  const paths = event.payload.paths.filter((p) => p.toLowerCase().endsWith(".dxf"));
+  const paths = event.payload.paths.filter((p) => importCommandFor(p) !== null);
   if (paths.length < event.payload.paths.length) {
-    logLine(`ignored ${event.payload.paths.length - paths.length} dropped file(s) that weren't .dxf`);
+    logLine(`ignored ${event.payload.paths.length - paths.length} dropped file(s) that weren't .dxf/.svg`);
   }
   importPaths(paths);
 });

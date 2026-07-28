@@ -15,17 +15,28 @@
 
 export const translations = {
   en: {
-    heading_import_text: "IMPORT DXF",
-    tolerance_label: "TOLERANCE",
+    heading_import_text: "IMPORT DXF / SVG",
+    tolerance_label: "TOLERANCE (mm)",
     tolerance_tooltip:
-      "How closely curves (arcs/circles) are approximated with straight line segments. Lower = more accurate but more points; higher = fewer points but a coarser shape.",
+      "How closely curves (arcs/circles) are approximated with straight line segments, in millimeters. Lower = more accurate but more points; higher = fewer points but a coarser shape.",
     btn_browse: "BROWSE...",
-    dropzone_text: "or drag one or more .dxf files here",
-    rect_hint: "or add a rectangle directly (a stock sheet size, or a simple rectangular part) without a DXF file:",
+    dropzone_text: "or drag one or more .dxf/.svg files here",
+    rect_hint: "or add a rectangle directly (a stock sheet size, or a simple rectangular part) without a DXF/SVG file:",
     rect_width_label: "WIDTH (mm)",
     rect_height_label: "HEIGHT (mm)",
     rect_layer_label: "LAYER NAME",
     btn_add_rect: "ADD RECTANGLE",
+
+    svg_unit_title: "SVG UNITS",
+    svg_unit_intro: "What does one coordinate unit in this SVG file represent in real life?",
+    svg_unit_label: "FILE UNIT",
+    svg_unit_auto: "Auto-detect from file (recommended)",
+    svg_unit_mm: "Millimeters (mm)",
+    svg_unit_cm: "Centimeters (cm)",
+    svg_unit_m: "Meters (m)",
+    svg_unit_px: "Pixels (px, 96/inch)",
+    svg_unit_cancel: "CANCEL",
+    svg_unit_ok: "IMPORT",
 
     heading_roles_text: "ASSIGN ROLES",
     btn_mark_all_parts: "ALL PART",
@@ -52,13 +63,17 @@ export const translations = {
     view_attempt_tooltip:
       "Every attempt that beat the previous best while the GA ran, in the order it found them - not just the one it ended up keeping. Pick one to see that arrangement instead of the final winner.",
     unplaced_hint: "These parts could not be placed on any sheet (outlined in red below and in the list they came from):",
-    export_hint: "Export the attempt currently shown above to a DXF file:",
+    export_hint: "Export the attempt currently shown above to a file:",
+    export_format_label: "FORMAT",
     export_spacing_label: "SHEET SPACING (mm)",
     export_spacing_tooltip:
-      "A DXF file has no separate concept of 'sheets' - every sheet used gets written into the same drawing, laid out left to right. This is the gap kept between each one so they don't overlap.",
+      "Neither DXF nor SVG has a separate concept of 'sheets' - every sheet used gets written into the same drawing, laid out left to right. This is the gap kept between each one so they don't overlap.",
     export_outline_label: "INCLUDE SHEET OUTLINE",
     export_outline_tooltip: "Also write each sheet's own rectangle as a shape in the export, not just the parts placed on it.",
-    btn_export: "EXPORT DXF",
+    export_unplaced_label: "INCLUDE UNPLACED PARTS",
+    export_unplaced_tooltip:
+      "Also write every part that never got placed on any sheet, laid out in a simple non-overlapping grid after the last sheet (not nested - just kept from overlapping so you can see and handle them).",
+    btn_export: "EXPORT",
 
     margin_label: "MARGIN (mm)",
     margin_tooltip:
@@ -184,7 +199,7 @@ export const translations = {
     help_button_title: "How to use this app",
     help_title: "HOW TO USE RUSTYNESTING",
     help_intro: "RustyNesting nests parts onto stock sheets before cutting.",
-    help_step_import: "01 IMPORT — load DXF file(s), or add a rectangle by hand.",
+    help_step_import: "01 IMPORT — load DXF/SVG file(s), or add a rectangle by hand.",
     help_step_roles: "02 ASSIGN ROLES — mark each shape SHEET (stock) or PART (to cut), set quantities.",
     help_step_configure: "03 CONFIGURE — adjust margin/spacing etc. at the bottom if needed (optional).",
     help_step_run: "RUN NEST — then review and EXPORT the result.",
@@ -194,17 +209,28 @@ export const translations = {
   },
 
   vi: {
-    heading_import_text: "NHẬP DXF",
-    tolerance_label: "DUNG SAI",
+    heading_import_text: "NHẬP DXF / SVG",
+    tolerance_label: "DUNG SAI (mm)",
     tolerance_tooltip:
-      "Đường cong (cung/tròn) được xấp xỉ bằng đoạn thẳng chính xác đến mức nào. Thấp hơn = chính xác hơn nhưng nhiều điểm hơn; cao hơn = ít điểm hơn nhưng hình dạng thô hơn.",
+      "Đường cong (cung/tròn) được xấp xỉ bằng đoạn thẳng chính xác đến mức nào, tính bằng milimét. Thấp hơn = chính xác hơn nhưng nhiều điểm hơn; cao hơn = ít điểm hơn nhưng hình dạng thô hơn.",
     btn_browse: "DUYỆT TỆP...",
-    dropzone_text: "hoặc kéo thả một hoặc nhiều tệp .dxf vào đây",
-    rect_hint: "hoặc thêm trực tiếp một hình chữ nhật (kích thước tấm phôi, hoặc một chi tiết chữ nhật đơn giản) mà không cần tệp DXF:",
+    dropzone_text: "hoặc kéo thả một hoặc nhiều tệp .dxf/.svg vào đây",
+    rect_hint: "hoặc thêm trực tiếp một hình chữ nhật (kích thước tấm phôi, hoặc một chi tiết chữ nhật đơn giản) mà không cần tệp DXF/SVG:",
     rect_width_label: "CHIỀU RỘNG (mm)",
     rect_height_label: "CHIỀU CAO (mm)",
     rect_layer_label: "TÊN LỚP",
     btn_add_rect: "THÊM HÌNH CHỮ NHẬT",
+
+    svg_unit_title: "ĐƠN VỊ SVG",
+    svg_unit_intro: "Một đơn vị tọa độ trong tệp SVG này tương ứng với bao nhiêu ngoài đời thực?",
+    svg_unit_label: "ĐƠN VỊ TỆP",
+    svg_unit_auto: "Tự động nhận diện từ tệp (khuyến nghị)",
+    svg_unit_mm: "Milimét (mm)",
+    svg_unit_cm: "Xentimét (cm)",
+    svg_unit_m: "Mét (m)",
+    svg_unit_px: "Điểm ảnh (px, 96/inch)",
+    svg_unit_cancel: "HỦY",
+    svg_unit_ok: "NHẬP",
 
     heading_roles_text: "GÁN VAI TRÒ",
     btn_mark_all_parts: "TẤT CẢ = CHI TIẾT",
@@ -231,13 +257,17 @@ export const translations = {
     view_attempt_tooltip:
       "Mọi lần thử đã vượt qua kết quả tốt nhất trước đó trong quá trình chạy GA, theo thứ tự tìm thấy - không chỉ lần cuối cùng được giữ lại. Chọn một lần để xem cách sắp xếp đó thay vì kết quả cuối cùng.",
     unplaced_hint: "Các chi tiết này không thể đặt lên tấm phôi nào (viền đỏ bên dưới và trong danh sách gốc):",
-    export_hint: "Xuất lần thử đang hiển thị ở trên ra tệp DXF:",
+    export_hint: "Xuất lần thử đang hiển thị ở trên ra tệp:",
+    export_format_label: "ĐỊNH DẠNG",
     export_spacing_label: "KHOẢNG CÁCH GIỮA TẤM (mm)",
     export_spacing_tooltip:
-      "Tệp DXF không có khái niệm riêng về 'tấm phôi' - mọi tấm phôi được dùng đều ghi vào cùng một bản vẽ, xếp từ trái sang phải. Đây là khoảng cách giữ giữa các tấm để chúng không chồng lên nhau.",
+      "Cả DXF lẫn SVG đều không có khái niệm riêng về 'tấm phôi' - mọi tấm phôi được dùng đều ghi vào cùng một bản vẽ, xếp từ trái sang phải. Đây là khoảng cách giữ giữa các tấm để chúng không chồng lên nhau.",
     export_outline_label: "BAO GỒM VIỀN TẤM PHÔI",
     export_outline_tooltip: "Cũng ghi hình chữ nhật của từng tấm phôi vào tệp xuất, không chỉ các chi tiết đặt trên đó.",
-    btn_export: "XUẤT DXF",
+    export_unplaced_label: "BAO GỒM CHI TIẾT CHƯA ĐẶT",
+    export_unplaced_tooltip:
+      "Cũng ghi mọi chi tiết chưa từng được đặt lên tấm phôi nào, xếp thành lưới đơn giản không chồng lấn sau tấm phôi cuối cùng (không phải xếp nesting - chỉ để tránh chồng lấn cho bạn xem và xử lý thủ công).",
+    btn_export: "XUẤT",
 
     margin_label: "LỀ (mm)",
     margin_tooltip:
@@ -363,7 +393,7 @@ export const translations = {
     help_button_title: "Cách sử dụng ứng dụng này",
     help_title: "CÁCH SỬ DỤNG RUSTYNESTING",
     help_intro: "RustyNesting xếp các chi tiết lên tấm phôi trước khi cắt.",
-    help_step_import: "01 NHẬP — tải tệp DXF, hoặc thêm hình chữ nhật thủ công.",
+    help_step_import: "01 NHẬP — tải tệp DXF/SVG, hoặc thêm hình chữ nhật thủ công.",
     help_step_roles: "02 GÁN VAI TRÒ — đánh dấu mỗi hình là TẤM PHÔI (vật liệu) hoặc CHI TIẾT (cần cắt), đặt số lượng.",
     help_step_configure: "03 CẤU HÌNH — chỉnh lề/khoảng cách... ở dưới nếu cần (không bắt buộc).",
     help_step_run: "CHẠY XẾP HÌNH — rồi xem và XUẤT kết quả.",

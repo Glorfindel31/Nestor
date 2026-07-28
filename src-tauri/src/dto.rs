@@ -434,29 +434,47 @@ pub struct BestResultDto {
     pub sheets: Vec<PolygonDto>,
 }
 
-/// What `export_dxf_command` needs to write a nest result back out to DXF -
-/// exactly what the frontend already has after a `run_nest_command` call:
-/// the original request's `sheets` (true, unpadded geometry - the same ones
-/// `run_nest` was given, not the padded shapes it built internally),
-/// `RunNestResponse::parts_by_id` (the authoritative id -> shape mapping
-/// that call already built - see its own doc comment for why this must be
-/// the same mapping, not re-derived from a resent `parts`/quantity list),
-/// and that call's own `placements` response.
+/// What `export_dxf_command`/`export_svg_command` need to write a nest
+/// result back out to either format - shared by both (same input shape,
+/// only the on-disk format written differs) - exactly what the frontend
+/// already has after a `run_nest_command` call: the original request's
+/// `sheets` (true, unpadded geometry - the same ones `run_nest` was given,
+/// not the padded shapes it built internally), `RunNestResponse::
+/// parts_by_id` (the authoritative id -> shape mapping that call already
+/// built - see its own doc comment for why this must be the same mapping,
+/// not re-derived from a resent `parts`/quantity list), and that call's own
+/// `placements` response.
 #[derive(Deserialize, Clone, Debug)]
-pub struct ExportDxfRequest {
+pub struct ExportRequest {
     pub sheets: Vec<PolygonDto>,
+    /// Every part copy from the run, placed or not - `RunNestResponse::
+    /// parts_by_id` covers both (see its own doc comment: it's `expand_parts`'
+    /// full output, built before placement ever runs). `commands::
+    /// build_export_layouts` consumes this by removing each id `placements`
+    /// references; whatever's left over afterward *is* the unplaced set -
+    /// see `include_unplaced` below, which is why this request needs no
+    /// separate `unplaced_ids` field of its own.
     pub parts_by_id: HashMap<usize, PolygonDto>,
     pub placements: Vec<SheetPlacementDto>,
     /// Gap, in the same units as the geometry (mm), kept between
-    /// consecutive sheets when laying them out left-to-right in one DXF
-    /// drawing space - a DXF file has no notion of separate "sheets", so
+    /// consecutive sheets when laying them out left-to-right in one drawing
+    /// space - neither DXF nor SVG has a notion of separate "sheets", so
     /// without this every sheet's parts would land in the same place and
-    /// overlap.
+    /// overlap. Also used as the spacing between rows/parts when
+    /// `include_unplaced` packs the leftover parts (see below).
     pub sheet_spacing: f64,
-    /// Whether to also write each used sheet's own outline as its own
-    /// `LWPOLYLINE` (on the sheet's original layer), or omit it and write
-    /// only the parts.
+    /// Whether to also write each used sheet's own outline (on the sheet's
+    /// original layer), or omit it and write only the parts.
     pub include_sheet_outline: bool,
+    /// Whether to also write every part that never got placed on any sheet,
+    /// laid out in a simple non-overlapping grid after the last real sheet
+    /// (`geometry::dxf_export::pack_unplaced_parts` - not a nesting pass,
+    /// just keeps them from overlapping each other for visibility/manual
+    /// handling). Defaults to `false` (today's behavior: export only what
+    /// was actually placed) for old saved requests/API callers that predate
+    /// this field.
+    #[serde(default)]
+    pub include_unplaced: bool,
 }
 
 /// Payload for the `"nest-progress"` event `run_nest_command` emits once per

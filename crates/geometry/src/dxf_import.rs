@@ -72,7 +72,7 @@ pub struct LayeredPolygon {
 }
 
 impl LayeredPolygon {
-    fn new(points: Vec<Point>, layer: String, is_circle: Option<Circle>) -> Self {
+    pub(crate) fn new(points: Vec<Point>, layer: String, is_circle: Option<Circle>) -> Self {
         LayeredPolygon {
             points,
             layer,
@@ -182,7 +182,7 @@ fn arc_step_angle(radius: f64, tolerance: f64) -> f64 {
     (2.0 * ratio.acos()).max(0.001)
 }
 
-fn segment_count(total_angle: f64, radius: f64, tolerance: f64) -> u32 {
+pub(crate) fn segment_count(total_angle: f64, radius: f64, tolerance: f64) -> u32 {
     let step = arc_step_angle(radius, tolerance);
     let n = (total_angle.abs() / step).ceil() as u32;
     n.clamp(MIN_ARC_SEGMENTS, MAX_ARC_SEGMENTS)

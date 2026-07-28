@@ -14,5 +14,7 @@ pub mod point;
 pub mod polygon;
 pub mod simplify;
 pub mod simplify_polygon;
+pub mod svg_export;
+pub mod svg_import;
 
 pub use point::Point;

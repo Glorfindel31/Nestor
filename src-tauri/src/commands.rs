@@ -32,7 +32,7 @@ use nesting::repack;
 use tauri::{Emitter, Manager};
 
 use crate::dto::{
-    expand_parts, BestResultDto, ExportDxfRequest, NestConfigDto, NestProgressDto, NestRunCompleteDto, NestRunStartDto, NestSnapshotDto, NestTickDto,
+    expand_parts, BestResultDto, ExportRequest, NestConfigDto, NestProgressDto, NestRunCompleteDto, NestRunStartDto, NestSnapshotDto, NestTickDto,
     PlacedPartDto, PolygonDto, RepackSheetRequest, RepackSheetResponse, RunNestRequest, RunNestResponse, SheetPlacementDto,
 };
 
@@ -211,13 +211,35 @@ pub fn import_dxf(path: &str, curve_tolerance: f64) -> Result<Vec<PolygonDto>, S
     Ok(tree.iter().map(PolygonDto::from).collect())
 }
 
-/// Writes the given nest result back out to a DXF file at `path` - new
-/// scope, not a port (the original app never wrote DXF locally at all).
-/// Takes exactly what the frontend
-/// already has after a `run_nest_command` call (`request.sheets` for the
-/// *true*, unpadded geometry - export never uses the internally padded
-/// shapes `run_nest` builds - `response.parts_by_id`, and that same call's
-/// `response.placements`) rather than re-deriving anything server-side.
+/// Reads an SVG file from disk and returns its closed profiles as a
+/// parent/hole tree, in exactly the same `PolygonDto` shape `import_dxf`
+/// returns - the frontend treats the two import paths identically past this
+/// point. DXF stays the primary/first-class import path (raw file units, no
+/// conversion at all); SVG import additionally resolves the file's
+/// coordinate system into millimeters and rejects imperial units outright -
+/// see `geometry::svg_import`'s module doc for exactly which units convert
+/// and which don't.
+///
+/// `unit_override` (`"mm"`/`"cm"`/`"m"`/`"px"`) is what the frontend's
+/// per-import unit-picker dialog sends - a real SVG's `width`/`height`
+/// often isn't a trustworthy physical size (many design tools export
+/// unitless/arbitrary user units), so the UI asks the user to confirm or
+/// override it on every SVG import rather than trusting auto-detection
+/// silently. `None` falls back to `geometry::svg_import`'s own
+/// `viewBox`/`width`/`height` auto-detection. No `TEXT`/`MTEXT`-equivalent
+/// attachment (SVG import doesn't support text elements yet, see that
+/// module's doc for scope).
+pub fn import_svg(path: &str, curve_tolerance: f64, unit_override: Option<&str>) -> Result<Vec<PolygonDto>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("couldn't read {path}: {e}"))?;
+    let flat = geometry::svg_import::parse_svg(&text, curve_tolerance, unit_override)?;
+    let tree = geometry::dxf_import::build_polygon_tree(flat);
+    Ok(tree.iter().map(PolygonDto::from).collect())
+}
+
+/// Builds the `Vec<SheetLayout>` both `export_dxf`/`export_svg` write out -
+/// shared so the "resolve placements against parts_by_id" logic (and the
+/// id-integrity guarantees below) exist in exactly one place, not
+/// duplicated per format.
 ///
 /// Deliberately takes `parts_by_id` straight from `RunNestResponse`, not a
 /// `parts`/quantity list to re-run `expand_parts` on: that id assignment is
@@ -227,7 +249,17 @@ pub fn import_dxf(path: &str, curve_tolerance: f64) -> Result<Vec<PolygonDto>, S
 /// nothing enforces that. A mismatch there wouldn't error; `parts_by_id.get(&p.id)`
 /// would still resolve to *some* entry, silently writing the wrong part's
 /// outline at a placement's coordinates.
-pub fn export_dxf(path: &str, request: ExportDxfRequest) -> Result<(), String> {
+///
+/// `request.include_unplaced`: `parts_by_id` covers every part copy from
+/// the run, placed or not (see `ExportRequest::parts_by_id`'s own doc
+/// comment); the loop below removes each id `placements` actually
+/// references, so whatever's left in the map afterward *is* the unplaced
+/// set, with no separate `unplaced_ids` field needed on the request at all.
+/// When requested, that leftover set gets packed (`geometry::dxf_export::
+/// pack_unplaced_parts`) and appended as one more `SheetLayout`, which both
+/// exporters' own left-to-right multi-sheet layout then places automatically
+/// after the last real sheet - no format-specific handling needed for it.
+fn build_export_layouts(request: ExportRequest) -> Result<Vec<SheetLayout>, String> {
     if request.sheet_spacing < 0.0 {
         return Err("sheet spacing must be >= 0".into());
     }
@@ -235,7 +267,7 @@ pub fn export_dxf(path: &str, request: ExportDxfRequest) -> Result<(), String> {
     let true_sheets: Vec<LayeredPolygon> = request.sheets.into_iter().map(Into::into).collect();
     let mut parts_by_id: HashMap<usize, LayeredPolygon> = request.parts_by_id.into_iter().map(|(id, dto)| (id, dto.into())).collect();
 
-    let layouts: Vec<SheetLayout> = request
+    let mut layouts: Vec<SheetLayout> = request
         .placements
         .into_iter()
         .map(|sp| {
@@ -244,14 +276,15 @@ pub fn export_dxf(path: &str, request: ExportDxfRequest) -> Result<(), String> {
                 .parts
                 .into_iter()
                 .map(|p| {
-                    // `.remove`, not `.get().cloned()`: `parts_by_id` is
-                    // local, owned, and never read again after this loop -
-                    // every real id appears in exactly one placement, so
-                    // taking ownership here is free (no clone) and, as a
-                    // bonus, turns an accidental duplicate placement id
-                    // into a hard "unknown part id" error (the second
-                    // occurrence finds it already removed) instead of
-                    // silently succeeding twice.
+                    // `.remove`, not `.get().cloned()`: every real id
+                    // appears in exactly one placement, so taking ownership
+                    // here is free (no clone) and, as a bonus, turns an
+                    // accidental duplicate placement id into a hard
+                    // "unknown part id" error (the second occurrence finds
+                    // it already removed) instead of silently succeeding
+                    // twice. It's also what makes the leftover-map trick
+                    // above work: only ids never referenced by any
+                    // placement survive this loop.
                     let shape = parts_by_id.remove(&p.id).ok_or_else(|| format!("placement references unknown part id {}", p.id))?;
                     Ok(PlacedShape { shape, x: p.x, y: p.y, rotation: p.rotation })
                 })
@@ -260,8 +293,50 @@ pub fn export_dxf(path: &str, request: ExportDxfRequest) -> Result<(), String> {
         })
         .collect::<Result<Vec<_>, String>>()?;
 
-    let drawing = geometry::dxf_export::export_dxf(&layouts, request.sheet_spacing, request.include_sheet_outline);
+    if request.include_unplaced && !parts_by_id.is_empty() {
+        // Sorted by id for deterministic, reproducible output - a
+        // `HashMap`'s iteration order isn't stable across runs, and nothing
+        // about "which never-placed part ends up in which packed row"
+        // should vary between two exports of the same result.
+        let mut remaining: Vec<(usize, LayeredPolygon)> = parts_by_id.into_iter().collect();
+        remaining.sort_by_key(|(id, _)| *id);
+        let shapes: Vec<LayeredPolygon> = remaining.into_iter().map(|(_, shape)| shape).collect();
+        layouts.push(geometry::dxf_export::pack_unplaced_parts(&shapes, request.sheet_spacing));
+    }
+
+    Ok(layouts)
+}
+
+/// Writes the given nest result back out to a DXF file at `path` - new
+/// scope, not a port (the original app never wrote DXF locally at all).
+/// Takes exactly what the frontend already has after a `run_nest_command`
+/// call (`request.sheets` for the *true*, unpadded geometry - export never
+/// uses the internally padded shapes `run_nest` builds - `response.
+/// parts_by_id`, and that same call's `response.placements`) rather than
+/// re-deriving anything server-side. See `build_export_layouts` for the
+/// shared placement-resolution/unplaced-packing logic.
+pub fn export_dxf(path: &str, request: ExportRequest) -> Result<(), String> {
+    let sheet_spacing = request.sheet_spacing;
+    let include_sheet_outline = request.include_sheet_outline;
+    let layouts = build_export_layouts(request)?;
+
+    let drawing = geometry::dxf_export::export_dxf(&layouts, sheet_spacing, include_sheet_outline);
     drawing.save_file(path).map_err(|e| format!("couldn't write {path}: {e}"))
+}
+
+/// Writes the given nest result back out to an SVG file at `path` - the SVG
+/// counterpart to `export_dxf`, same input shape (`ExportRequest`), same
+/// `build_export_layouts` call, only the on-disk format differs
+/// (`geometry::svg_export::export_svg`). See that module's doc comment for
+/// what's scoped out of SVG export (no text, circles round-trip as
+/// polygons) relative to DXF export.
+pub fn export_svg(path: &str, request: ExportRequest) -> Result<(), String> {
+    let sheet_spacing = request.sheet_spacing;
+    let include_sheet_outline = request.include_sheet_outline;
+    let layouts = build_export_layouts(request)?;
+
+    let svg = geometry::svg_export::export_svg(&layouts, sheet_spacing, include_sheet_outline);
+    std::fs::write(path, svg).map_err(|e| format!("couldn't write {path}: {e}"))
 }
 
 /// The manual, click-a-sheet counterpart to `run_nest_with_progress`'s
@@ -1013,8 +1088,22 @@ pub async fn import_dxf_command(path: String, curve_tolerance: f64) -> Result<Ve
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn export_dxf_command(path: String, request: ExportDxfRequest) -> Result<(), String> {
+pub async fn import_svg_command(path: String, curve_tolerance: f64, unit_override: Option<String>) -> Result<Vec<PolygonDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || import_svg(&path, curve_tolerance, unit_override.as_deref()))
+        .await
+        .map_err(|e| format!("import task panicked: {e}"))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn export_dxf_command(path: String, request: ExportRequest) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || export_dxf(&path, request))
+        .await
+        .map_err(|e| format!("export task panicked: {e}"))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn export_svg_command(path: String, request: ExportRequest) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || export_svg(&path, request))
         .await
         .map_err(|e| format!("export task panicked: {e}"))?
 }
@@ -1786,12 +1875,13 @@ mod tests {
         let response = run_nest(request).expect("should nest successfully");
 
         let out_path = std::env::temp_dir().join("rustynesting_export_dxf_test.dxf");
-        let export_request = ExportDxfRequest {
+        let export_request = ExportRequest {
             sheets,
             parts_by_id: response.parts_by_id,
             placements: response.placements,
             sheet_spacing: 20.0,
             include_sheet_outline: true,
+            include_unplaced: false,
         };
         export_dxf(out_path.to_str().unwrap(), export_request).expect("export should succeed");
 
@@ -1811,8 +1901,14 @@ mod tests {
         let response = run_nest(request).expect("should nest successfully");
 
         let out_path = std::env::temp_dir().join("rustynesting_export_dxf_no_outline_test.dxf");
-        let export_request =
-            ExportDxfRequest { sheets, parts_by_id: response.parts_by_id, placements: response.placements, sheet_spacing: 10.0, include_sheet_outline: false };
+        let export_request = ExportRequest {
+            sheets,
+            parts_by_id: response.parts_by_id,
+            placements: response.placements,
+            sheet_spacing: 10.0,
+            include_sheet_outline: false,
+            include_unplaced: false,
+        };
         export_dxf(out_path.to_str().unwrap(), export_request).expect("export should succeed");
 
         let drawing = Drawing::load_file(&out_path).expect("exported file should be a readable DXF");
@@ -1829,8 +1925,14 @@ mod tests {
         let request = RunNestRequest { sheets: sheets.clone(), parts, config: config(1) };
         let response = run_nest(request).expect("should nest successfully");
 
-        let export_request =
-            ExportDxfRequest { sheets, parts_by_id: response.parts_by_id, placements: response.placements, sheet_spacing: -5.0, include_sheet_outline: false };
+        let export_request = ExportRequest {
+            sheets,
+            parts_by_id: response.parts_by_id,
+            placements: response.placements,
+            sheet_spacing: -5.0,
+            include_sheet_outline: false,
+            include_unplaced: false,
+        };
         assert!(export_dxf("unused.dxf", export_request).is_err());
     }
 
@@ -1840,7 +1942,7 @@ mod tests {
     /// correct if that resent list exactly matched what actually produced
     /// the ids in `placements` - nothing enforced that, and a mismatch
     /// wouldn't error, it would just silently write the wrong part's
-    /// outline at a placement's coordinates. Now that `ExportDxfRequest`
+    /// outline at a placement's coordinates. Now that `ExportRequest`
     /// takes `parts_by_id` directly (no re-derivation possible - the field
     /// doesn't exist to re-derive from), this proves export genuinely uses
     /// exactly the mapping it's given: two distinguishably-sized parts at
@@ -1859,7 +1961,7 @@ mod tests {
         }];
 
         let out_path = std::env::temp_dir().join("rustynesting_export_dxf_id_mapping_test.dxf");
-        let export_request = ExportDxfRequest { sheets, parts_by_id, placements, sheet_spacing: 20.0, include_sheet_outline: false };
+        let export_request = ExportRequest { sheets, parts_by_id, placements, sheet_spacing: 20.0, include_sheet_outline: false, include_unplaced: false };
         export_dxf(out_path.to_str().unwrap(), export_request).expect("export should succeed");
 
         let drawing = Drawing::load_file(&out_path).expect("exported file should be a readable DXF");
@@ -1898,7 +2000,7 @@ mod tests {
         let placements = vec![SheetPlacementDto { sheet_index: 0, parts: vec![PlacedPartDto { id: 0, x: 20.0, y: 0.0, rotation: 0.0 }] }];
 
         let out_path = std::env::temp_dir().join("rustynesting_export_dxf_text_dto_test.dxf");
-        let export_request = ExportDxfRequest { sheets, parts_by_id, placements, sheet_spacing: 20.0, include_sheet_outline: false };
+        let export_request = ExportRequest { sheets, parts_by_id, placements, sheet_spacing: 20.0, include_sheet_outline: false, include_unplaced: false };
         export_dxf(out_path.to_str().unwrap(), export_request).expect("export should succeed");
 
         let drawing = Drawing::load_file(&out_path).expect("exported file should be a readable DXF");
@@ -1909,6 +2011,87 @@ mod tests {
         // local (1,1) shifted by the part's placement (20,0)
         assert!((texts[0].location.x - 21.0).abs() < 1e-9, "x was {}", texts[0].location.x);
         assert!((texts[0].location.y - 1.0).abs() < 1e-9, "y was {}", texts[0].location.y);
+
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn export_dxf_omits_never_placed_parts_by_default() {
+        // A single small sheet that can only fit one 10x10 part - the other
+        // two (quantity 3 requested) can never be placed anywhere, since
+        // there's only one sheet in the whole job.
+        let sheets = vec![square_dto(12.0)];
+        let parts = vec![PartDto { polygon: square_dto(10.0), quantity: 3 }];
+        let request = RunNestRequest { sheets: sheets.clone(), parts, config: config(2) };
+        let response = run_nest(request).expect("should nest successfully");
+        let placed_count: usize = response.placements.iter().map(|sp| sp.parts.len()).sum();
+        assert!(placed_count < 3, "expected fewer than 3 of 3 parts placed on a single 12x12 sheet, got {placed_count}");
+
+        let out_path = std::env::temp_dir().join("rustynesting_export_dxf_no_unplaced_test.dxf");
+        let export_request = ExportRequest {
+            sheets,
+            parts_by_id: response.parts_by_id,
+            placements: response.placements,
+            sheet_spacing: 20.0,
+            include_sheet_outline: false,
+            include_unplaced: false,
+        };
+        export_dxf(out_path.to_str().unwrap(), export_request).expect("export should succeed");
+
+        let drawing = Drawing::load_file(&out_path).expect("exported file should be a readable DXF");
+        let polyline_count = drawing.entities().filter(|e| matches!(e.specific, dxf::entities::EntityType::LwPolyline(_))).count();
+        assert_eq!(polyline_count, placed_count, "only placed parts should be written when include_unplaced is false (the default)");
+
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn export_dxf_can_include_never_placed_parts_when_requested() {
+        let sheets = vec![square_dto(12.0)];
+        let parts = vec![PartDto { polygon: square_dto(10.0), quantity: 3 }];
+        let request = RunNestRequest { sheets: sheets.clone(), parts, config: config(2) };
+        let response = run_nest(request).expect("should nest successfully");
+        assert!(response.unplaced_count > 0, "expected at least one unplaceable part on a single 12x12 sheet with three 10x10 parts");
+
+        let out_path = std::env::temp_dir().join("rustynesting_export_dxf_with_unplaced_test.dxf");
+        let export_request = ExportRequest {
+            sheets,
+            parts_by_id: response.parts_by_id,
+            placements: response.placements,
+            sheet_spacing: 20.0,
+            include_sheet_outline: false,
+            include_unplaced: true,
+        };
+        export_dxf(out_path.to_str().unwrap(), export_request).expect("export should succeed");
+
+        let drawing = Drawing::load_file(&out_path).expect("exported file should be a readable DXF");
+        let polyline_count = drawing.entities().filter(|e| matches!(e.specific, dxf::entities::EntityType::LwPolyline(_))).count();
+        assert_eq!(polyline_count, 3, "all 3 parts (placed + packed-unplaced) should be written when include_unplaced is set");
+
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn export_svg_command_writes_a_readable_svg_file() {
+        let sheets = vec![square_dto(100.0)];
+        let parts = vec![PartDto { polygon: square_dto(10.0), quantity: 2 }];
+        let request = RunNestRequest { sheets: sheets.clone(), parts, config: config(2) };
+        let response = run_nest(request).expect("should nest successfully");
+
+        let out_path = std::env::temp_dir().join("rustynesting_export_svg_test.svg");
+        let export_request = ExportRequest {
+            sheets,
+            parts_by_id: response.parts_by_id,
+            placements: response.placements,
+            sheet_spacing: 20.0,
+            include_sheet_outline: true,
+            include_unplaced: false,
+        };
+        export_svg(out_path.to_str().unwrap(), export_request).expect("export should succeed");
+
+        let contents = std::fs::read_to_string(&out_path).expect("exported file should be readable");
+        assert!(contents.starts_with("<?xml"), "should be a well-formed XML document: {contents}");
+        assert_eq!(contents.matches("<path").count(), 3, "1 sheet outline + 2 placed parts");
 
         let _ = std::fs::remove_file(&out_path);
     }

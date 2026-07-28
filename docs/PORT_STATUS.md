@@ -15,6 +15,16 @@ the "Dropped from scope" section below instead of "not started." Hole/
 interior-feature nesting (e.g. drilled holes) stays fully in scope — nothing
 about hole handling was simplified away, only the file format changed.
 
+**Scope reopened, post-Phase-6:** SVG import is back as an *additive* second
+import path (`geometry::svg_import`) — DXF stays primary/first-class and
+export stays DXF-only, unchanged. Not a revival of `svgparser.js`/
+`domparser.ts` (those rows below still correctly describe why the *original*
+files aren't ported); this is a new, from-scratch parser producing the same
+`dxf_import::LayeredPolygon` tree shape. Metric-only is an explicit product
+requirement: `mm`/`cm`/`m`/`px`/unitless convert, `in`/`pt`/`pc`/`ft`/`yd`
+are hard errors. See `geometry::svg_import`'s module doc comment for exact
+element/command coverage.
+
 ## Known gotchas to preserve (do not silently "fix" away during the port)
 
 - Rotation-angle-grid quirk: `rotations=6` produces bad angles for
