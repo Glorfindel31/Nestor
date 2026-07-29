@@ -1,5 +1,8 @@
 # RustyNesting
 
+Help me paye for tokens
+https://ko-fi.com/glorfindel31
+
 A from-scratch Rust + Tauri rewrite of [Deepnest](https://deepnest.net/), the
 open-source nesting tool for laser/CNC/waterjet cutting. Import DXF parts and
 stock sheets, let a genetic-algorithm engine pack the parts onto the sheets
