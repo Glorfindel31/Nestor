@@ -112,7 +112,7 @@ fn main() {
     // geometry::clearance's module doc), included for parity with the real
     // pipeline rather than bypassing it.
     let padded_points = prepare_part(&hat.points, 0.0).expect("hat shape should offset cleanly at zero spacing");
-    let padded_hat = LayeredPolygon { points: padded_points, layer: hat.layer.clone(), is_circle: None, children: hat.children.clone(), texts: hat.texts.clone() };
+    let padded_hat = LayeredPolygon { points: padded_points, layer: hat.layer.clone(), is_circle: None, children: hat.children.clone(), texts: hat.texts.clone(), real_boundary: None };
 
     let mut parts_by_id = std::collections::HashMap::new();
     // All 252 instances share one source id (0) - they're all copies of the
@@ -131,7 +131,7 @@ fn main() {
 
     let sheet_raw = vec![Point::new(0.0, 0.0), Point::new(SHEET_SIZE, 0.0), Point::new(SHEET_SIZE, SHEET_SIZE), Point::new(0.0, SHEET_SIZE)];
     let sheet_points = prepare_sheet(&sheet_raw, 0.0, 0.0).expect("500x500 sheet should be usable at zero margin/spacing");
-    let sheet = LayeredPolygon { points: sheet_points, layer: "SHEET".into(), is_circle: None, children: Vec::new(), texts: Vec::new() };
+    let sheet = LayeredPolygon { points: sheet_points, layer: "SHEET".into(), is_circle: None, children: Vec::new(), texts: Vec::new(), real_boundary: None };
     let sheets = vec![sheet]; // exactly one sheet - this is a single-sheet packing-density benchmark, not a multi-sheet job
 
     let placement_config = PlacementConfig { placement_type, rotations, dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD, curve_tolerance: CURVE_TOLERANCE };

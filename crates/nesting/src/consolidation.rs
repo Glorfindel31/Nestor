@@ -308,6 +308,7 @@ mod tests {
             is_circle: None,
             children: Vec::new(),
             texts: Vec::new(),
+            real_boundary: None,
         }
     }
 

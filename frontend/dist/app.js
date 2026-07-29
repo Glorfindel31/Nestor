@@ -16,7 +16,7 @@ import { getAccent, getScaleName, setAccent, setScale, applySavedPrefs } from ".
 
 const invoke = window.__TAURI__.core.invoke;
 
-/** @type {{layer: string, points: {x:number,y:number}[], is_circle: unknown, children: unknown[], _uiId: number}[]} */
+/** @type {{layer: string, points: {x:number,y:number}[], is_circle: unknown, children: unknown[], real_boundary: unknown, _uiId: number}[]} */
 let importedShapes = [];
 
 // Stable per-shape identity for table rows, independent of array position -
@@ -476,7 +476,14 @@ function handleAddRectangle() {
 }
 
 function shapeToPolygonDto(shape) {
-  return { points: shape.points, layer: shape.layer, is_circle: shape.is_circle ?? null, children: shape.children ?? [], texts: shape.texts ?? [] };
+  return {
+    points: shape.points,
+    layer: shape.layer,
+    is_circle: shape.is_circle ?? null,
+    children: shape.children ?? [],
+    texts: shape.texts ?? [],
+    real_boundary: shape.real_boundary ?? null,
+  };
 }
 
 function buildRequest() {

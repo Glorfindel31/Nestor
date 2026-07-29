@@ -101,7 +101,7 @@ fn load_parts() -> HashMap<usize, LayeredPolygon> {
             };
             parts_by_id.insert(
                 next_id,
-                LayeredPolygon { points: expanded_points, layer: root.layer, is_circle: None, children: root.children, texts: root.texts },
+                LayeredPolygon { points: expanded_points, layer: root.layer, is_circle: None, children: root.children, texts: root.texts, real_boundary: None },
             );
             next_id += 1;
         }
@@ -124,7 +124,7 @@ fn build_sheet() -> LayeredPolygon {
     // the sheet's own inset here has to be net of that padding, which is
     // exactly what `prepare_sheet` computes).
     let points = prepare_sheet(&raw, MARGIN, SPACING).expect("margin/spacing should leave a usable sheet at these dimensions");
-    LayeredPolygon { points, layer: "SHEET".into(), is_circle: None, children: Vec::new(), texts: Vec::new() }
+    LayeredPolygon { points, layer: "SHEET".into(), is_circle: None, children: Vec::new(), texts: Vec::new(), real_boundary: None }
 }
 
 /// Loads the fixture set, builds the sheet pool, and sanity-checks

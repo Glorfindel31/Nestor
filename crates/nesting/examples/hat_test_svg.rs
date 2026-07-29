@@ -79,7 +79,7 @@ fn run_job(label: &str, hat: LayeredPolygon, part_count: usize, run_seconds: u64
     println!("[{label}] hat shape: {} vertices, raw area {:.4}mm2, layer={:?}, is_circle={:?}", hat.points.len(), raw_area, hat.layer, hat.is_circle);
 
     let padded_points = prepare_part(&hat.points, 0.0).expect("hat shape should offset cleanly at zero spacing");
-    let padded_hat = LayeredPolygon { points: padded_points, layer: hat.layer.clone(), is_circle: None, children: hat.children.clone(), texts: hat.texts.clone() };
+    let padded_hat = LayeredPolygon { points: padded_points, layer: hat.layer.clone(), is_circle: None, children: hat.children.clone(), texts: hat.texts.clone(), real_boundary: None };
 
     let mut parts_by_id = std::collections::HashMap::new();
     let mut shape_ids = std::collections::HashMap::new();
@@ -91,7 +91,7 @@ fn run_job(label: &str, hat: LayeredPolygon, part_count: usize, run_seconds: u64
 
     let sheet_raw = vec![Point::new(0.0, 0.0), Point::new(SHEET_SIZE, 0.0), Point::new(SHEET_SIZE, SHEET_SIZE), Point::new(0.0, SHEET_SIZE)];
     let sheet_points = prepare_sheet(&sheet_raw, 0.0, 0.0).expect("500x500 sheet should be usable at zero margin/spacing");
-    let sheet = LayeredPolygon { points: sheet_points, layer: "SHEET".into(), is_circle: None, children: Vec::new(), texts: Vec::new() };
+    let sheet = LayeredPolygon { points: sheet_points, layer: "SHEET".into(), is_circle: None, children: Vec::new(), texts: Vec::new(), real_boundary: None };
     let sheets = vec![sheet];
 
     let rotations = 2u32;

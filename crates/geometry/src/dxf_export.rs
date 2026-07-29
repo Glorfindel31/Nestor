@@ -11,14 +11,17 @@
 //! the result is laid out left-to-right, separated by `sheet_spacing`, in
 //! the order given.
 //!
-//! **Simplification, not a bug**: a part that was a true circle on import
-//! (`LayeredPolygon::is_circle`) is written back out as its tessellated
-//! polygon approximation (`LWPOLYLINE`), not a true DXF `CIRCLE` entity -
-//! reusing `rotate_layered_polygon`/`shift_layered_polygon`'s existing
-//! points-only transform keeps this to one code path instead of two, at
-//! the cost of a real circle re-importing as a many-sided polygon instead
-//! of a circle. Visually indistinguishable at normal curve tolerances;
-//! revisit if a caller actually needs true circle round-tripping.
+//! A part that was a true circle on import (`LayeredPolygon::is_circle`) is
+//! written back out as a real DXF `CIRCLE` entity, not its tessellated
+//! polygon approximation - `is_circle`'s center already survives
+//! `rotate_layered_polygon`/`shift_layered_polygon` untouched (both
+//! transform it the same way they transform `points`), so `add_node` just
+//! reads it straight off the already-placed shape. A part with retained
+//! bulge geometry (`LayeredPolygon::real_boundary` - rounded-corner
+//! LWPOLYLINE segments) similarly writes real per-vertex arc `bulge`
+//! values instead of `0.0`. Only geometry with neither (hand-drawn shapes,
+//! SVG-imported parts, unsupported entity types) falls back to the plain
+//! tessellated `LWPOLYLINE`.
 //!
 //! Each node's `texts` (labels/part numbers attached on import - see
 //! `dxf_import`'s module doc) are written back out too, as the same entity
@@ -27,7 +30,7 @@
 //! to the shape - `add_node` just emits their current position/rotation
 //! as-is, the same way it does for `points`.
 
-use dxf::entities::{Entity, EntityCommon, EntityType, LwPolyline, MText, Text};
+use dxf::entities::{Circle, Entity, EntityCommon, EntityType, LwPolyline, MText, Text};
 use dxf::{Drawing, LwPolylineVertex, Point as DxfPoint};
 
 use crate::dxf_import::{rotate_layered_polygon, shift_layered_polygon, LayeredPolygon, TextAnnotation};
@@ -105,7 +108,7 @@ pub fn pack_unplaced_parts(parts: &[LayeredPolygon], spacing: f64) -> SheetLayou
         Point::new(0.0, total_height),
     ];
     SheetLayout {
-        sheet: LayeredPolygon { points: sheet_points, layer: "UNPLACED".to_string(), is_circle: None, children: Vec::new(), texts: Vec::new() },
+        sheet: LayeredPolygon { points: sheet_points, layer: "UNPLACED".to_string(), is_circle: None, children: Vec::new(), texts: Vec::new(), real_boundary: None },
         parts: placed,
     }
 }
@@ -154,7 +157,22 @@ pub fn export_dxf(sheets: &[SheetLayout], sheet_spacing: f64, include_sheet_outl
 /// into every child - a shape (part or sheet) is a tree, and every node in
 /// it needs to survive the round trip on its own original layer.
 fn add_node(drawing: &mut Drawing, shape: &LayeredPolygon) {
-    if shape.points.len() >= 2 {
+    if let Some(circle) = shape.is_circle {
+        drawing.add_entity(Entity {
+            common: EntityCommon { layer: shape.layer.clone(), ..Default::default() },
+            specific: EntityType::Circle(Circle { center: DxfPoint::new(circle.cx, circle.cy, 0.0), radius: circle.r, ..Default::default() }),
+        });
+    } else if let Some(real_boundary) = &shape.real_boundary {
+        let mut poly = LwPolyline {
+            vertices: real_boundary.iter().map(|v| LwPolylineVertex { x: v.point.x, y: v.point.y, bulge: v.bulge, ..Default::default() }).collect(),
+            ..Default::default()
+        };
+        poly.set_is_closed(true);
+        drawing.add_entity(Entity {
+            common: EntityCommon { layer: shape.layer.clone(), ..Default::default() },
+            specific: EntityType::LwPolyline(poly),
+        });
+    } else if shape.points.len() >= 2 {
         let mut poly = LwPolyline {
             vertices: shape.points.iter().map(|p| LwPolylineVertex { x: p.x, y: p.y, bulge: 0.0, ..Default::default() }).collect(),
             ..Default::default()
@@ -213,6 +231,7 @@ mod tests {
             is_circle: None,
             children: Vec::new(),
             texts: Vec::new(),
+            real_boundary: None,
         }
     }
 
@@ -375,5 +394,60 @@ mod tests {
     fn pack_unplaced_parts_handles_an_empty_list() {
         let layout = pack_unplaced_parts(&[], 5.0);
         assert!(layout.parts.is_empty());
+    }
+
+    /// A part that was a true circle on import must round-trip as a real
+    /// `CIRCLE` entity on export, not a tessellated `LWPOLYLINE` - and its
+    /// center must reflect the placement's own rotation+translation, the
+    /// same as `points` would.
+    #[test]
+    fn a_true_circle_part_exports_as_a_real_circle_entity_at_its_placed_position() {
+        let circle_shape = LayeredPolygon {
+            points: crate::dxf_import::tessellate_circle(0.0, 0.0, 5.0, 0.1),
+            layer: "CUT".into(),
+            is_circle: Some(crate::circular_nfp::Circle { cx: 0.0, cy: 0.0, r: 5.0 }),
+            children: Vec::new(),
+            texts: Vec::new(),
+            real_boundary: None,
+        };
+        // placed at (50, 30) - rotation is a no-op for a circle's center at
+        // the origin, but exercises the same rotate-then-shift pipeline
+        // every other part goes through.
+        let layout = SheetLayout { sheet: square(200.0), parts: vec![PlacedShape { shape: circle_shape, x: 50.0, y: 30.0, rotation: 45.0 }] };
+        let drawing = export_dxf(std::slice::from_ref(&layout), 20.0, false);
+
+        let circles: Vec<&Circle> = drawing.entities().filter_map(|e| if let EntityType::Circle(c) = &e.specific { Some(c) } else { None }).collect();
+        assert_eq!(circles.len(), 1, "circle part must export as a real CIRCLE entity, not a tessellated LwPolyline");
+        assert!((circles[0].center.x - 50.0).abs() < 1e-9, "x was {}", circles[0].center.x);
+        assert!((circles[0].center.y - 30.0).abs() < 1e-9, "y was {}", circles[0].center.y);
+        assert!((circles[0].radius - 5.0).abs() < 1e-9);
+        assert_eq!(entities_on_layer(&drawing, "CUT").len(), 0, "no tessellated LwPolyline should be written for a true circle");
+    }
+
+    /// A part with a retained bulge boundary (rounded corner) must export
+    /// with real per-vertex `bulge` values, not the flat `0.0` a purely
+    /// tessellated part gets - and those vertices must reflect the
+    /// placement's rotation+translation.
+    #[test]
+    fn a_part_with_a_real_boundary_exports_with_real_bulge_values() {
+        let bulge_shape = LayeredPolygon {
+            points: vec![Point::new(1.0, 0.0), Point::new(0.0, 1.0)], // tessellated approximation, deliberately coarse/wrong-looking
+            layer: "CUT".into(),
+            is_circle: None,
+            children: Vec::new(),
+            texts: Vec::new(),
+            real_boundary: Some(vec![
+                crate::dxf_import::RealVertex { point: Point::new(1.0, 0.0), bulge: 0.5 },
+                crate::dxf_import::RealVertex { point: Point::new(0.0, 1.0), bulge: 0.0 },
+            ]),
+        };
+        let layout = SheetLayout { sheet: square(200.0), parts: vec![PlacedShape { shape: bulge_shape, x: 10.0, y: 0.0, rotation: 0.0 }] };
+        let drawing = export_dxf(std::slice::from_ref(&layout), 20.0, false);
+
+        let parts = entities_on_layer(&drawing, "CUT");
+        assert_eq!(parts.len(), 1);
+        let bulges: Vec<f64> = parts[0].vertices.iter().map(|v| v.bulge).collect();
+        assert_eq!(bulges, vec![0.5, 0.0], "the real bulge value must be written, not the tessellated 0.0");
+        assert!((parts[0].vertices[0].x - 11.0).abs() < 1e-9, "real_boundary point must be shifted the same as points");
     }
 }

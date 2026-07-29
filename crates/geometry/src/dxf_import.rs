@@ -57,6 +57,20 @@ pub struct TextAnnotation {
     pub is_multiline: bool,
 }
 
+/// One original LWPOLYLINE vertex, kept verbatim (not tessellated) so a
+/// rounded-corner part can be written back out on export as a real arc
+/// instead of a many-sided polygon approximation. `bulge` is DXF's own
+/// `tan(included_angle / 4)` encoding of the arc from this vertex to the
+/// next (`0.0` for a plain straight segment) - see `tessellate_bulge`'s
+/// doc comment for the convention. A chord-relative ratio, so it's
+/// invariant under rotation/translation: only `point` needs transforming
+/// in `rotate_layered_polygon`/`shift_layered_polygon`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RealVertex {
+    pub point: Point,
+    pub bulge: f64,
+}
+
 /// A closed profile extracted from one or more DXF entities, tagged with its
 /// source layer and (for holes) nested children. Mirrors the `.children` /
 /// `.isCircle` shape `svgparser.js` produced for SVG polygons.
@@ -69,6 +83,16 @@ pub struct LayeredPolygon {
     /// Text/label entities whose insertion point falls inside this specific
     /// node's boundary - see `attach_texts`.
     pub texts: Vec<TextAnnotation>,
+    /// The original (untessellated) LWPOLYLINE vertex/bulge list this node
+    /// came from, if it came from one - lets `dxf_export` write a real arc
+    /// back out on export instead of `points`' tessellated approximation.
+    /// `None` for anything without a real boundary to retain: a bare
+    /// circle/full-sweep arc (those have `is_circle` instead, which export
+    /// checks first), an SVG-imported shape (no DXF-bulge equivalent),
+    /// unsupported entity types, or a hand-built shape from the UI.
+    /// Nothing in `nesting` ever reads this - it only exists to survive
+    /// the round trip from import to export unpadded and untouched.
+    pub real_boundary: Option<Vec<RealVertex>>,
 }
 
 impl LayeredPolygon {
@@ -79,6 +103,7 @@ impl LayeredPolygon {
             is_circle,
             children: Vec::new(),
             texts: Vec::new(),
+            real_boundary: None,
         }
     }
 }
@@ -117,6 +142,12 @@ pub fn rotate_layered_polygon(poly: &LayeredPolygon, degrees: f64) -> LayeredPol
             is_multiline: t.is_multiline,
         })
         .collect();
+    let real_boundary = poly.real_boundary.as_ref().map(|verts| {
+        verts
+            .iter()
+            .map(|v| RealVertex { point: Point::new(v.point.x * cos - v.point.y * sin, v.point.x * sin + v.point.y * cos), bulge: v.bulge })
+            .collect()
+    });
 
     LayeredPolygon {
         points,
@@ -124,6 +155,7 @@ pub fn rotate_layered_polygon(poly: &LayeredPolygon, degrees: f64) -> LayeredPol
         is_circle,
         children,
         texts,
+        real_boundary,
     }
 }
 
@@ -145,6 +177,7 @@ pub fn shift_layered_polygon(poly: &LayeredPolygon, dx: f64, dy: f64) -> Layered
         .iter()
         .map(|t| TextAnnotation { position: Point::new(t.position.x + dx, t.position.y + dy), ..t.clone() })
         .collect();
+    let real_boundary = poly.real_boundary.as_ref().map(|verts| verts.iter().map(|v| RealVertex { point: Point::new(v.point.x + dx, v.point.y + dy), bulge: v.bulge }).collect());
 
     LayeredPolygon {
         points,
@@ -152,6 +185,7 @@ pub fn shift_layered_polygon(poly: &LayeredPolygon, dx: f64, dy: f64) -> Layered
         is_circle,
         children,
         texts,
+        real_boundary,
     }
 }
 
@@ -242,6 +276,15 @@ fn tessellate_bulge(p0: Point, p1: Point, bulge: f64, tolerance: f64) -> Vec<Poi
         .collect()
 }
 
+/// Builds a `LayeredPolygon::real_boundary` list straight off the same
+/// vertex slice `lwpolyline_to_points` tessellates, so it's automatically
+/// consistent with whatever closed-loop handling (e.g.
+/// `closes_itself_by_duplicate_point`) the caller already applied to that
+/// slice - no separate dedup logic needed here.
+fn real_boundary_from_vertices(verts: &[dxf::LwPolylineVertex]) -> Vec<RealVertex> {
+    verts.iter().map(|v| RealVertex { point: Point::new(v.x, v.y), bulge: v.bulge }).collect()
+}
+
 fn lwpolyline_to_points(verts: &[dxf::LwPolylineVertex], is_closed: bool, tolerance: f64) -> Vec<Point> {
     let mut points = Vec::with_capacity(verts.len());
     let n = verts.len();
@@ -303,7 +346,7 @@ pub fn entity_to_polygon(entity: &Entity, curve_tolerance: f64) -> Option<Layere
             if points.len() < 3 {
                 return None;
             }
-            Some(LayeredPolygon::new(points, layer, None))
+            Some(LayeredPolygon { real_boundary: Some(real_boundary_from_vertices(&poly.vertices)), ..LayeredPolygon::new(points, layer, None) })
         }
         EntityType::LwPolyline(poly) if closes_itself_by_duplicate_point(poly) => {
             // Drop the redundant closing vertex (identical to the first)
@@ -314,7 +357,7 @@ pub fn entity_to_polygon(entity: &Entity, curve_tolerance: f64) -> Option<Layere
             if points.len() < 3 {
                 return None;
             }
-            Some(LayeredPolygon::new(points, layer, None))
+            Some(LayeredPolygon { real_boundary: Some(real_boundary_from_vertices(verts)), ..LayeredPolygon::new(points, layer, None) })
         }
         EntityType::Circle(circle) => {
             let points = tessellate_circle(circle.center.x, circle.center.y, circle.radius, curve_tolerance);
@@ -673,6 +716,60 @@ mod tests {
             let dist_from_origin = (p.x * p.x + p.y * p.y).sqrt();
             assert!((dist_from_origin - 1.0).abs() < 0.01, "point {p:?} isn't on the unit circle (dist {dist_from_origin})");
         }
+    }
+
+    /// `real_boundary` exists so a rounded-corner part can be written back
+    /// out on export as a real arc instead of `points`' tessellated
+    /// approximation - it must carry the exact original vertex/bulge list,
+    /// independent of `curve_tolerance` (a loose tolerance still needs the
+    /// real geometry retained for a caller that wants it).
+    #[test]
+    fn closed_lwpolyline_with_a_bulge_retains_its_real_boundary() {
+        let bulge = (std::f64::consts::FRAC_PI_8).tan();
+        let mut poly = LwPolyline {
+            vertices: vec![
+                LwPolylineVertex { x: 1.0, y: 0.0, bulge, ..Default::default() },
+                LwPolylineVertex { x: 0.0, y: 1.0, bulge: 0.0, ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        poly.set_is_closed(true);
+        let e = entity("0", EntityType::LwPolyline(poly));
+
+        let converted = entity_to_polygon(&e, 0.001).expect("quarter-circle profile should convert");
+        let real_boundary = converted.real_boundary.expect("closed LWPOLYLINE should retain its real boundary");
+        assert_eq!(real_boundary.len(), 2);
+        assert_eq!(real_boundary[0].point, Point::new(1.0, 0.0));
+        assert!((real_boundary[0].bulge - bulge).abs() < 1e-12);
+        assert_eq!(real_boundary[1].point, Point::new(0.0, 1.0));
+        assert_eq!(real_boundary[1].bulge, 0.0);
+    }
+
+    #[test]
+    fn rotate_and_shift_move_real_boundary_points_but_leave_bulge_unchanged() {
+        let bulge = 0.5;
+        let mut poly = LwPolyline {
+            vertices: vec![
+                LwPolylineVertex { x: 1.0, y: 0.0, bulge, ..Default::default() },
+                LwPolylineVertex { x: 0.0, y: 1.0, bulge: 0.0, ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        poly.set_is_closed(true);
+        let e = entity("0", EntityType::LwPolyline(poly));
+        let converted = entity_to_polygon(&e, 0.1).expect("should convert");
+
+        let rotated = rotate_layered_polygon(&converted, 90.0);
+        let rb = rotated.real_boundary.expect("rotation must preserve real_boundary");
+        assert!((rb[0].point.x - 0.0).abs() < 1e-9, "x was {}", rb[0].point.x);
+        assert!((rb[0].point.y - 1.0).abs() < 1e-9, "y was {}", rb[0].point.y);
+        assert_eq!(rb[0].bulge, bulge, "bulge is chord-relative, must be unchanged by rotation");
+
+        let shifted = shift_layered_polygon(&converted, 10.0, 20.0);
+        let sb = shifted.real_boundary.expect("shift must preserve real_boundary");
+        assert!((sb[0].point.x - 11.0).abs() < 1e-9);
+        assert!((sb[0].point.y - 20.0).abs() < 1e-9);
+        assert_eq!(sb[0].bulge, bulge, "bulge is chord-relative, must be unchanged by translation");
     }
 
     #[test]

@@ -64,6 +64,7 @@ mod tests {
             is_circle: None,
             children: Vec::new(),
             texts: Vec::new(),
+            real_boundary: None,
         }
     }
 
@@ -92,6 +93,7 @@ mod tests {
             is_circle: None,
             children: Vec::new(),
             texts: Vec::new(),
+            real_boundary: None,
         };
         let mut a = square_layered(0.0, 0.0, 20.0);
         a.children.push(hole);
@@ -114,6 +116,7 @@ mod tests {
             is_circle: None,
             children: Vec::new(),
             texts: Vec::new(),
+            real_boundary: None,
         };
         let mut a = square_layered(0.0, 0.0, 20.0);
         a.children.push(hole);

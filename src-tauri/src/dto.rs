@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use geometry::dxf_import::{LayeredPolygon, TextAnnotation};
+use geometry::dxf_import::{LayeredPolygon, RealVertex, TextAnnotation};
 use geometry::point::Point;
 use nesting::ga::GaConfig;
 use nesting::placement::{PlacementConfig, PlacementType};
@@ -37,6 +37,27 @@ pub struct CircleDto {
     pub cx: f64,
     pub cy: f64,
     pub r: f64,
+}
+
+/// Matches `geometry::dxf_import::RealVertex` field-for-field - see that
+/// type's doc comment for why it exists (letting `dxf_export` write a real
+/// arc back out on export instead of a tessellated approximation).
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq)]
+pub struct RealVertexDto {
+    pub point: PointDto,
+    pub bulge: f64,
+}
+
+impl From<&RealVertex> for RealVertexDto {
+    fn from(v: &RealVertex) -> Self {
+        RealVertexDto { point: PointDto::from(&v.point), bulge: v.bulge }
+    }
+}
+
+impl From<RealVertexDto> for RealVertex {
+    fn from(dto: RealVertexDto) -> Self {
+        RealVertex { point: Point::from(dto.point), bulge: dto.bulge }
+    }
 }
 
 /// A `TEXT`/`MTEXT` label attached to a part/sheet, matching
@@ -91,6 +112,8 @@ pub struct PolygonDto {
     pub children: Vec<PolygonDto>,
     #[serde(default)]
     pub texts: Vec<TextDto>,
+    #[serde(default)]
+    pub real_boundary: Option<Vec<RealVertexDto>>,
 }
 
 impl From<&LayeredPolygon> for PolygonDto {
@@ -101,6 +124,7 @@ impl From<&LayeredPolygon> for PolygonDto {
             is_circle: poly.is_circle.map(|c| CircleDto { cx: c.cx, cy: c.cy, r: c.r }),
             children: poly.children.iter().map(PolygonDto::from).collect(),
             texts: poly.texts.iter().map(TextDto::from).collect(),
+            real_boundary: poly.real_boundary.as_ref().map(|verts| verts.iter().map(RealVertexDto::from).collect()),
         }
     }
 }
@@ -113,6 +137,7 @@ impl From<PolygonDto> for LayeredPolygon {
             is_circle: dto.is_circle.map(|c| geometry::circular_nfp::Circle { cx: c.cx, cy: c.cy, r: c.r }),
             children: dto.children.into_iter().map(LayeredPolygon::from).collect(),
             texts: dto.texts.into_iter().map(TextAnnotation::from).collect(),
+            real_boundary: dto.real_boundary.map(|verts| verts.into_iter().map(RealVertex::from).collect()),
         }
     }
 }

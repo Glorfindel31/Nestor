@@ -30,9 +30,15 @@
 //! `texts` (`TEXT`/`MTEXT`-equivalent) are exported - `svg_import` doesn't
 //! read them on the way in either, so there's nothing round-trippable yet;
 //! revisit both together if SVG text support is ever needed. A part that
-//! was a true circle on import round-trips as its tessellated polygon
-//! approximation, not an SVG `<circle>` - the same "reduce to one code
-//! path" simplification `dxf_export` already makes for DXF's `CIRCLE`.
+//! was a true circle on import round-trips as a real SVG `<circle>` (same
+//! mechanism as `dxf_export`'s `CIRCLE` entity - `is_circle`'s center gets
+//! the same Y-flip `collect_paths` already applies to `points`, radius is
+//! unaffected since the flip is a pure reflection, not a scale). Rounded-
+//! corner bulge arcs (`LayeredPolygon::real_boundary`) do NOT get the same
+//! treatment `dxf_export` gives them - not because SVG lacks an arc
+//! primitive (its `<path>` `A` command is one, and `svg_import` already
+//! tessellates it on the way in), just not implemented for this pass, so
+//! those still round-trip as their tessellated polygon approximation.
 
 use crate::dxf_export::SheetLayout;
 use crate::dxf_import::{rotate_layered_polygon, shift_layered_polygon, LayeredPolygon};
@@ -89,7 +95,16 @@ pub fn export_svg(sheets: &[SheetLayout], sheet_spacing: f64, include_sheet_outl
 /// new layer - then recurses into every child, same tree walk
 /// `dxf_export::add_node` does.
 fn collect_paths(node: &LayeredPolygon, sheet_height: f64, layers: &mut Vec<(String, String)>) {
-    if node.points.len() >= 2 {
+    if let Some(circle) = node.is_circle {
+        let entry = match layers.iter_mut().position(|(layer, _)| *layer == node.layer) {
+            Some(idx) => &mut layers[idx],
+            None => {
+                layers.push((node.layer.clone(), String::new()));
+                layers.last_mut().expect("just pushed")
+            }
+        };
+        entry.1.push_str(&format!("<circle cx=\"{:.4}\" cy=\"{:.4}\" r=\"{:.4}\"/>", circle.cx, sheet_height - circle.cy, circle.r));
+    } else if node.points.len() >= 2 {
         let d: String = node
             .points
             .iter()
@@ -129,6 +144,7 @@ mod tests {
             is_circle: None,
             children: Vec::new(),
             texts: Vec::new(),
+            real_boundary: None,
         }
     }
 
@@ -197,6 +213,31 @@ mod tests {
         assert!(!svg.contains("<text"), "SVG export doesn't support text yet, matching svg_import's own scope: {svg}");
     }
 
+    /// A part that was a true circle on import must round-trip as a real
+    /// `<circle>` element, not a tessellated `<path>` - center reflects the
+    /// placement's translation and the sheet's own Y-flip.
+    #[test]
+    fn a_true_circle_part_exports_as_a_real_circle_element() {
+        let circle_shape = LayeredPolygon {
+            points: crate::dxf_import::tessellate_circle(0.0, 0.0, 5.0, 0.1),
+            layer: "CUT".into(),
+            is_circle: Some(crate::circular_nfp::Circle { cx: 0.0, cy: 0.0, r: 5.0 }),
+            children: Vec::new(),
+            texts: Vec::new(),
+            real_boundary: None,
+        };
+        let layout = SheetLayout { sheet: square(200.0), parts: vec![PlacedShape { shape: circle_shape, x: 50.0, y: 30.0, rotation: 0.0 }] };
+
+        let svg = export_svg(std::slice::from_ref(&layout), 20.0, false);
+
+        assert!(svg.contains("<circle "), "circle part must export as a real <circle> element, not a tessellated <path>: {svg}");
+        assert!(!svg.contains("<path"), "no tessellated path should be written for a true circle: {svg}");
+        // sheet height 200, placed at y=30 -> flipped y = 200 - 30 = 170
+        assert!(svg.contains("cx=\"50.0000\""), "expected cx=50: {svg}");
+        assert!(svg.contains("cy=\"170.0000\""), "expected the Y-flipped cy=170: {svg}");
+        assert!(svg.contains("r=\"5.0000\""), "expected r=5: {svg}");
+    }
+
     /// Round-trip regression: export a real (non-square, so a mirror bug
     /// can't hide behind symmetry) shape to SVG, re-import it, and check the
     /// result is congruent to the original - a direct check that the export
@@ -218,6 +259,7 @@ mod tests {
             is_circle: None,
             children: Vec::new(),
             texts: Vec::new(),
+            real_boundary: None,
         };
         let original_area = crate::polygon::polygon_area(&hat.points);
 

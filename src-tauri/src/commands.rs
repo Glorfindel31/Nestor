@@ -356,7 +356,7 @@ pub fn repack_sheet(request: RepackSheetRequest) -> Result<RepackSheetResponse, 
 
     let true_sheet: LayeredPolygon = request.sheet.into();
     let sheet_points = prepare_sheet(&true_sheet.points, margin, spacing).ok_or("margin/spacing leaves the sheet with no usable area")?;
-    let sheet = LayeredPolygon { points: sheet_points, ..true_sheet };
+    let sheet = LayeredPolygon { points: sheet_points, real_boundary: None, ..true_sheet };
 
     let parts_by_id: HashMap<usize, LayeredPolygon> = request
         .parts_by_id
@@ -364,7 +364,7 @@ pub fn repack_sheet(request: RepackSheetRequest) -> Result<RepackSheetResponse, 
         .map(|(id, dto)| {
             let poly: LayeredPolygon = dto.into();
             let points = prepare_part(&poly.points, spacing).ok_or("spacing leaves a part with no usable outline")?;
-            Ok((id, LayeredPolygon { points, ..poly }))
+            Ok((id, LayeredPolygon { points, real_boundary: None, ..poly }))
         })
         .collect::<Result<_, &str>>()?;
 
@@ -573,7 +573,7 @@ fn prepare_nest_inputs(request: RunNestRequest) -> Result<PreparedNestInputs, St
         .iter()
         .map(|sheet| {
             let points = prepare_sheet(&sheet.points, margin, spacing).ok_or("margin/spacing leaves a sheet with no usable area")?;
-            Ok(LayeredPolygon { points, layer: sheet.layer.clone(), is_circle: sheet.is_circle, children: sheet.children.clone(), texts: sheet.texts.clone() })
+            Ok(LayeredPolygon { points, layer: sheet.layer.clone(), is_circle: sheet.is_circle, children: sheet.children.clone(), texts: sheet.texts.clone(), real_boundary: None })
         })
         .collect::<Result<_, &str>>()?;
 
@@ -590,7 +590,7 @@ fn prepare_nest_inputs(request: RunNestRequest) -> Result<PreparedNestInputs, St
         .iter()
         .map(|(&id, part)| {
             let points = prepare_part(&part.points, spacing).ok_or("spacing leaves a part with no usable outline")?;
-            Ok((id, LayeredPolygon { points, layer: part.layer.clone(), is_circle: part.is_circle, children: part.children.clone(), texts: part.texts.clone() }))
+            Ok((id, LayeredPolygon { points, layer: part.layer.clone(), is_circle: part.is_circle, children: part.children.clone(), texts: part.texts.clone(), real_boundary: None }))
         })
         .collect::<Result<_, &str>>()?;
 
@@ -1271,6 +1271,7 @@ mod tests {
             is_circle: None,
             children: Vec::new(),
             texts: Vec::new(),
+            real_boundary: None,
         }
     }
 
@@ -1286,6 +1287,7 @@ mod tests {
             is_circle: None,
             children: Vec::new(),
             texts: Vec::new(),
+            real_boundary: None,
         }
     }
 
