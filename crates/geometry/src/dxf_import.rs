@@ -430,17 +430,30 @@ pub fn entities_to_texts<'a>(entities: impl Iterator<Item = &'a Entity>) -> Vec<
     entities.filter_map(entity_to_text).collect()
 }
 
-/// True if `candidate`'s first point lies inside `container` (containment
-/// test used to build the parent/hole tree - matches the "point-in-polygon"
-/// approach `svgparser.js` used for SVG parent/hole detection).
+/// True if every point of `candidate` lies inside-or-on `container`'s
+/// boundary (containment test used to build the parent/hole tree).
+///
+/// **Whole-polygon, not just the first point** - real CAD-exported cutouts
+/// routinely share a coincident vertex or a touching edge with their parent
+/// (LibreCAD/Onshape snapping, tangent-arc drill holes, etc.). Testing only
+/// `candidate`'s first point meant a hole whose *first* vertex happened to
+/// land exactly on the parent's boundary got rejected as "not contained" and
+/// was promoted to a standalone root/part - confirmed against a real 137-loop
+/// fixture where exactly the loops touching their parent's boundary escaped
+/// this way. `point_in_polygon` returns `None` for "on the boundary /
+/// coincident vertex" (ambiguous, not "outside") - this treats that as
+/// contained (touching but not crossing), only `Some(false)` (strictly
+/// outside) disqualifies a candidate.
 fn contains(container: &[Point], candidate: &[Point]) -> bool {
     // `LayeredPolygon`'s fields are all `pub`, so a degenerate (empty-points)
     // entry is a valid `Vec<LayeredPolygon>` for a caller to hand the public
     // `build_polygon_tree` - an empty candidate trivially can't be "inside"
     // anything, no need to look at `container` at all.
-    let Some(&first) = candidate.first() else { return false };
+    if candidate.is_empty() {
+        return false;
+    }
     let zero = Point::new(0.0, 0.0);
-    point_in_polygon(first, container, zero, None) == Some(true)
+    candidate.iter().all(|&p| point_in_polygon(p, container, zero, None) != Some(false))
 }
 
 fn area_of(points: &[Point]) -> f64 {

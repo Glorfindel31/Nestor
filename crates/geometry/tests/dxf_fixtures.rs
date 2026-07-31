@@ -118,3 +118,39 @@ fn inner_nfp_general_fallback_works_against_real_drilled_profiles() {
     }
     assert!(checked > 0);
 }
+
+/// Regression test for a real containment-test bug in `dxf_import::contains`:
+/// it used to test only a candidate loop's *first* vertex, and treated
+/// `point_in_polygon`'s "on the boundary" (`None`) result as "not contained".
+/// Real CAD-exported cutouts often share a coincident vertex or touching edge
+/// with their parent (LibreCAD/Onshape snapping), so a hole whose first
+/// vertex happened to land exactly on its parent's boundary was rejected as a
+/// hole and promoted to a standalone root - it then got nested as if it were
+/// its own separate part. This is a real, non-synthetic fixture (137 closed
+/// loops) where that used to happen for 5 loops; `contains` now checks every
+/// vertex of the candidate and treats touching (not just strictly inside) as
+/// contained, which brings every one of those 5 back under its real parent.
+#[test]
+fn seventeen_mm_fixture_nests_every_cutout_under_its_real_parent_not_as_a_root() {
+    let drawing = Drawing::load_file(fixture_path("17MM .dxf")).expect("17MM .dxf should parse");
+    let polygons = entities_to_polygons(drawing.entities(), 0.3);
+    assert!(polygons.len() > 100, "expected over a hundred closed loops, got {}", polygons.len());
+
+    let tree = build_polygon_tree(polygons);
+
+    // The known-correct count for this fixture (confirmed by manual
+    // geometric containment analysis): 52 outer parts. Before the `contains`
+    // fix this counted 57 - the 5 cutouts whose first vertex touched their
+    // parent's boundary were rejected as holes and promoted to standalone
+    // roots instead.
+    assert_eq!(tree.len(), 52, "expected exactly 52 outer parts, got {} - a wrong (higher) count means cutouts are escaping as standalone parts again", tree.len());
+
+    // This fixture nests exactly one level deep (outline + holes, no islands
+    // inside a hole) - any hole with children would be a surprise for this
+    // specific file, not an expected shape.
+    for root in &tree {
+        for hole in &root.children {
+            assert!(hole.children.is_empty(), "this fixture nests exactly one level deep (outline + holes), found an unexpected island under a hole");
+        }
+    }
+}
