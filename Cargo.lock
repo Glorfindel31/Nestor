@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "deepnest-tauri"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "dxf",
  "geometry",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "geometry"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "clipper2",
  "dxf",
@@ -1912,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "nesting"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "clipper2",
  "dxf",

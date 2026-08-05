@@ -1005,6 +1005,52 @@ async function handleRemoveSelected() {
 
 el("btn-remove-selected").addEventListener("click", handleRemoveSelected);
 
+// Clears imported parts/sheets and the last nest result, but leaves every
+// #panel-config input untouched - those fields aren't removed from the DOM,
+// just hidden along with #panel-shapes/#panel-config (both re-shown by the
+// next import), so their values survive exactly like loadSavedConfig()
+// intends. Also clears the on-disk best-result save (clear_best_result_command,
+// the same one tryRecoverBestResult already calls when the user declines to
+// recover) so a reset actually sticks across a restart instead of the old
+// nest reappearing via the recovery prompt.
+async function handleReset() {
+  const confirmed = await window.__TAURI__.dialog.confirm(t("confirm_reset_message"), {
+    title: t("confirm_reset_title"),
+    kind: "warning",
+  });
+  if (!confirmed) return;
+
+  importedShapes = [];
+  el("shapes-body").innerHTML = "";
+  el("select-all-shapes").checked = false;
+  el("panel-shapes").hidden = true;
+  el("panel-config").hidden = true;
+
+  currentSnapshot = null;
+  lastNestRequest = null;
+  lastPartsById = null;
+  el("panel-result").hidden = true;
+  el("history-row").hidden = true;
+  el("history-select").innerHTML = "";
+  el("result-stats").innerHTML = "";
+  el("unplaced-section").hidden = true;
+  el("unplaced-list").innerHTML = "";
+  el("sheets").innerHTML = "";
+  el("bottom-bar-summary").textContent = "";
+  setStatus("import-status", "", false);
+  setStatus("run-status", "", false);
+
+  try {
+    await invoke("clear_best_result_command");
+  } catch (err) {
+    logLine(`could not clear saved best result: ${err}`);
+  }
+
+  logLine("reset: cleared imported parts/sheets and last nest result (config kept)");
+}
+
+el("btn-reset").addEventListener("click", handleReset);
+
 el("select-all-shapes").addEventListener("change", (event) => {
   document.querySelectorAll("#shapes-body [data-select]").forEach((cb) => {
     cb.checked = event.target.checked;

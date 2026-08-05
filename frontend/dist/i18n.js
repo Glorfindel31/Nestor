@@ -196,6 +196,11 @@ export const translations = {
     recover_message: "A saved nest result from a previous session exists ({sheets} sheet(s), {util}% utilisation). Recover it?",
     recover_title: "Recover last session?",
 
+    btn_reset: "RESET",
+    btn_reset_tooltip: "Clear the imported parts/sheets and the last nest result. Config settings (margin, spacing, rotations, etc.) are kept. Cannot be undone.",
+    confirm_reset_message: "Clear all imported parts/sheets and the last nest result? Config settings are kept. This cannot be undone.",
+    confirm_reset_title: "Reset",
+
     help_button_title: "How to use this app",
     help_title: "HOW TO USE RUSTYNESTING",
     help_intro: "RustyNesting nests parts onto stock sheets before cutting.",
@@ -389,6 +394,11 @@ export const translations = {
     confirm_remove_title: "Xóa hình",
     recover_message: "Có kết quả xếp hình đã lưu từ phiên trước ({sheets} tấm, sử dụng {util}%). Khôi phục?",
     recover_title: "Khôi phục phiên trước?",
+
+    btn_reset: "ĐẶT LẠI",
+    btn_reset_tooltip: "Xóa các chi tiết/tấm phôi đã nhập và kết quả xếp hình gần nhất. Giữ nguyên cấu hình (lề, khoảng cách, góc xoay, v.v.). Không thể hoàn tác.",
+    confirm_reset_message: "Xóa toàn bộ chi tiết/tấm phôi đã nhập và kết quả xếp hình gần nhất? Cấu hình sẽ được giữ nguyên. Không thể hoàn tác.",
+    confirm_reset_title: "Đặt lại",
 
     help_button_title: "Cách sử dụng ứng dụng này",
     help_title: "CÁCH SỬ DỤNG RUSTYNESTING",
