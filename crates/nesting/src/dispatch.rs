@@ -34,6 +34,28 @@ use crate::cache::NfpCache;
 use crate::ga::{is_better_nest, GeneticAlgorithm};
 use crate::placement::{place_parts, NestPart, PlaceResult, PlacementConfig};
 
+/// Set in a part id to mean "the mirrored (flipped-over) copy of this part".
+/// `src-tauri`'s `expand_parts` registers both variants in `parts_by_id`/
+/// `shape_ids` under `id` and `id ^ MIRROR_ID_BIT`, so a mirrored gene needs
+/// no separate geometry pipeline - it *is* a part, with its own shape
+/// identity (and therefore its own NFP cache entries, which it must have:
+/// the mirror of a shape has a different NFP against everything).
+/// XOR, not addition, so decoding an already-mirrored id (a repack of an
+/// existing nest re-feeds its own placement ids back through here) toggles
+/// instead of running off the end of the map.
+pub const MIRROR_ID_BIT: usize = 1 << 20;
+
+/// Unpacks a rotation gene into `(part id, real angle)` - see
+/// `ga::random_angle` for the encoding (`>= 360` means "mirrored").
+#[must_use]
+pub fn decode_rotation(id: usize, rotation: f64) -> (usize, f64) {
+    if rotation >= 360.0 {
+        (id ^ MIRROR_ID_BIT, rotation - 360.0)
+    } else {
+        (id, rotation)
+    }
+}
+
 /// One individual's genes (`placement`/`rotation`, the same shape
 /// `ga::Individual` carries) alongside the `PlaceResult` they produced -
 /// `run_generation` returns these instead of bare `PlaceResult`s because
@@ -130,11 +152,20 @@ pub fn run_generation(
                 .placement
                 .iter()
                 .zip(&individual.rotation)
-                .map(|(&id, &rotation)| NestPart {
-                    id,
-                    source_id: shape_ids.get(&id).copied().unwrap_or(id),
-                    polygon: parts_by_id.get(&id).expect("every gene id must have a matching part").clone(),
-                    rotation,
+                .map(|(&gene_id, &gene_rotation)| {
+                    let (id, rotation) = decode_rotation(gene_id, gene_rotation);
+                    // A caller's `parts_by_id` doesn't have to cover the
+                    // mirrored variants (`repack_sheet` passes one sheet's
+                    // parts, whatever the config says) - fall back to the
+                    // un-flipped part at the same angle instead of panicking
+                    // on a variant nobody registered.
+                    let id = if parts_by_id.contains_key(&id) { id } else { gene_id };
+                    NestPart {
+                        id,
+                        source_id: shape_ids.get(&id).copied().unwrap_or(id),
+                        polygon: parts_by_id.get(&id).expect("every gene id must have a matching part").clone(),
+                        rotation,
+                    }
                 })
                 .collect();
             // `?`: `place_parts` returns `None` if `should_cancel` fired
@@ -248,7 +279,7 @@ mod tests {
     fn setup(part_count: usize) -> (GeneticAlgorithm, Vec<LayeredPolygon>, HashMap<usize, LayeredPolygon>) {
         let parts_by_id: HashMap<usize, LayeredPolygon> = (0..part_count).map(|id| (id, square(10.0))).collect();
         let adam: Vec<usize> = (0..part_count).collect();
-        let ga = GeneticAlgorithm::new(adam, GaConfig { population_size: 6, mutation_rate: 20.0, rotations: 1 }, Vec::new(), 0);
+        let ga = GeneticAlgorithm::new(adam, GaConfig { population_size: 6, mutation_rate: 20.0, rotations: 1, mirror: false }, Vec::new(), 0);
         let sheets = vec![square(100.0)];
         (ga, sheets, parts_by_id)
     }
@@ -363,5 +394,26 @@ mod tests {
         let best = run(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &cfg, 1000, &|| true, &|_, _| {});
 
         assert!(best.is_none(), "an immediate cancel should stop run() before any generation produces a result");
+    }
+
+    /// `config.mirror` is per-run, but `parts_by_id` isn't guaranteed to
+    /// carry the mirrored variants (a single-sheet repack passes only that
+    /// sheet's parts) - a mirrored gene must then degrade to the plain part,
+    /// not panic on a missing id.
+    #[test]
+    fn a_mirrored_gene_falls_back_when_its_variant_is_not_registered() {
+        let (_, sheets, parts_by_id) = setup(3);
+        let adam: Vec<usize> = (0..3).collect();
+        let mut ga = GeneticAlgorithm::new(adam, GaConfig { population_size: 6, mutation_rate: 20.0, rotations: 1, mirror: true }, Vec::new(), 0);
+        let results = run_generation(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &placement_config(), &|| false, &|_, _| {}, &NfpCache::new());
+        assert!(!results.is_empty());
+        for r in &results {
+            assert!(r.rotation.iter().any(|&a| a >= 360.0), "the mirror-widened grid must actually produce mirrored genes");
+            for sheet in &r.result.placements {
+                for p in &sheet.parts {
+                    assert!(parts_by_id.contains_key(&p.id), "placed id must exist in the map it came from");
+                }
+            }
+        }
     }
 }

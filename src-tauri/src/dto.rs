@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use geometry::dxf_import::{LayeredPolygon, RealVertex, TextAnnotation};
 use geometry::point::Point;
+use nesting::dispatch::MIRROR_ID_BIT;
 use nesting::ga::GaConfig;
 use nesting::placement::{PlacementConfig, PlacementType};
 use serde::{Deserialize, Serialize};
@@ -180,8 +181,15 @@ fn one() -> usize {
 /// `PartDto` entries with byte-identical polygons still get different
 /// source ids; fine for "one imported shape, quantity N", not "the same
 /// shape imported twice as separate parts".
+///
+/// `mirror` registers a second, mirrored variant of every copy under
+/// `id ^ nesting::dispatch::MIRROR_ID_BIT` (with its own source id, so it
+/// gets its own NFP cache entries - a mirrored shape's NFP against anything
+/// is genuinely different). Those extra ids are deliberately **not** in
+/// `adam`: they're alternatives the GA's rotation genes can select, not
+/// extra parts to place.
 #[must_use]
-pub fn expand_parts(parts: Vec<PartDto>) -> (Vec<usize>, HashMap<usize, LayeredPolygon>, HashMap<usize, usize>) {
+pub fn expand_parts(parts: Vec<PartDto>, mirror: bool) -> (Vec<usize>, HashMap<usize, LayeredPolygon>, HashMap<usize, usize>) {
     let mut parts_by_id = HashMap::new();
     let mut shape_ids = HashMap::new();
     let mut adam = Vec::new();
@@ -202,6 +210,13 @@ pub fn expand_parts(parts: Vec<PartDto>) -> (Vec<usize>, HashMap<usize, LayeredP
         shape_ids.insert(next_id, source_id);
         adam.push(next_id);
         next_id += 1;
+    }
+
+    if mirror {
+        for (&id, poly) in parts_by_id.clone().iter() {
+            parts_by_id.insert(id ^ MIRROR_ID_BIT, geometry::dxf_import::mirror_layered_polygon(poly));
+            shape_ids.insert(id ^ MIRROR_ID_BIT, shape_ids[&id] ^ MIRROR_ID_BIT);
+        }
     }
 
     // Decorate-sort-undecorate: each id's area is computed once up front
@@ -309,6 +324,15 @@ pub struct NestConfigDto {
     /// behavior unchanged.
     #[serde(default)]
     pub cleanup_threshold_percent: Option<f64>,
+    /// Let the nest also try each part flipped over (mirrored), not just
+    /// rotated. Off by default, and deliberately loud in the UI: a mirrored
+    /// part is only the same part if the material has no side (no grain, no
+    /// coating, no printed face) and no asymmetric feature has to stay on
+    /// one face - flipping a part that *does* have a side silently produces
+    /// scrap. See `nesting::dispatch::MIRROR_ID_BIT` for how a mirrored part
+    /// is carried through the run.
+    #[serde(default)]
+    pub mirror: bool,
 }
 
 fn default_runs() -> usize {
@@ -334,7 +358,7 @@ impl NestConfigDto {
     }
 
     pub fn ga_config(&self) -> GaConfig {
-        GaConfig { population_size: self.population_size, mutation_rate: self.mutation_rate, rotations: self.rotations }
+        GaConfig { population_size: self.population_size, mutation_rate: self.mutation_rate, rotations: self.rotations, mirror: self.mirror }
     }
 }
 

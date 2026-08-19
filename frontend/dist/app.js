@@ -519,6 +519,7 @@ function buildRequest() {
     seed: Number(el("cfg-seed").value),
     runs: Number(el("cfg-runs").value),
     cleanup_threshold_percent: el("cfg-cleanup-threshold").value === "" ? null : Number(el("cfg-cleanup-threshold").value),
+    mirror: el("cfg-mirror").checked,
   };
 
   return { sheets, parts, config };
@@ -1084,6 +1085,10 @@ async function loadSavedConfig() {
   el("cfg-seed").value = saved.seed ?? 0;
   el("cfg-runs").value = saved.runs ?? 6;
   el("cfg-cleanup-threshold").value = saved.cleanup_threshold_percent ?? "";
+  // cfg-mirror is deliberately NOT restored: letting pieces be cut mirrored
+  // is only safe for material with no good side, and a setting that quietly
+  // survives into a session where the material *does* have one produces
+  // scrap. It starts off every launch and has to be ticked on purpose.
   el("import-tolerance").value = saved.curve_tolerance;
   updateDominantIndicators();
   logLine("restored config from last session");

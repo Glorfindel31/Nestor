@@ -808,3 +808,42 @@ input.qty-input {
   font-size: 0.8125rem;
   cursor: pointer;
 }
+
+/* FLIP PIECES OVER (MIRROR) is the one setting that can quietly ruin a job -
+   a mirrored piece cut from material with a grain/coating/good face is
+   scrap - so it gets the only "loud while on" treatment in the UI: the row
+   turns --error, an ON badge appears next to it, and a second warning rides
+   along with the RUN button, which is visible from anywhere in the app.
+   All of it is `body:has(#cfg-mirror:checked)` - the checkbox itself is the
+   single source of truth, no JS state to keep in sync. */
+.mirror-on-badge,
+.mirror-run-warning {
+  display: none;
+  color: var(--error);
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+}
+
+.mirror-run-warning::before {
+  content: "A0 ";
+}
+
+body:has(#cfg-mirror:checked) .mirror-on-badge,
+body:has(#cfg-mirror:checked) .mirror-run-warning {
+  display: inline;
+}
+
+.mirror-row {
+  border: 1px solid var(--border);
+  padding: 8px;
+}
+
+body:has(#cfg-mirror:checked) .mirror-row {
+  border-color: var(--error);
+  background: rgba(255, 90, 74, 0.12);
+}
+
+body:has(#cfg-mirror:checked) .mirror-row label,
+body:has(#cfg-mirror:checked) .mirror-hint {
+  color: var(--error);
+}

@@ -577,7 +577,7 @@ fn prepare_nest_inputs(request: RunNestRequest) -> Result<PreparedNestInputs, St
         })
         .collect::<Result<_, &str>>()?;
 
-    let (adam, true_parts_by_id, shape_ids) = expand_parts(request.parts);
+    let (adam, true_parts_by_id, shape_ids) = expand_parts(request.parts, request.config.mirror);
     if adam.is_empty() {
         return Err("every part had quantity 0".into());
     }
@@ -627,12 +627,22 @@ const RUN_GENERATIONS_STEP: usize = 5;
 /// `request.config`'s own values (this escalation's *starting* point,
 /// 0-indexed `run_index` away) per `RUN_POPULATION_STEP`/`RUN_GENERATIONS_STEP`
 /// above.
-fn escalated_run_config(base_ga_config: &GaConfig, base_generations: usize, run_index: usize) -> (GaConfig, usize) {
+fn escalated_run_config(base_ga_config: &GaConfig, base_generations: usize, run_index: usize, total_runs: usize) -> (GaConfig, usize) {
     let rotations = base_ga_config.rotations + run_index as u32;
     let ga_config = GaConfig {
         population_size: base_ga_config.population_size + run_index * RUN_POPULATION_STEP,
         mutation_rate: base_ga_config.mutation_rate,
         rotations,
+        // With `mirror` on, run 1 is deliberately still run *without* it, so
+        // the escalation always measures a real un-flipped baseline and
+        // `is_better_nest` picks between the two. Mirroring only ever widens
+        // the search space (every un-flipped arrangement is still reachable
+        // in a mirrored run - half the rotation grid is the un-flipped half),
+        // but a wider space searched on the same budget can genuinely land
+        // worse, so "flip allowed" must not mean "flip-free never tried".
+        // Unless there's only one run, where skipping it would mean the
+        // setting silently does nothing.
+        mirror: base_ga_config.mirror && (run_index > 0 || total_runs == 1),
     };
     let generations = base_generations + run_index * RUN_GENERATIONS_STEP;
     (ga_config, generations)
@@ -768,7 +778,7 @@ pub fn run_nest_with_progress(
             overall_cancelled = true;
             break;
         }
-        let (run_ga_config, generations_for_run) = escalated_run_config(&base_ga_config, base_generations, run_index);
+        let (run_ga_config, generations_for_run) = escalated_run_config(&base_ga_config, base_generations, run_index, total_runs);
         let mut run_placement_config = placement_config.clone();
         run_placement_config.rotations = run_ga_config.rotations;
 
@@ -932,7 +942,10 @@ pub fn run_nest_with_progress(
     let best = match overall_best {
         Some(b) => b,
         None if cancelled => {
-            let mut unplaced_ids: Vec<usize> = parts_by_id_dto.keys().copied().collect();
+            // `adam`, not `parts_by_id_dto`'s keys: with `config.mirror` on
+            // the latter also holds every part's mirrored alternate, which
+            // is a variant of a part, not a second part to report missing.
+            let mut unplaced_ids: Vec<usize> = adam.clone();
             unplaced_ids.sort_unstable();
             PlaceResult {
                 placements: Vec::new(),
@@ -1306,6 +1319,7 @@ mod tests {
             seed: 0,
             runs: 1,
             cleanup_threshold_percent: None,
+            mirror: false,
         }
     }
 
@@ -2359,4 +2373,57 @@ mod tests {
         assert!(!is_better_result(0, 3, 90.0, 0, 3, 90.0));
     }
 
+    /// `config.mirror`'s plumbing end to end: mirrored variants have to be
+    /// reachable by the search (some placement lands on a `MIRROR_ID_BIT`
+    /// id), have to come with geometry the caller can export/render, and
+    /// must not turn one part into two. Off, no id may carry the bit.
+    /// (That a mirrored *shape* is geometrically right is
+    /// `geometry::dxf_import`'s own `mirroring_preserves_arcs_and_winding`.)
+    #[test]
+    fn mirror_variants_are_reachable_without_duplicating_parts() {
+        let l_shape = PolygonDto {
+            points: [(0.0, 0.0), (30.0, 0.0), (30.0, 10.0), (10.0, 10.0), (10.0, 25.0), (0.0, 25.0)]
+                .iter()
+                .map(|&(x, y)| PointDto { x, y })
+                .collect(),
+            layer: "0".into(),
+            is_circle: None,
+            children: Vec::new(),
+            texts: Vec::new(),
+            real_boundary: None,
+        };
+        let build = |mirror: bool| {
+            let mut cfg = config(6);
+            cfg.rotations = 2;
+            cfg.mirror = mirror;
+            RunNestRequest { sheets: vec![square_dto(200.0)], parts: vec![PartDto { polygon: l_shape.clone(), quantity: 6 }], config: cfg }
+        };
+
+        let off = run_nest(build(false)).expect("nest without mirror");
+        let placed_off: Vec<usize> = off.placements.iter().flat_map(|s| s.parts.iter().map(|p| p.id)).collect();
+        use nesting::dispatch::MIRROR_ID_BIT;
+        assert!(placed_off.iter().all(|id| id & MIRROR_ID_BIT == 0), "mirror off must never place a flipped variant");
+
+        let on = run_nest(build(true)).expect("nest with mirror");
+        let placed_on: Vec<usize> = on.placements.iter().flat_map(|s| s.parts.iter().map(|p| p.id)).collect();
+        assert_eq!(placed_on.len() + on.unplaced_ids.len(), 6, "mirroring must not turn one part into two");
+        assert!(placed_on.iter().any(|id| id & MIRROR_ID_BIT != 0), "mirror on must actually reach the flipped variants");
+        for id in &placed_on {
+            assert!(on.parts_by_id.contains_key(id), "every placed id (flipped or not) needs geometry for export/render");
+        }
+    }
+
+    /// "Flip allowed" must not mean "flip-free never tried": the first of
+    /// several runs stays un-mirrored so the escalation has a real baseline
+    /// to compare against - unless there is only one run to give.
+    #[test]
+    fn mirror_leaves_the_first_run_of_several_un_mirrored() {
+        let base = GaConfig { population_size: 6, mutation_rate: 10.0, rotations: 2, mirror: true };
+        let mirrors: Vec<bool> = (0..3).map(|i| escalated_run_config(&base, 5, i, 3).0.mirror).collect();
+        assert_eq!(mirrors, vec![false, true, true]);
+        assert!(escalated_run_config(&base, 5, 0, 1).0.mirror, "a single-run job must still honour the setting");
+
+        let off = GaConfig { mirror: false, ..base };
+        assert!((0..3).all(|i| !escalated_run_config(&off, 5, i, 3).0.mirror));
+    }
 }

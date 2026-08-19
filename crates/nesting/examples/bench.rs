@@ -188,7 +188,7 @@ fn main() {
 
     let placement_config =
         PlacementConfig { placement_type, rotations: 4, dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD, curve_tolerance: CURVE_TOLERANCE };
-    let ga_config = GaConfig { population_size: 10, mutation_rate: 10.0, rotations: 4 };
+    let ga_config = GaConfig { population_size: 10, mutation_rate: 10.0, rotations: 4, mirror: false };
 
     let detail_log = repo_root().join("nest-benchmark.log");
     let runs_csv = repo_root().join("nest-benchmark-runs.csv");
@@ -327,7 +327,7 @@ fn run_grid() {
                     combo_num += 1;
 
                     let placement_config = PlacementConfig { placement_type, rotations, dominant_part_area_threshold, curve_tolerance: CURVE_TOLERANCE };
-                    let ga_config = GaConfig { population_size, mutation_rate: 10.0, rotations };
+                    let ga_config = GaConfig { population_size, mutation_rate: 10.0, rotations, mirror: false };
                     let mut ga = GeneticAlgorithm::new(adam.clone(), ga_config, Vec::new(), 0);
                     // Fresh per combination, not shared across them - a real
                     // user changing these settings between runs wouldn't

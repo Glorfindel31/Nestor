@@ -135,7 +135,7 @@ fn main() {
     let sheets = vec![sheet]; // exactly one sheet - this is a single-sheet packing-density benchmark, not a multi-sheet job
 
     let placement_config = PlacementConfig { placement_type, rotations, dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD, curve_tolerance: CURVE_TOLERANCE };
-    let ga_config = GaConfig { population_size, mutation_rate, rotations };
+    let ga_config = GaConfig { population_size, mutation_rate, rotations, mirror: false };
     let mut ga = GeneticAlgorithm::new(adam, ga_config, Vec::new(), 0);
 
     println!(

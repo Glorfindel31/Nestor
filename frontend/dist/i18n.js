@@ -90,6 +90,13 @@ export const translations = {
     cleanup_placeholder: "e.g. 60",
     cleanup_hint:
       "Sheets under this utilisation get auto-repacked in place after a run (same parts, tighter arrangement) - blank turns it off. You can also REPACK any single sheet manually from the RESULT view regardless.",
+    mirror_label: "FLIP PIECES OVER (MIRROR)",
+    mirror_tooltip:
+      "Lets the nest place a piece flipped over (mirrored), not just rotated - which often saves real material on pieces that are not symmetric. Only tick this if the material has no side: no grain, no coating, no printed or good face, and no feature that has to stay on one face. If the material does have a side, a flipped piece is scrap.",
+    mirror_on_badge: "ON — PIECES MAY BE CUT MIRRORED",
+    mirror_run_warning: "MIRRORING ON",
+    mirror_hint:
+      "Only for material with no good side (no grain, no coating, no printed face). RUN 1 is always done without flipping, so you always get a flip-free result to compare against - whichever run packs best is the one you keep. Always starts OFF at app launch, never restored from the last session.",
     btn_advanced_collapsed: "ADVANCED SETTINGS ▾",
     btn_advanced_expanded: "ADVANCED SETTINGS ▴",
     settings_bar_text: "CONFIGURE — SETTINGS",
@@ -289,6 +296,13 @@ export const translations = {
     cleanup_placeholder: "vd. 60",
     cleanup_hint:
       "Các tấm phôi có tỷ lệ sử dụng dưới ngưỡng này sẽ tự động được xếp lại tại chỗ sau khi chạy (cùng chi tiết, sắp xếp chặt hơn) - để trống để tắt. Bạn cũng có thể XẾP LẠI thủ công bất kỳ tấm nào từ màn hình KẾT QUẢ.",
+    mirror_label: "LẬT NGƯỢC CHI TIẾT (ĐỐI XỨNG)",
+    mirror_tooltip:
+      "Cho phép xếp chi tiết ở trạng thái lật ngược (đối xứng gương), không chỉ xoay - thường tiết kiệm được nhiều vật liệu với các chi tiết không đối xứng. Chỉ bật nếu vật liệu không phân mặt: không vân, không phủ, không in ấn hay mặt đẹp, và không có chi tiết nào bắt buộc phải nằm trên một mặt. Nếu vật liệu có phân mặt, chi tiết bị lật là phế phẩm.",
+    mirror_on_badge: "ĐANG BẬT — CHI TIẾT CÓ THỂ BỊ CẮT NGƯỢC",
+    mirror_run_warning: "ĐANG BẬT LẬT NGƯỢC",
+    mirror_hint:
+      "Chỉ dùng cho vật liệu không phân mặt (không vân, không phủ, không in ấn). Lần chạy 1 luôn được thực hiện không lật, nên bạn luôn có kết quả không lật để so sánh - lần chạy nào xếp tốt nhất sẽ được giữ. Luôn bắt đầu ở trạng thái TẮT mỗi lần mở ứng dụng, không khôi phục từ phiên trước.",
     btn_advanced_collapsed: "THIẾT LẬP NÂNG CAO ▾",
     btn_advanced_expanded: "THIẾT LẬP NÂNG CAO ▴",
     settings_bar_text: "CẤU HÌNH — THIẾT LẬP",

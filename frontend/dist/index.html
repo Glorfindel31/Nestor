@@ -156,6 +156,12 @@
             <input id="cfg-cleanup-threshold" type="number" min="0" max="100" step="1" placeholder="e.g. 60" data-i18n-placeholder="cleanup_placeholder" data-i18n-title="cleanup_tooltip" title="After a run finishes, any sheet whose own utilisation ends up below this gets re-packed in place - same settings, that sheet's parts only, never pulling parts from other sheets. Leave blank to turn this off. You can also REPACK a single sheet manually from the RESULT view regardless of this setting." />
           </div>
           <p class="hint" data-i18n="cleanup_hint">Sheets under this utilisation get auto-repacked in place after a run (same parts, tighter arrangement) - blank turns it off. You can also REPACK any single sheet manually from the RESULT view regardless.</p>
+          <div class="row mirror-row" id="mirror-row">
+            <label for="cfg-mirror" data-i18n="mirror_label" data-i18n-title="mirror_tooltip" title="Lets the nest place a piece flipped over (mirrored), not just rotated - which often saves real material on pieces that are not symmetric. Only tick this if the material has no side: no grain, no coating, no printed or good face, and no feature that has to stay on one face. If the material does have a side, a flipped piece is scrap.">FLIP PIECES OVER (MIRROR)</label>
+            <input id="cfg-mirror" type="checkbox" data-i18n-title="mirror_tooltip" title="Lets the nest place a piece flipped over (mirrored), not just rotated - which often saves real material on pieces that are not symmetric. Only tick this if the material has no side: no grain, no coating, no printed or good face, and no feature that has to stay on one face. If the material does have a side, a flipped piece is scrap." />
+            <strong class="mirror-on-badge" data-i18n="mirror_on_badge">ON — PIECES MAY BE CUT MIRRORED</strong>
+          </div>
+          <p class="hint mirror-hint" data-i18n="mirror_hint">Only for material with no good side (no grain, no coating, no printed face). RUN 1 is always done without flipping, so you always get a flip-free result to compare against - whichever run packs best is the one you keep. Always starts OFF at app launch, never restored from the last session.</p>
           <div class="row panel-heading-row">
             <button type="button" id="btn-toggle-advanced" class="small" data-i18n="btn_advanced_collapsed">ADVANCED SETTINGS ▾</button>
           </div>
@@ -210,6 +216,7 @@
       <button id="btn-stop" class="danger" hidden data-i18n="btn_stop">STOP</button>
       <span class="spinner" id="run-spinner" hidden></span>
       <span class="status" id="run-status"></span>
+      <span class="mirror-run-warning" data-i18n="mirror_run_warning">MIRRORING ON</span>
       <div class="progress" id="run-progress" hidden>
         <div class="progress-fill" id="run-progress-fill"></div>
       </div>

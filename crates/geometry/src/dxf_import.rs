@@ -189,6 +189,51 @@ pub fn shift_layered_polygon(poly: &LayeredPolygon, dx: f64, dy: f64) -> Layered
     }
 }
 
+/// Reflects a part across the Y axis (`x -> -x`) - the "flip it over"
+/// variant the nest may place instead of the original when the material has
+/// no good side (see `nesting::dispatch`'s rotation-gene decoding for how a
+/// run opts into it). Not a rotation: no rotation angle produces a
+/// reflection, which is exactly why a mirrored variant can fit where none of
+/// the rotations do.
+///
+/// Point order is reversed, not just negated: a reflection alone flips
+/// winding direction, and the Clipper2 `NonZero` fill rule downstream reads
+/// an outline's winding relative to its holes' - flipping every ring's
+/// winding but keeping the point order would silently change what counts as
+/// material. Reversing restores the original winding.
+pub fn mirror_layered_polygon(poly: &LayeredPolygon) -> LayeredPolygon {
+    let points = poly.points.iter().rev().map(|p| Point::new(-p.x, p.y)).collect();
+    let children = poly.children.iter().map(mirror_layered_polygon).collect();
+    let is_circle = poly.is_circle.map(|c| Circle { cx: -c.cx, cy: c.cy, r: c.r });
+    // ponytail: label geometry is mirrored along with the part (position
+    // and baseline direction), which is what physically happens to an
+    // engraved label on a flipped part - the glyphs are not re-laid-out to
+    // read left-to-right again.
+    let texts = poly
+        .texts
+        .iter()
+        .map(|t| TextAnnotation { position: Point::new(-t.position.x, t.position.y), rotation_deg: (180.0 - t.rotation_deg).rem_euclid(360.0), ..t.clone() })
+        .collect();
+    // `bulge` is a *signed* arc encoding (`tan(angle/4)`, positive = CCW)
+    // attached to the segment leaving each vertex, so the reversal above
+    // has to move it as well as flip it: reflecting negates the sign,
+    // traversing the segment backwards negates it again (net: unchanged),
+    // and the segment that used to leave vertex `src` now leaves the vertex
+    // that follows it in the reversed list - i.e. each reversed vertex
+    // inherits its *predecessor's* bulge.
+    let real_boundary = poly.real_boundary.as_ref().map(|verts| {
+        let n = verts.len();
+        (0..n)
+            .map(|j| {
+                let src = n - 1 - j;
+                RealVertex { point: Point::new(-verts[src].point.x, verts[src].point.y), bulge: verts[(src + n - 1) % n].bulge }
+            })
+            .collect()
+    });
+
+    LayeredPolygon { points, layer: poly.layer.clone(), is_circle, children, texts, real_boundary }
+}
+
 /// Port of `background.js`'s `polygonMaterialArea`: polygon area minus the
 /// area of its holes, clamped to non-negative (matches `Math.max(0, ...)`).
 pub fn polygon_material_area(poly: &LayeredPolygon) -> f64 {
@@ -967,5 +1012,40 @@ mod tests {
         let text = &shifted.texts[0];
         assert_eq!(text.position, Point::new(6.0, -1.0));
         assert_eq!(text.rotation_deg, 45.0, "shifting must not touch rotation");
+    }
+
+    /// The only non-obvious part of `mirror_layered_polygon`: a reversed
+    /// bulge list must still describe the same physical arcs, mirrored. Both
+    /// a wrong sign and a wrong index shift produce a plausible-looking
+    /// polygon that bulges the wrong way on export, which no area/bounds
+    /// check would catch.
+    #[test]
+    fn mirroring_preserves_arcs_and_winding() {
+        let v = vec![
+            RealVertex { point: Point::new(0.0, 0.0), bulge: 0.4 },
+            RealVertex { point: Point::new(10.0, 3.0), bulge: -0.2 },
+        ];
+        let mut poly = LayeredPolygon::new(vec![Point::new(0.0, 0.0), Point::new(10.0, 3.0), Point::new(10.0, 0.0)], "0".into(), None);
+        poly.real_boundary = Some(v.clone());
+        let m = mirror_layered_polygon(&poly);
+
+        // Winding survives (reflection alone would flip the sign).
+        assert!((polygon_area(&poly.points) - polygon_area(&m.points)).abs() < 1e-9);
+
+        // Every arc of the mirrored boundary is the mirror image of the
+        // original arc it came from, traversed backwards.
+        let mb = m.real_boundary.unwrap();
+        for j in 0..mb.len() {
+            let k = (j + 1) % mb.len();
+            let got = tessellate_bulge(mb[j].point, mb[k].point, mb[j].bulge, 0.01);
+            let src = mb.len() - 1 - j;
+            let src_next = (src + 1) % v.len();
+            let expected: Vec<Point> =
+                tessellate_bulge(v[src_next].point, v[(src_next + 1) % v.len()].point, v[src_next].bulge, 0.01).iter().rev().map(|p| Point::new(-p.x, p.y)).collect();
+            assert_eq!(got.len(), expected.len());
+            for (a, b) in got.iter().zip(&expected) {
+                assert!((a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9, "arc {j}: {a:?} != {b:?}");
+            }
+        }
     }
 }
