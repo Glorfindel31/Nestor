@@ -32,7 +32,7 @@ use nesting::repack;
 use tauri::{Emitter, Manager};
 
 use crate::dto::{
-    expand_parts, BestResultDto, ExpandedParts, PartRuleDto, ValidatePlacementRequest, ValidatePlacementResponse, ExportRequest, NestConfigDto, NestProgressDto, NestRunCompleteDto, NestRunStartDto, NestSnapshotDto, NestTickDto,
+    expand_parts, BestResultDto, ExpandedParts, PartRuleDto, ReportRequest, ValidatePlacementRequest, ValidatePlacementResponse, ExportRequest, NestConfigDto, NestProgressDto, NestRunCompleteDto, NestRunStartDto, NestSnapshotDto, NestTickDto,
     PlacedPartDto, PolygonDto, RepackSheetRequest, RepackSheetResponse, RunNestRequest, RunNestResponse, SheetPlacementDto,
 };
 
@@ -624,6 +624,36 @@ pub fn validate_placement(request: ValidatePlacementRequest) -> Result<ValidateP
 
     let valid = nesting::placement::placement_is_valid(&sheet, &moved, nesting::placement::Placement { x: request.x, y: request.y }, &others);
     Ok(ValidatePlacementResponse { valid })
+}
+
+/// Writes the PDF job report: a summary page plus one to-scale page per
+/// sheet. Reuses `build_export_layouts` verbatim, so the report draws
+/// exactly what a DXF/SVG export of the same result would contain.
+///
+/// `include_unplaced` is forced off - never-placed parts belong in the
+/// summary's "not placed" count, not packed into a fake extra sheet page.
+pub fn export_report(path: &str, request: ReportRequest) -> Result<(), String> {
+    let mut export = request.export;
+    export.include_unplaced = false;
+
+    let layouts = build_export_layouts(export)?;
+    let config = &request.config;
+    let meta = geometry::pdf_export::ReportMeta {
+        title: request.title.unwrap_or_else(|| "Nesting job report".to_string()),
+        parts: request.parts.iter().map(|p| geometry::pdf_export::ReportPart { name: p.name.clone(), quantity: p.quantity }).collect(),
+        settings: vec![
+            ("Margin".to_string(), format!("{} mm", config.margin)),
+            ("Spacing".to_string(), format!("{} mm", config.spacing)),
+            ("Runs".to_string(), config.runs.to_string()),
+            ("Starting rotations".to_string(), config.rotations.to_string()),
+            ("Mirroring".to_string(), if config.mirror { "allowed" } else { "off" }.to_string()),
+            ("Curve tolerance".to_string(), format!("{} mm", config.curve_tolerance)),
+            ("Seed".to_string(), config.seed.to_string()),
+        ],
+    };
+
+    let bytes = geometry::pdf_export::export_report(&layouts, &meta);
+    std::fs::write(path, bytes).map_err(|e| format!("couldn't write {path}: {e}"))
 }
 
 /// Validates `request` and builds the padded sheets/parts both nest-running
@@ -1225,6 +1255,11 @@ pub async fn repack_sheet_command(request: RepackSheetRequest) -> Result<RepackS
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub async fn export_report_command(path: String, request: ReportRequest) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || export_report(&path, request)).await.map_err(|e| format!("report task panicked: {e}"))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn validate_placement_command(request: ValidatePlacementRequest) -> Result<ValidatePlacementResponse, String> {
     tauri::async_runtime::spawn_blocking(move || validate_placement(request)).await.map_err(|e| format!("validate task panicked: {e}"))?
 }
@@ -1379,7 +1414,7 @@ pub async fn run_nest_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dto::{NestConfigDto, PartDto, PlacementTypeDto, PointDto, TextDto};
+    use crate::dto::{NestConfigDto, PartDto, PlacementTypeDto, PointDto, ReportPartDto, TextDto};
 
     fn square_dto(size: f64) -> PolygonDto {
         PolygonDto {
@@ -2758,5 +2793,67 @@ mod tests {
         assert_eq!((locked.x, locked.y), (33.5, 61.25), "a pinned part must not move");
         assert!(locked.locked, "and must come back still pinned, so the next repack sees it too");
         assert!(response.placement.parts.iter().filter(|p| p.id != 0).all(|p| !p.locked));
+    }
+
+    // --- PDF job report --------------------------------------------------
+
+    #[test]
+    fn export_report_writes_a_pdf_whose_numbers_match_the_result_it_drew() {
+        let dir = std::env::temp_dir().join("rustynesting-report-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("report.pdf");
+
+        // Two 10mm parts on a 100mm sheet: 200 of 10000 = 2%.
+        let request = ReportRequest {
+            export: ExportRequest {
+                sheets: vec![square_dto(100.0)],
+                parts_by_id: HashMap::from([(0, square_dto(10.0)), (1, square_dto(10.0))]),
+                placements: vec![SheetPlacementDto {
+                    sheet_index: 0,
+                    parts: vec![
+                        PlacedPartDto { id: 0, x: 0.0, y: 0.0, rotation: 0.0, locked: false },
+                        PlacedPartDto { id: 1, x: 20.0, y: 0.0, rotation: 0.0, locked: false },
+                    ],
+                }],
+                sheet_spacing: 10.0,
+                include_sheet_outline: true,
+                include_unplaced: true, // must be forced off by the command
+            },
+            config: config(1),
+            parts: vec![ReportPartDto { name: "bracket".into(), quantity: 2 }],
+            title: Some("Job 42".into()),
+        };
+        export_report(path.to_str().unwrap(), request).expect("writes a report");
+
+        let text = std::fs::read_to_string(&path).expect("the report is ASCII-only by design");
+        assert!(text.starts_with("%PDF-"));
+        assert!(text.trim_end().ends_with("%%EOF"));
+        assert!(text.contains("Job 42"), "the caller's title is the heading");
+        assert!(text.contains("Utilisation: 2.0%"), "utilisation is measured off the drawn geometry");
+        assert!(text.contains("Pieces placed: 2 of 2"));
+        assert!(text.contains("bracket"), "the piece table is printed");
+        assert!(text.contains("Spacing"), "the settings the run used are printed");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn export_report_rejects_the_same_bad_input_the_other_exporters_do() {
+        let dir = std::env::temp_dir();
+        let request = ReportRequest {
+            export: ExportRequest {
+                sheets: vec![square_dto(100.0)],
+                parts_by_id: HashMap::new(),
+                placements: vec![SheetPlacementDto { sheet_index: 0, parts: vec![PlacedPartDto { id: 9, x: 0.0, y: 0.0, rotation: 0.0, locked: false }] }],
+                sheet_spacing: 0.0,
+                include_sheet_outline: true,
+                include_unplaced: false,
+            },
+            config: config(1),
+            parts: Vec::new(),
+            title: None,
+        };
+        // Same "placement references unknown part id" guard build_export_layouts
+        // already enforces for DXF/SVG - the report reuses it verbatim.
+        assert!(export_report(dir.join("never-written.pdf").to_str().unwrap(), request).is_err());
     }
 }

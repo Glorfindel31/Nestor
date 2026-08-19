@@ -963,7 +963,36 @@ function renderResult(response, request) {
 const EXPORT_FORMATS = {
   dxf: { command: "export_dxf_command", extension: "dxf", filterName: "DXF" },
   svg: { command: "export_svg_command", extension: "svg", filterName: "SVG" },
+  // The PDF report isn't machine geometry, it's a printable job sheet, so it
+  // takes a different request shape - `wrap` nests the ordinary export
+  // request and attaches the run's settings plus the piece list, both of
+  // which only exist on this side (see ReportRequest).
+  pdf: {
+    command: "export_report_command",
+    extension: "pdf",
+    filterName: "PDF report",
+    wrap: (request) => ({
+      export: request,
+      config: lastNestRequest.config,
+      parts: reportPartList(),
+      title: null,
+    }),
+  },
 };
+
+// The piece table for the report, read from the shapes table the same way
+// buildRequest reads roles/quantities. Skips anything not being nested.
+function reportPartList() {
+  const parts = [];
+  importedShapes.forEach((shape, i) => {
+    const roleEl = document.querySelector(`[data-role="${shape._uiId}"]`);
+    const qtyEl = document.querySelector(`[data-qty="${shape._uiId}"]`);
+    if (!roleEl || !qtyEl || roleEl.value !== "part") return;
+    const quantity = Number(qtyEl.value);
+    if (quantity > 0) parts.push({ name: `${shape._file}-${i + 1}`, quantity });
+  });
+  return parts;
+}
 
 async function handleExport() {
   if (!currentSnapshot || !lastNestRequest || !lastPartsById) return;
@@ -1008,7 +1037,7 @@ async function handleExport() {
   logLine(`export: ${path} (sheet spacing ${sheetSpacing}mm, sheet outline ${includeSheetOutline ? "on" : "off"}, unplaced parts ${includeUnplaced ? "on" : "off"})`);
   el("btn-export").disabled = true;
   try {
-    await invoke(format.command, { path, request });
+    await invoke(format.command, { path, request: format.wrap ? format.wrap(request) : request });
     setStatus("export-status", t("export_status_done"), false);
     logLine(`export ok: ${path}`);
   } catch (err) {

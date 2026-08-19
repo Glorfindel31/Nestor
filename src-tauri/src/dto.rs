@@ -657,6 +657,31 @@ pub struct ExportRequest {
     pub include_unplaced: bool,
 }
 
+/// One row of the PDF report's piece table. Names and quantities live only
+/// in the frontend's own table, so they have to be sent - nothing on the
+/// backend knows what the user called a shape.
+#[derive(Deserialize, Clone, Debug)]
+pub struct ReportPartDto {
+    pub name: String,
+    pub quantity: usize,
+}
+
+/// Input for `commands::export_report`. Wraps `ExportRequest` rather than
+/// adding fields to it: DXF/SVG callers have no business carrying
+/// report-only metadata. Every number the report prints that *is* derivable
+/// is computed from the drawn geometry instead of being sent, so the figures
+/// and the picture can never disagree.
+#[derive(Deserialize, Clone, Debug)]
+pub struct ReportRequest {
+    pub export: ExportRequest,
+    pub config: NestConfigDto,
+    #[serde(default)]
+    pub parts: Vec<ReportPartDto>,
+    /// Shown as the report's heading.
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
 /// Payload for the `"nest-progress"` event `run_nest_command` emits once per
 /// completed generation, so the frontend can show a live console instead of
 /// blocking silently until the whole run finishes - see
