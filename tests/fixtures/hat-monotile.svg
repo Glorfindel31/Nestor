@@ -1,6 +1,9 @@
 <?xml version="1.0"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:lc="https://librecad.org" xmlns:xlink="http://www.w3.org/1999/xlink" width="38.97114317mm" height="33.75mm" viewBox="0 0 38.97114317 33.75">
-    <g lc:layername="0" lc:is_locked="false" lc:is_construction="false" fill="none" stroke="black" stroke-width="1">
-        <path d="M12.99038106,11.25 L19.48557159,0 L25.98076211,3.75 L32.47595264,0 L38.97114317,11.25 L32.47595264,22.5 L38.97114317,26.25 L38.97114317,33.75 L25.98076211,33.75 L19.48557159,22.5 L12.99038106,26.25 L0,18.75 L0,11.25 L12.99038106,11.25 Z "/>
+<!-- Regenerated from hat-monotile.dxf by crates/geometry/examples/gen_hat_svg.rs.
+     Coordinates are full-precision on purpose: the previous 8-decimal version
+     was a measurably different shape at the engine's 1e-9 tolerance. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="38.9711431702998mm" height="33.75mm" viewBox="0 0 38.9711431702998 33.75">
+    <g fill="none" stroke="black" stroke-width="0.1">
+        <path d="M12.99038105676658,11.25 L19.4855715851499,0 L25.98076211353319,3.75 L32.47595264191648,0 L38.9711431702998,11.25 L32.47595264191648,22.5 L38.9711431702998,26.25 L38.9711431702998,33.75 L25.98076211353319,33.75 L19.4855715851499,22.5 L12.99038105676658,26.25 L0,18.75 L0,11.25 Z" />
     </g>
 </svg>

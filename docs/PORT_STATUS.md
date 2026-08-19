@@ -157,6 +157,12 @@ element/command coverage.
 | `main/ui/components/nesting-console.ts` | frontend (ported as-is) + Tauri wiring | not started | |
 | `main/benchmarkLogger.js` (git-tagged, dual-file, 5MB-rotated CSV logging) | `nesting::benchmark_log` | done | `git_revision()` (`-dirty` suffix from `git status --porcelain`, cached for the process), `append_benchmark_line` (per-generation detail, 5MB-rotated to `.old`), `append_run_summary_row` (per-run CSV, header written once) - matches the original's exact two-file split and `nest-benchmark-runs.csv` column philosophy (one row per run, meant for lining runs up side by side). Built to support `crates/nesting/examples/bench.rs`: a real timed-runs benchmark (N runs x M seconds each, real `tests/fixtures/FLAT.dxf` parts, sheet/margin/spacing as actual job parameters via `geometry::clipper::offset` pre/post-processing - see the example's own doc comment) used to look for performance bottlenecks empirically, same spirit as the original's four tuning sweeps |
 
+## Resolved investigation — the DXF-vs-SVG utilisation gap
+
+| Item | Status | Notes / gotchas |
+|---|---|---|
+| `hat_test_svg.rs`: DXF 78.57% vs SVG ~69% at `part_count=252` | resolved | **Not** the suspected floating-point tie-break in the placement engine. `hat-monotile.svg` was a lower-precision copy of the same design - coordinates rounded to 8 decimals, leaving edge lengths wrong by up to 8.4e-9, over 8x `polygon::TOL`. For an exactly-interlocking monotile that is a different shape. Regenerated at full precision (`crates/geometry/examples/gen_hat_svg.rs`); both sources now reach 78.57% on generation 1. The parity test that "proved" congruence was comparing vertices at `0.01`, seven decades looser than the engine's own tolerance - it now compares edge *vectors* at `TOL` and fails on the old fixture. **General lesson: a parity assertion looser than the tolerance the engine computes at proves nothing.** Ruled out and not worth re-checking: `nfp.rs`'s orbiting code never runs on this benchmark (rectangle fast path + Clipper Minkowski). Noted but not a live bug: Clipper's fixed-point grid (1e7, i.e. 1e-7) is 100x coarser than `TOL`, and no code normalises a shape's position before scaling into it |
+
 ## New scope — DXF import: chained profiles, POLYLINE, INSERT
 
 | Item | Rust module | Status | Notes / gotchas |

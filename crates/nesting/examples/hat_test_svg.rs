@@ -4,32 +4,40 @@
 //! (`geometry::svg_import::parse_svg`) of the same real-world hat tile
 //! (`tests/fixtures/hat-monotile.dxf` vs `hat-monotile.svg`).
 //!
-//! **Known, investigated gap - not an SVG import bug.** At `part_count=252`
-//! this currently reports DXF at 78.57% (matches `hat_test.rs`'s documented
-//! target exactly) but SVG at ~69%, even though `svg_fixtures.rs` already
-//! proves the two source shapes are byte-for-byte congruent (same area,
-//! same winding, same vertex sequence once translated to a common origin).
-//! Isolated by hand (see this session's investigation, not kept as
-//! permanent test code here): translating the SVG-derived shape to
-//! numerically match DXF's own coordinate values reproduces 78.57% exactly,
-//! generation-by-generation identical to the DXF run - but an arbitrary
-//! translation of the *DXF*-derived shape stays at 78.57% too, while
-//! several different arbitrary translations of the *SVG*-derived shape all
-//! land somewhere in the high-60s/low-70s, never at 78.57%, unless forced
-//! to match DXF's own values. That rules out "any translation destabilizes
-//! this tessellation" - the fragility is specific to the exact
-//! floating-point coordinate *values* each file happens to contain (DXF's
-//! own rounding vs SVG's own rounding of the same nominal design), not
-//! shape correctness or import format. This is the same kind of
-//! razor's-edge placement-engine sensitivity `hat_test.rs`'s own doc
-//! comment already documents extensively for this specific tessellation
-//! (`rotations=6` producing bad angles, `rotations=8+` being a strict
-//! downgrade, etc.) - a pre-existing characteristic of the delicate
-//! tightfit contact-search's floating-point tie-breaking, not something
-//! this session's SVG import work introduced. Root-causing *that*
-//! tie-break sensitivity (likely somewhere in the NFP search-start-point
-//! selection or the tightfit scorer's own comparisons) is a separate,
-//! open-ended investigation from porting SVG import itself.
+//! **Resolved.** Both sources now reach 78.57% at `part_count=252` on
+//! generation 1. Keeping the trail, because the wrong hypothesis held for a
+//! while and is easy to arrive at again:
+//!
+//! The symptom was DXF at 78.57% and SVG at ~69%, with `svg_fixtures.rs`
+//! apparently already proving the two shapes congruent. Hand-isolation
+//! showed that forcing the SVG shape onto DXF's own coordinate values
+//! reproduced 78.57% exactly, while arbitrary translations of the SVG shape
+//! landed in the high-60s and arbitrary translations of the *DXF* shape
+//! stayed at 78.57%. That pointed at a position-dependent floating-point
+//! tie-break in the placement engine - plausible, since this tessellation is
+//! genuinely razor-edged (see `hat_test.rs` on `rotations=6` and `8+`), and
+//! wrong.
+//!
+//! The actual cause: **`hat-monotile.svg` was a lower-precision copy of the
+//! same design.** Its coordinates were rounded to 8 decimals, which leaves
+//! its *edge lengths* wrong by up to 8.4e-9 - over eight times
+//! `polygon::TOL`. For an exactly-interlocking monotile, that is not a
+//! rounding detail, it is a different shape that no longer tiles. The
+//! congruence proof was an illusion: `svg_fixtures.rs` compared vertices at
+//! `0.01`, seven decades looser than the tolerance the engine actually uses.
+//! Regenerating the fixture at full precision
+//! (`crates/geometry/examples/gen_hat_svg.rs`) closed the gap outright, and
+//! that test now compares edge *vectors* at `TOL` so the same class of bug
+//! cannot hide there again.
+//!
+//! Ruled out along the way, worth not re-checking: `nfp.rs`'s orbiting
+//! `no_fit_polygon`/`search_start_point` are not on this benchmark's hot path
+//! at all - the 500x500 sheet takes `inner_nfp`'s rectangle fast path, and
+//! obstacle NFPs go through Clipper's Minkowski difference. If a
+//! position-dependent gap ever does show up here again, the remaining
+//! suspect is that Clipper's fixed-point grid (`DeepnestScale::MULTIPLIER`,
+//! 1e7) is 100x coarser than `TOL`, and no code normalises a shape's
+//! position before scaling into it.
 //!
 //! Usage: `cargo run --release -p nesting --example hat_test_svg -- [seconds] [part_count]`
 //! (defaults: 60s, 252 parts) - always rotations=2, population=20,
