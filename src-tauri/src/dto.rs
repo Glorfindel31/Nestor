@@ -438,6 +438,13 @@ pub struct PlacedPartDto {
     pub x: f64,
     pub y: f64,
     pub rotation: f64,
+    /// Pinned by the user: a repack must leave this part exactly where it
+    /// is and fit everything else around it. Lives on the placement rather
+    /// than in a separate list so it cannot drift from the geometry it
+    /// describes, and defaults to `false` so payloads that predate it (an
+    /// older `best_result.json`) still load.
+    #[serde(default)]
+    pub locked: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -582,6 +589,29 @@ pub struct BestResultDto {
     /// reason as `part_rules`.
     #[serde(default)]
     pub config: Option<NestConfigDto>,
+}
+
+/// Input for `commands::validate_placement` - the result view asking whether
+/// a hand-dragged part may rest where the pointer left it.
+#[derive(Deserialize, Clone, Debug)]
+pub struct ValidatePlacementRequest {
+    pub sheet: PolygonDto,
+    /// The sheet's current placement, including the dragged part's *old*
+    /// position (which is ignored - a part is never an obstacle to itself).
+    pub placement: SheetPlacementDto,
+    pub parts_by_id: HashMap<usize, PolygonDto>,
+    pub moved_id: usize,
+    pub x: f64,
+    pub y: f64,
+    pub rotation: f64,
+    /// The run's own config - `margin`/`spacing` decide the answer, so this
+    /// has to be the config the nest actually ran with, not defaults.
+    pub config: NestConfigDto,
+}
+
+#[derive(Serialize, Clone, Copy, Debug)]
+pub struct ValidatePlacementResponse {
+    pub valid: bool,
 }
 
 /// What `export_dxf_command`/`export_svg_command` need to write a nest

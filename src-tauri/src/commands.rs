@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use dxf::Drawing;
 use geometry::clearance::{prepare_part, prepare_sheet};
 use geometry::dxf_export::{PlacedShape, SheetLayout};
-use geometry::dxf_import::LayeredPolygon;
+use geometry::dxf_import::{rotate_layered_polygon, LayeredPolygon};
 use nesting::cache::NfpCache;
 use nesting::consolidation::{recompute_totals, refine_consolidation};
 use nesting::dispatch;
@@ -32,7 +32,7 @@ use nesting::repack;
 use tauri::{Emitter, Manager};
 
 use crate::dto::{
-    expand_parts, BestResultDto, ExpandedParts, PartRuleDto, ExportRequest, NestConfigDto, NestProgressDto, NestRunCompleteDto, NestRunStartDto, NestSnapshotDto, NestTickDto,
+    expand_parts, BestResultDto, ExpandedParts, PartRuleDto, ValidatePlacementRequest, ValidatePlacementResponse, ExportRequest, NestConfigDto, NestProgressDto, NestRunCompleteDto, NestRunStartDto, NestSnapshotDto, NestTickDto,
     PlacedPartDto, PolygonDto, RepackSheetRequest, RepackSheetResponse, RunNestRequest, RunNestResponse, SheetPlacementDto,
 };
 
@@ -442,6 +442,10 @@ pub fn repack_sheet(request: RepackSheetRequest) -> Result<RepackSheetResponse, 
     } else {
         None
     };
+    // Pinned parts, straight off the placement the frontend sent - lock state
+    // rides on the placement model itself rather than as a separate list, so
+    // it can't drift from the geometry it describes.
+    let locked: Vec<usize> = request.placement.parts.iter().filter(|p| p.locked).map(|p| p.id).collect();
     let run_repack = || {
         repack::repack_sheet(
             &sheet,
@@ -452,6 +456,7 @@ pub fn repack_sheet(request: RepackSheetRequest) -> Result<RepackSheetResponse, 
             &repack_placement_config,
             request.config.generations,
             request.config.seed,
+            &locked,
             &|| false,
         )
     };
@@ -463,7 +468,15 @@ pub fn repack_sheet(request: RepackSheetRequest) -> Result<RepackSheetResponse, 
         Some(mut repacked) => {
             let totals = recompute_totals(std::slice::from_ref(&repacked), &parts_by_id, std::slice::from_ref(&sheet));
             repacked.sheet_index = real_sheet_index;
-            Ok(RepackSheetResponse { placement: to_placements_dto(vec![repacked]).remove(0), improved: true, utilisation: totals.utilisation })
+            let mut placement = to_placements_dto(vec![repacked]).remove(0);
+            // `nesting`'s own `PlacedPart` has no lock concept - locking is a
+            // UI-level intent, not something the engine reasons about - so
+            // the flags are re-applied here rather than threaded through the
+            // engine and back.
+            for part in &mut placement.parts {
+                part.locked = locked.contains(&part.id);
+            }
+            Ok(RepackSheetResponse { placement, improved: true, utilisation: totals.utilisation })
         }
         None => Ok(RepackSheetResponse { placement: request.placement, improved: false, utilisation: original_totals.utilisation }),
     }
@@ -556,6 +569,63 @@ fn validate_nest_config(config: &NestConfigDto) -> Result<(), String> {
     Ok(())
 }
 
+/// Answers "may this part sit here?" for the result view's drag-a-part
+/// interaction. Same `sheet`/`parts_by_id`/`config` shape a repack takes,
+/// plus which part moved and where to.
+///
+/// Deliberately a round trip to the engine rather than a geometry check in
+/// the frontend: overlap has to be judged against the *padded* geometry the
+/// nest itself uses (margin/spacing), on the real polygon tree including
+/// holes, by the same `has_material_overlap`/`has_material_outside_sheet`
+/// pair that accepts or rejects an engine-placed candidate. A JS
+/// approximation would disagree with the engine at exactly the interesting
+/// moments, and would have to be rewritten again when the frontend becomes
+/// Rust.
+pub fn validate_placement(request: ValidatePlacementRequest) -> Result<ValidatePlacementResponse, String> {
+    validate_nest_config(&request.config)?;
+    let margin = request.config.margin;
+    let spacing = request.config.spacing;
+
+    let true_sheet: LayeredPolygon = request.sheet.into();
+    let sheet_points = prepare_sheet(&true_sheet.points, margin, spacing).ok_or("margin/spacing leaves the sheet with no usable area")?;
+    let sheet = LayeredPolygon { points: sheet_points, real_boundary: None, ..true_sheet };
+
+    let pad = |dto: PolygonDto| -> Result<LayeredPolygon, String> {
+        let poly: LayeredPolygon = dto.into();
+        let points = prepare_part(&poly.points, spacing).ok_or_else(|| "spacing leaves a part with no usable outline".to_string())?;
+        Ok(LayeredPolygon { points, real_boundary: None, ..poly })
+    };
+
+    let mut parts_by_id: HashMap<usize, LayeredPolygon> = HashMap::new();
+    for (id, dto) in request.parts_by_id {
+        parts_by_id.insert(id, pad(dto)?);
+    }
+
+    let moved = parts_by_id.get(&request.moved_id).ok_or_else(|| format!("unknown part id {}", request.moved_id))?;
+    let moved = rotate_layered_polygon(moved, request.rotation);
+
+    // Everything else on the sheet, at its own current position - the part
+    // being dragged is not an obstacle to itself.
+    let others: Vec<nesting::placement::PlacedObstacle> = request
+        .placement
+        .parts
+        .iter()
+        .filter(|p| p.id != request.moved_id)
+        .filter_map(|p| {
+            parts_by_id.get(&p.id).map(|geometry| nesting::placement::PlacedObstacle {
+                polygon: rotate_layered_polygon(geometry, p.rotation),
+                id: p.id,
+                source_id: p.id,
+                rotation: p.rotation,
+                placement: nesting::placement::Placement { x: p.x, y: p.y },
+            })
+        })
+        .collect();
+
+    let valid = nesting::placement::placement_is_valid(&sheet, &moved, nesting::placement::Placement { x: request.x, y: request.y }, &others);
+    Ok(ValidatePlacementResponse { valid })
+}
+
 /// Validates `request` and builds the padded sheets/parts both nest-running
 /// paths place against - see `PreparedNestInputs`'s own doc comment for why
 /// this is shared rather than duplicated. A pure extraction of what used to
@@ -628,7 +698,7 @@ fn to_placements_dto(placements: Vec<nesting::placement::SheetPlacement>) -> Vec
         .into_iter()
         .map(|sp| SheetPlacementDto {
             sheet_index: sp.sheet_index,
-            parts: sp.parts.into_iter().map(|p| PlacedPartDto { id: p.id, x: p.placement.x, y: p.placement.y, rotation: p.rotation }).collect(),
+            parts: sp.parts.into_iter().map(|p| PlacedPartDto { id: p.id, x: p.placement.x, y: p.placement.y, rotation: p.rotation, locked: false }).collect(),
         })
         .collect()
 }
@@ -1064,6 +1134,7 @@ pub fn run_nest_with_progress(
                     &repack_placement_config,
                     base_generations,
                     seed,
+                    &[],
                     &should_cancel,
                 ) {
                     *sheet_placement = repacked;
@@ -1151,6 +1222,11 @@ pub async fn export_svg_command(path: String, request: ExportRequest) -> Result<
 #[tauri::command(rename_all = "snake_case")]
 pub async fn repack_sheet_command(request: RepackSheetRequest) -> Result<RepackSheetResponse, String> {
     tauri::async_runtime::spawn_blocking(move || repack_sheet(request)).await.map_err(|e| format!("repack task panicked: {e}"))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn validate_placement_command(request: ValidatePlacementRequest) -> Result<ValidatePlacementResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || validate_placement(request)).await.map_err(|e| format!("validate task panicked: {e}"))?
 }
 
 // `app: tauri::AppHandle` is one of Tauri's special injected command
@@ -1569,7 +1645,7 @@ mod tests {
     fn repack_sheet_rejects_the_same_bad_config_values_run_nest_does() {
         let base_request = |cfg: NestConfigDto| RepackSheetRequest {
             sheet: square_dto(100.0),
-            placement: SheetPlacementDto { sheet_index: 0, parts: vec![PlacedPartDto { id: 0, x: 0.0, y: 0.0, rotation: 0.0 }] },
+            placement: SheetPlacementDto { sheet_index: 0, parts: vec![PlacedPartDto { id: 0, x: 0.0, y: 0.0, rotation: 0.0, locked: false }] },
             parts_by_id: HashMap::from([(0, square_dto(10.0))]),
             config: cfg,
             part_rules: HashMap::new(),
@@ -2011,8 +2087,8 @@ mod tests {
         let placements = vec![SheetPlacementDto {
             sheet_index: 0,
             parts: vec![
-                PlacedPartDto { id: 0, x: 0.0, y: 0.0, rotation: 0.0 },
-                PlacedPartDto { id: 1, x: 50.0, y: 50.0, rotation: 0.0 },
+                PlacedPartDto { id: 0, x: 0.0, y: 0.0, rotation: 0.0, locked: false },
+                PlacedPartDto { id: 1, x: 50.0, y: 50.0, rotation: 0.0, locked: false },
             ],
         }];
 
@@ -2053,7 +2129,7 @@ mod tests {
 
         let sheets = vec![square_dto(100.0)];
         let parts_by_id = HashMap::from([(0, part)]);
-        let placements = vec![SheetPlacementDto { sheet_index: 0, parts: vec![PlacedPartDto { id: 0, x: 20.0, y: 0.0, rotation: 0.0 }] }];
+        let placements = vec![SheetPlacementDto { sheet_index: 0, parts: vec![PlacedPartDto { id: 0, x: 20.0, y: 0.0, rotation: 0.0, locked: false }] }];
 
         let out_path = std::env::temp_dir().join("rustynesting_export_dxf_text_dto_test.dxf");
         let export_request = ExportRequest { sheets, parts_by_id, placements, sheet_spacing: 20.0, include_sheet_outline: false, include_unplaced: false };
@@ -2598,5 +2674,89 @@ mod tests {
         // An explicitly empty list is not "this part may never be placed".
         let parts = vec![PartDto { polygon: square_dto(10.0), quantity: 1, allowed_rotations: Some(Vec::new()), mirror: None }];
         assert!(expand_parts(parts, false).part_rules.is_empty(), "an empty allow-list means unconstrained, not unplaceable");
+    }
+
+    // --- drag / lock / re-nest ------------------------------------------
+
+    fn validate_request(spacing: f64, x: f64, y: f64) -> ValidatePlacementRequest {
+        let mut cfg = config(1);
+        cfg.spacing = spacing;
+        ValidatePlacementRequest {
+            sheet: square_dto(100.0),
+            placement: SheetPlacementDto {
+                sheet_index: 0,
+                parts: vec![
+                    PlacedPartDto { id: 0, x: 0.0, y: 0.0, rotation: 0.0, locked: false },
+                    PlacedPartDto { id: 1, x: 50.0, y: 0.0, rotation: 0.0, locked: false },
+                ],
+            },
+            parts_by_id: HashMap::from([(0, square_dto(20.0)), (1, square_dto(20.0))]),
+            moved_id: 1,
+            x,
+            y,
+            rotation: 0.0,
+            config: cfg,
+        }
+    }
+
+    #[test]
+    fn a_hand_dragged_part_is_judged_by_the_same_rules_the_engine_uses() {
+        // Clear of its neighbour and inside the sheet: fine.
+        assert!(validate_placement(validate_request(0.0, 50.0, 50.0)).unwrap().valid);
+
+        // Dropped straight on top of part 0: rejected.
+        assert!(!validate_placement(validate_request(0.0, 0.0, 0.0)).unwrap().valid, "an overlapping drop must be rejected");
+
+        // Partly off the sheet: rejected.
+        assert!(!validate_placement(validate_request(0.0, 95.0, 50.0)).unwrap().valid, "a part hanging off the sheet edge must be rejected");
+    }
+
+    #[test]
+    fn drag_validation_respects_the_runs_own_spacing() {
+        // Part 0 occupies 0..20. Sitting at x=25 is a 5mm gap: legal with no
+        // spacing configured, illegal once the job demands 10mm between
+        // parts. Same padded geometry the nest itself places against.
+        assert!(validate_placement(validate_request(0.0, 25.0, 0.0)).unwrap().valid);
+        assert!(!validate_placement(validate_request(10.0, 25.0, 0.0)).unwrap().valid, "a gap under the configured spacing must be rejected");
+    }
+
+    #[test]
+    fn a_part_is_never_an_obstacle_to_itself() {
+        // Dropping part 1 exactly where it already is must stay legal.
+        let request = validate_request(0.0, 50.0, 0.0);
+        assert!(validate_placement(request).unwrap().valid);
+    }
+
+    #[test]
+    fn drag_validation_rejects_an_unknown_part_rather_than_panicking() {
+        let mut request = validate_request(0.0, 10.0, 10.0);
+        request.moved_id = 99;
+        assert!(validate_placement(request).is_err());
+    }
+
+    #[test]
+    fn repacking_a_sheet_leaves_every_locked_part_untouched_and_reports_them_back() {
+        let request = RepackSheetRequest {
+            sheet: square_dto(120.0),
+            placement: SheetPlacementDto {
+                sheet_index: 4,
+                parts: vec![
+                    PlacedPartDto { id: 0, x: 33.5, y: 61.25, rotation: 0.0, locked: true },
+                    PlacedPartDto { id: 1, x: 0.0, y: 0.0, rotation: 0.0, locked: false },
+                    PlacedPartDto { id: 2, x: 0.0, y: 40.0, rotation: 0.0, locked: false },
+                ],
+            },
+            parts_by_id: HashMap::from([(0, rect_dto(70.0, 25.0)), (1, rect_dto(50.0, 35.0)), (2, rect_dto(30.0, 30.0))]),
+            config: config(6),
+            part_rules: HashMap::new(),
+        };
+        let response = repack_sheet(request).expect("repacks around the pinned part");
+
+        assert_eq!(response.placement.sheet_index, 4, "the real sheet index is restored");
+        assert_eq!(response.placement.parts.len(), 3, "nothing may be dropped");
+        let locked = response.placement.parts.iter().find(|p| p.id == 0).unwrap();
+        assert_eq!((locked.x, locked.y), (33.5, 61.25), "a pinned part must not move");
+        assert!(locked.locked, "and must come back still pinned, so the next repack sees it too");
+        assert!(response.placement.parts.iter().filter(|p| p.id != 0).all(|p| !p.locked));
     }
 }

@@ -723,7 +723,12 @@ function renderSnapshot(snapshot, request) {
         const shape = lastPartsById[p.id];
         if (!shape) return "";
         const transform = (points) => toSvgPoints(rotatedTranslatedPoints(points, p.rotation, p.x, p.y), sheetBounds);
-        return renderShapeSvg(shape, transform);
+        // The <g> exists purely so a pointer can hit the part: the polygons
+        // themselves are fill="none", so only their 1px strokes would be
+        // hit-testable otherwise. `bounding-box` is the cheapest fix and is
+        // good enough to grab a piece; see wireSheetEditing's own note on
+        // what that costs for interleaved concave parts.
+        return `<g class="part${p.locked ? " locked" : ""}" data-part-id="${p.id}" pointer-events="bounding-box">${renderShapeSvg(shape, transform)}</g>`;
       })
       .join("");
 
@@ -737,8 +742,151 @@ function renderSnapshot(snapshot, request) {
       </div>
     `;
     wrapper.querySelector(".btn-repack").addEventListener("click", () => handleRepackSheet(placement.sheet_index));
+    wireSheetEditing(wrapper.querySelector("svg"), placement, sheetDto);
     sheetsEl.appendChild(wrapper);
   }
+}
+
+// Drag-a-part editing on the result view. Three interactions on one SVG:
+// drag a piece to a new spot, click a piece to pin/unpin it, and REPACK,
+// which now tidies the unpinned pieces around the pinned ones.
+//
+// Deliberately thin: the browser answers "where did the pointer go" and
+// nothing else. Whether a placement is *legal* is a round trip to
+// validate_placement_command, because overlap has to be judged against the
+// same margin/spacing-padded geometry the engine places against, on the real
+// polygon tree including holes. A JS approximation would disagree with the
+// engine exactly where it matters, and would have to be written twice once
+// the frontend becomes Rust.
+//
+// ponytail: the live green/red hint while dragging is a bounding-box test,
+// not the real one - it has to run on every pointermove. The authoritative
+// check runs once on drop, and it wins. Two concave pieces can therefore
+// read "green" and still be refused; if that gets annoying, debounce a real
+// validate call instead of making the JS check smarter.
+
+// Pointer position -> SVG user units, via the browser's own matrix rather
+// than hand-rolled viewBox math.
+function svgPoint(svg, event) {
+  const pt = new DOMPoint(event.clientX, event.clientY);
+  return pt.matrixTransform(svg.getScreenCTM().inverse());
+}
+
+function bboxOf(points) {
+  const b = boundsOf(points);
+  return { x: b.minx, y: b.miny, w: b.w, h: b.h };
+}
+
+// Model-space bbox of a placed part, used only for the live drag hint.
+function placedBbox(part, dx = 0, dy = 0) {
+  const shape = lastPartsById[part.id];
+  if (!shape) return null;
+  const b = bboxOf(rotatedTranslatedPoints(shape.points, part.rotation, part.x + dx, part.y + dy));
+  return b;
+}
+
+function bboxesOverlap(a, b) {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+// Attaches the drag/pin handlers to one rendered sheet.
+function wireSheetEditing(svg, placement, sheetDto) {
+  const sheetBounds = boundsOf(sheetDto.points);
+
+  svg.addEventListener("pointerdown", (event) => {
+    const group = event.target.closest("[data-part-id]");
+    if (!group || el("btn-run").disabled) return;
+    const partId = Number(group.dataset.partId);
+    const part = placement.parts.find((p) => p.id === partId);
+    if (!part) return;
+
+    event.preventDefault();
+    svg.setPointerCapture(event.pointerId);
+    const origin = svgPoint(svg, event);
+    const others = placement.parts.filter((p) => p.id !== partId).map((p) => placedBbox(p)).filter(Boolean);
+    const sheetBox = bboxOf(sheetDto.points);
+    let moved = false;
+    let delta = { x: 0, y: 0 };
+
+    const onMove = (moveEvent) => {
+      const now = svgPoint(svg, moveEvent);
+      // SVG y grows downward, the model's grows upward (toSvgPoints flips
+      // it) - so the y delta is negated. Deltas only, so the sheet-relative
+      // offsets in that flip cancel out and don't need inverting.
+      delta = { x: now.x - origin.x, y: -(now.y - origin.y) };
+      if (Math.abs(delta.x) > 0.01 || Math.abs(delta.y) > 0.01) moved = true;
+      group.setAttribute("transform", `translate(${now.x - origin.x} ${now.y - origin.y})`);
+
+      const box = placedBbox(part, delta.x, delta.y);
+      const insideSheet = box.x >= sheetBox.x - 1e-9 && box.y >= sheetBox.y - 1e-9 && box.x + box.w <= sheetBox.x + sheetBox.w + 1e-9 && box.y + box.h <= sheetBox.y + sheetBox.h + 1e-9;
+      const clear = insideSheet && !others.some((o) => bboxesOverlap(box, o));
+      group.classList.toggle("drag-ok", clear);
+      group.classList.toggle("drag-bad", !clear);
+    };
+
+    const onUp = async () => {
+      svg.removeEventListener("pointermove", onMove);
+      svg.removeEventListener("pointerup", onUp);
+      svg.releasePointerCapture(event.pointerId);
+      group.classList.remove("drag-ok", "drag-bad");
+      group.removeAttribute("transform");
+
+      if (!moved) {
+        // A click, not a drag: pin/unpin.
+        part.locked = !part.locked;
+        renderSnapshot(currentSnapshot, lastNestRequest);
+        setStatus("run-status", part.locked ? t("pin_locked", { id: partId }) : t("pin_unlocked", { id: partId }), false);
+        return;
+      }
+
+      await commitDrag(placement, part, delta, sheetDto);
+    };
+
+    svg.addEventListener("pointermove", onMove);
+    svg.addEventListener("pointerup", onUp);
+  });
+
+  return sheetBounds;
+}
+
+// Asks the engine whether the dropped position is legal, and applies it if
+// so. A hand-placed part is pinned automatically - the whole point of moving
+// it by hand is that the next repack must not undo it.
+async function commitDrag(placement, part, delta, sheetDto) {
+  if (!lastNestRequest?.config) {
+    setStatus("run-status", t("repack_needs_config"), true);
+    renderSnapshot(currentSnapshot, lastNestRequest);
+    return;
+  }
+  const target = { x: part.x + delta.x, y: part.y + delta.y };
+  const partsById = {};
+  for (const p of placement.parts) partsById[p.id] = lastPartsById[p.id];
+
+  try {
+    const response = await invoke("validate_placement_command", {
+      request: {
+        sheet: sheetDto,
+        placement,
+        parts_by_id: partsById,
+        moved_id: part.id,
+        x: target.x,
+        y: target.y,
+        rotation: part.rotation,
+        config: lastNestRequest.config,
+      },
+    });
+    if (response.valid) {
+      part.x = target.x;
+      part.y = target.y;
+      part.locked = true;
+      setStatus("run-status", t("drag_placed", { id: part.id }), false);
+    } else {
+      setStatus("run-status", t("drag_rejected"), true);
+    }
+  } catch (err) {
+    setStatus("run-status", t("drag_failed", { err }), true);
+  }
+  renderSnapshot(currentSnapshot, lastNestRequest);
 }
 
 // Manual, click-a-sheet counterpart to the CLEANUP THRESHOLD config option -

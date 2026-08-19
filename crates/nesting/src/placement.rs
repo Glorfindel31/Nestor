@@ -1064,6 +1064,28 @@ fn advance_rotation(current: f64, step: f64) -> f64 {
     }
 }
 
+/// Would placing `part` (already rotated to its final angle) at `at` be a
+/// legal placement on `sheet`, given everything else already on it?
+///
+/// The authority behind the UI's drag-a-part feedback. Deliberately answered
+/// here rather than approximated in the frontend: this is the *same*
+/// `has_material_overlap`/`has_material_outside_sheet` pair the placement
+/// engine itself accepts or rejects candidates with, so a hand-placed part
+/// is held to exactly the standard an engine-placed one is - including
+/// margin/spacing, since the caller passes the same padded geometry the
+/// engine works on.
+#[must_use]
+pub fn placement_is_valid(sheet: &LayeredPolygon, part: &LayeredPolygon, at: Placement, others: &[PlacedObstacle]) -> bool {
+    let shifted = shift_layered_polygon(part, at.x, at.y);
+    if has_material_outside_sheet(&shifted, sheet) {
+        return false;
+    }
+    others.iter().all(|other| {
+        let other_shifted = shift_layered_polygon(&other.polygon, other.placement.x, other.placement.y);
+        !has_material_overlap(&shifted, &other_shifted)
+    })
+}
+
 #[must_use]
 pub fn place_parts(
     sheets: &[LayeredPolygon],

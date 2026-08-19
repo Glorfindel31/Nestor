@@ -847,3 +847,26 @@ body:has(#cfg-mirror:checked) .mirror-row label,
 body:has(#cfg-mirror:checked) .mirror-hint {
   color: var(--error);
 }
+
+/* Result-view editing: a piece can be dragged to a new spot, and clicked to
+   pin it so REPACK tidies everything else around it. The live green/red
+   while dragging is only a bounding-box hint - the drop is judged by the
+   engine (validate_placement_command), which can still refuse a "green" one
+   for two concave pieces. See app.js's wireSheetEditing. */
+#sheets .part {
+  cursor: grab;
+}
+
+#sheets .part.drag-ok polygon {
+  stroke: #4fd15c;
+}
+
+#sheets .part.drag-bad polygon {
+  stroke: var(--error);
+}
+
+/* A pinned piece reads as deliberately placed: dashed outline, so it is
+   obvious at a glance which pieces the next REPACK will not move. */
+#sheets .part.locked polygon {
+  stroke-dasharray: 4 3;
+}

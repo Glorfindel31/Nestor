@@ -13,6 +13,7 @@ fn main() {
             commands::export_dxf_command,
             commands::export_svg_command,
             commands::repack_sheet_command,
+            commands::validate_placement_command,
             commands::append_log_command,
             commands::save_config_command,
             commands::load_config_command,
