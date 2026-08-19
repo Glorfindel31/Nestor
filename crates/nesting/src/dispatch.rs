@@ -35,7 +35,7 @@ use crate::ga::{is_better_nest, GeneticAlgorithm};
 use crate::placement::{place_parts, NestPart, PlaceResult, PlacementConfig};
 
 /// Set in a part id to mean "the mirrored (flipped-over) copy of this part".
-/// `src-tauri`'s `expand_parts` registers both variants in `parts_by_id`/
+/// `app`'s `expand_parts` registers both variants in `parts_by_id`/
 /// `shape_ids` under `id` and `id ^ MIRROR_ID_BIT`, so a mirrored gene needs
 /// no separate geometry pipeline - it *is* a part, with its own shape
 /// identity (and therefore its own NFP cache entries, which it must have:
@@ -380,7 +380,7 @@ mod tests {
 
     /// Regression test: `run()` used to hardcode `&|| false` internally, so
     /// a caller reaching for this top-level API instead of hand-rolling
-    /// `run_generation`'s own loop (as `src-tauri`'s `run_nest_with_progress`
+    /// `run_generation`'s own loop (as `app`'s `run_nest_with_progress`
     /// does) silently got no cancellation at all - the exact bug class
     /// commit `7c6334b` ("Fix UI freeze on long nest runs") already fixed
     /// once, reintroduced by this one function.

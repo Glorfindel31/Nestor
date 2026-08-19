@@ -1,6 +1,6 @@
 # Port Status
 
-The one living tracking doc for the Electron → Rust/Tauri rewrite. See
+The one living tracking doc for the Electron → Rust rewrite. See
 `RUST-REWRITE-PLAN.md` at the repo root for phase scope/ordering and the
 full rationale behind each decision below. Update a row's status the moment
 its corresponding Rust module lands and its ported spec (if any) passes —
@@ -24,6 +24,16 @@ files aren't ported); this is a new, from-scratch parser producing the same
 requirement: `mm`/`cm`/`m`/`px`/unitless convert, `in`/`pt`/`pc`/`ft`/`yd`
 are hard errors. See `geometry::svg_import`'s module doc comment for exact
 element/command coverage.
+
+**Scope change, post-Phase-8: Tauri and the web frontend are gone.** The app
+is now a single native binary with an `egui`/`eframe` UI (`app/src/ui/**`).
+There is no webview, no HTML/CSS/JS anywhere in the repo, and no IPC layer.
+`src-tauri/` is now `app/`, the crate is `rustynesting`, and `frontend/` was
+deleted outright. See the "Pure-Rust UI" section at the bottom for what moved
+where. Rows below that mention Tauri commands, `frontendDist` or `__TAURI__`
+describe how the app worked when they were written and are kept for that
+history — the plain functions in `app/src/commands.rs` they wrapped are
+unchanged and are still the engine's entry points.
 
 ## Known gotchas to preserve (do not silently "fix" away during the port)
 
@@ -317,3 +327,78 @@ lineage this port is built on. Findings, so this doesn't need re-researching:
 - Decision: not pursued now. If revisited, do it as a separate fork/branch
   experiment rather than inside this port - it would be a genuinely
   different engine, not an increment on this one.
+
+## Pure-Rust UI — Tauri and the web frontend removed
+
+| Item | Status | Notes / gotchas |
+|---|---|---|
+| Release build opened a console window | done | The whole cause was a missing `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` — the Tauri template ships it and it had never been added here. `app/src/main.rs:1`. Verified by reading the built PE header's subsystem field (2 = GUI), not by eyeballing a launch |
+| `tauri`, `tauri-build`, `tauri-plugin-dialog`, `tauri.conf.json`, `capabilities/`, `gen/`, `build.rs`'s `tauri_build::build()` | removed | Replaced by `eframe` (glow backend) + `rfd` for native file dialogs — which is what the dialog plugin wrapped anyway. `build.rs` now only stamps the Windows exe icon via `winresource`. Release binary went from ~11.27MB to ~8.86MB, and no longer needs WebView2 present on the machine |
+| `frontend/**` (~3300 lines of live JS/HTML/CSS plus ~4700 lines of unreferenced legacy Electron/Ractive files, 4.3MB) | deleted | Not adapted, not kept as reference: git history has it, and the sibling `deepnest-main` repo is still the real reference. The repo now contains zero `.js`/`.html`/`.css` files |
+| The 14 `#[tauri::command]` wrappers | deleted | Seven were pure `spawn_blocking` passthroughs. The plain functions they wrapped (`import_dxf`, `import_svg`, `run_nest_with_progress`, `export_dxf`/`_svg`/`_report`, `repack_sheet`, `validate_placement`) are **unchanged** and are what the UI calls now. This is why the port was mostly deletion: `commands.rs` was deliberately written Tauri-runtime-free, and `dto.rs` never had a single `tauri::` reference |
+| `AppHandle::path()` (`app_config_dir`/`app_log_dir`) | `app/src/paths.rs` | Hardcodes the old `net.deepnest.rust` identifier deliberately, so the config, best-result and log files resolve to the same paths an existing user already has. Two env vars, no `dirs` dependency. Verified in a real session: written and re-read across a restart |
+| `Emitter::emit` x4 (`nest-progress`/`nest-tick`/`nest-run-start`/`nest-run-complete`) plus `NestProgressDto`/`NestTickDto` | `worker::Msg` | One `mpsc` channel and one enum, drained at the top of each frame. The two event-payload DTOs existed only to be serialised and are deleted; `NestRunStartDto`/`NestRunCompleteDto` stay because they are `run_nest_with_progress`'s own callback parameter types |
+| `tauri::async_runtime::spawn_blocking` x14 | `worker.rs`, one thread per job | **The invariant not to break**: nothing in `ui/**` calls `commands::*` directly. `update()` runs on the event-loop thread, and this project already shipped the freeze that causes once (see the Phase 6 row). `Emit` bundles the sender with `ctx.request_repaint()` so a job cannot do one without the other, and holds its `Sender` in a `Mutex` because `on_individual_placed` is called from rayon workers and so must be `Sync` |
+| `render.js` (SVG string building) | `ui/canvas.rs` | Same Y-flip, same `hash*31` layer-name to hue so colours do not shift between the two versions, same recursive child/hole walk, same 1.4/1.0 stroke widths. `model_to_screen`/`screen_to_model` are a matched pair with a round-trip test, and `model_delta` is expressed as the difference of two `screen_to_model` calls rather than its own division — one place knows about the scale and the flip. This is the file where a port like this goes wrong (cf. the real `svg_import` Y-flip bug), hence the tests |
+| Role/qty/angles/mirror stored in the DOM | `ui::state::ShapeRow` fields | Real state now, so the table rebuilds from it every frame. Removes the append-only constraint, the renumbering pass that existed to patch it up, and the documented bug where switching language left already-created rows' dropdowns in the old language |
+| `localStorage` x4 (`-lang`/`-accent`/`-scale`/`-help-dismissed`) | `eframe::Storage`, one `Prefs` struct | Same mechanism, one key. The `--text-scale` rem arithmetic became `ctx.set_zoom_factor()`, which scales spacing and stroke widths too |
+| `i18n.js` (189 keys x en/vi) | `ui/i18n.rs` | Extracted mechanically from the JS rather than retyped (189/189 keys captured in both languages, checked against a count of the source). Tests assert every key resolves in both languages and that an unknown key echoes itself rather than rendering blank. The `data-i18n` DOM-attribute convention is gone — it only existed because static HTML had no other way to re-translate itself |
+| `escapeHtml` and the XSS concern | gone | It existed because CSP was `null` and a malicious DXF's layer name was interpolated into `innerHTML`. There is no HTML |
+| egui version | pinned to 0.32 | 0.36 landed a reworked API (`App::ui` instead of `App::update`, panels taking `&mut Ui`, per-theme styles). Deliberately not adopted mid-rewrite: writing ~2500 lines of new UI against a surface being learned at the same time is how subtle mistakes get in. Upgrading later is a contained, mechanical job |
+| Theme | new, not a port | Rust/oxide dark-orange, brutal industrial, Win95-revisited: square corners everywhere, 2px chiselled bevels (`theme::bevel`, raised for buttons, inset for panels and fields), no shadows, `animation_time = 0.0`, monospace throughout. The accent picker's five swatches were re-picked into the same family. `visuals.selection.bg_fill` is set explicitly — egui's default selection blue is the one colour this palette has no place for |
+| Verification | done | 71 tests green, including the 54-test `commands.rs` regression net **unchanged** — that suite passing is what proves the rewrite did not touch the engine. Manually driven end to end against the real `tests/fixtures/FLAT.dxf`: import 99 shapes, mark a sheet, run a 3-attempt escalating nest (window stayed responsive, progress bar and per-generation console lines live throughout), 1 placed / 97 unplaced with per-part reasons matching the web UI's own recorded result on this fixture, export DXF and confirm the `drilling`/`Final` layers round-trip, restart and recover the saved best result, pin a part, drag one and have the engine refuse the drop |
+
+### Bugs found by actually running it
+
+Worth recording because none of them would have shown up in a compile or a
+unit test:
+
+- **One Escape press answered two stacked dialogs.** The help overlay opens
+  on first launch on top of the "recover last session?" prompt; both read
+  `key_pressed(Escape)` in the same frame, so a single press closed help
+  *and* silently declined recovery — which also deletes the saved file.
+  Fixed with `consume_key` in every dialog, so the press is taken by exactly
+  one of them.
+- **The recovery prompt printed its own placeholders** (`{sheets}`,
+  `{util}`) — `confirm()` used `t()` where it needed `tv()`.
+- **The import status counted files, not shapes**: "1 shape(s) imported"
+  after reading 99 of them out of one DXF.
+- **The export row sat underneath the floating RUN control**, which is
+  anchored over the scroll area rather than inside it, so the last panel's
+  own controls were unreachable even at maximum scroll.
+- **Vietnamese was unreadable.** egui's built-in monospace (Hack) has no
+  coverage for Vietnamese diacritics, so every string in the `vi` dictionary
+  rendered as fallback boxes - the whole second language, broken, in a way
+  no test would catch because the strings themselves were correct. Fixed by
+  loading Consolas from `C:\Windows\Fonts` at startup (monospace, ships with
+  every Windows install, covers Vietnamese) rather than embedding a ~700KB
+  face for one script; falls back silently to the built-in font if absent.
+- **The help overlay printed "01 01 IMPORT"** — the translated strings
+  already carry their own step number.
+
+### Deliberately carried across unchanged
+
+Each of these is a decision the web UI made on purpose, re-marked with a
+`ponytail:` comment on the new code rather than re-derived:
+
+- The live green/red drag hint is a **bounding-box** test, not the real one;
+  the authoritative check is the engine round trip on drop, and it wins.
+- Console narration stays English-only; only the primary UI is translated.
+- Per-sheet utilisation bands use raw polygon area (not margin/spacing-net)
+  and the thresholds are untuned.
+- The unplaced "reason" is a bounding-box heuristic — the engine reports what
+  it could not place, not why.
+- Quantity 0 means excluded, for sheets as well as parts.
+- `mirror` is never restored from a saved config: a flip setting that quietly
+  survives into a session where the material *does* have a side produces
+  scrap.
+- The console window is minimisable but not closable.
+- Placed parts are hit-tested by bounding box — the web version's
+  `pointer-events="bounding-box"` did exactly the same, because a `fill:none`
+  outline has nothing to hit.
+
+### Not carried across
+
+- **Pan/zoom on the result canvas**: there was not any before either. The
+  mapping now lives in one place (`canvas::View`), so adding it later is a
+  change in one file rather than everywhere.

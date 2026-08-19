@@ -1,0 +1,106 @@
+//! 03 CONFIGURE: the nest settings, basic and advanced.
+//!
+//! Every field keeps the plain-language tooltip the web UI gave it - these
+//! are job parameters a shop-floor operator sets, not developer knobs, and
+//! several of them (dominant threshold, rotations, runs) do something
+//! non-obvious enough that the tooltip is the only explanation there is.
+
+use egui::RichText;
+
+use super::{shell, theme, App};
+use crate::dto::PlacementTypeDto;
+
+const PLACEMENT_TYPES: [(PlacementTypeDto, &str); 6] = [
+    (PlacementTypeDto::TightFit, "placement_opt_tightfit"),
+    (PlacementTypeDto::GravityCorrective, "placement_opt_gravitycorrective"),
+    (PlacementTypeDto::GravityTightFit, "placement_opt_gravitytightfit"),
+    (PlacementTypeDto::Gravity, "placement_opt_gravity"),
+    (PlacementTypeDto::Box, "placement_opt_box"),
+    (PlacementTypeDto::ConvexHull, "placement_opt_convexhull"),
+];
+
+pub fn panel(app: &mut App, ui: &mut egui::Ui) {
+    let lang = app.prefs.lang;
+    fn tr<'a>(lang: super::i18n::Lang, k: &'a str) -> &'a str {
+        super::i18n::t(lang, k)
+    }
+    let t = |k: &'static str| tr(lang, k);
+    ui.add_enabled_ui(!app.controls_locked(), |ui| {
+        shell::number_row(ui, t("margin_label"), t("margin_tooltip"), &mut app.cfg.margin, 0.1, 0.0..=1000.0);
+        shell::number_row(ui, t("spacing_label"), t("spacing_tooltip"), &mut app.cfg.spacing, 0.1, 0.0..=1000.0);
+        shell::number_row(ui, t("runs_label"), t("runs_tooltip"), &mut app.cfg.runs, 0.1, 1..=100);
+
+        ui.horizontal(|ui| {
+            ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("cleanup_label")).color(theme::DIM)));
+            ui.add(egui::TextEdit::singleline(&mut app.cfg.cleanup_threshold).desired_width(70.0).hint_text(t("cleanup_placeholder")));
+        })
+        .response
+        .on_hover_text(t("cleanup_tooltip"));
+        ui.label(RichText::new(t("cleanup_hint")).color(theme::DIM).small());
+
+        ui.add_space(6.0);
+        // Mirroring is deliberately loud. A flipped part is only the same
+        // part if the material has no side - no grain, no coating, no printed
+        // face - and no asymmetric feature has to stay on one face. Flipping
+        // one that does have a side silently produces scrap.
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut app.cfg.mirror, t("mirror_label")).on_hover_text(t("mirror_tooltip"));
+            if app.cfg.mirror {
+                ui.label(RichText::new(t("mirror_on_badge")).color(theme::ERROR).strong());
+            }
+        });
+        if app.cfg.mirror {
+            ui.label(RichText::new(t("mirror_hint")).color(theme::ERROR).small());
+        }
+
+        ui.add_space(8.0);
+        if ui.button(t(if app.advanced_open { "btn_advanced_expanded" } else { "btn_advanced_collapsed" })).clicked() {
+            app.advanced_open = !app.advanced_open;
+        }
+        if app.advanced_open {
+            advanced(app, ui);
+        }
+    });
+}
+
+fn advanced(app: &mut App, ui: &mut egui::Ui) {
+    let lang = app.prefs.lang;
+    fn tr<'a>(lang: super::i18n::Lang, k: &'a str) -> &'a str {
+        super::i18n::t(lang, k)
+    }
+    let t = |k: &'static str| tr(lang, k);
+    ui.separator();
+
+    ui.horizontal(|ui| {
+        ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("placement_label")).color(theme::DIM)));
+        let options: Vec<PlacementTypeDto> = PLACEMENT_TYPES.iter().map(|(v, _)| *v).collect();
+        shell::choice(ui, "placement", &mut app.cfg.placement_type, &options, |v| {
+            PLACEMENT_TYPES.iter().find(|(o, _)| *o == v).map(|(_, k)| t(k).to_string()).unwrap_or_default()
+        });
+    })
+    .response
+    .on_hover_text(t("placement_tooltip"));
+    ui.label(RichText::new(t("placement_hint")).color(theme::DIM).small());
+
+    // The rotation grid is left exactly as the engine takes it, including the
+    // known quirk that `rotations = 6` produces poor angles for rectangular
+    // parts (confirmed by a 60-run sweep). It stays a user-facing setting
+    // rather than being silently corrected - a shop that has tuned around it
+    // must keep getting the same result.
+    shell::number_row(ui, t("rotations_label"), t("rotations_tooltip"), &mut app.cfg.rotations, 0.1, 1..=64);
+    shell::number_row(ui, t("population_label"), t("population_tooltip"), &mut app.cfg.population_size, 0.1, 2..=1000);
+    shell::number_row(ui, t("mutation_label"), t("mutation_tooltip"), &mut app.cfg.mutation_rate, 0.5, 0.0..=100.0);
+    ui.label(RichText::new(t("mutation_hint")).color(theme::DIM).small());
+    shell::number_row(ui, t("generations_label"), t("generations_tooltip"), &mut app.cfg.generations, 0.2, 1..=10_000);
+
+    ui.horizontal(|ui| {
+        ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("dominant_label")).color(theme::DIM)));
+        ui.add(egui::Slider::new(&mut app.cfg.dominant_threshold, 0.01..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+    })
+    .response
+    .on_hover_text(t("dominant_tooltip"));
+    ui.label(RichText::new(t("dominant_hint")).color(theme::DIM).small());
+
+    shell::number_row(ui, t("max_threads_label"), t("max_threads_tooltip"), &mut app.cfg.max_threads, 0.1, 0..=256);
+    shell::number_row(ui, t("seed_label"), t("seed_tooltip"), &mut app.cfg.seed, 1.0, 0..=u64::MAX);
+}

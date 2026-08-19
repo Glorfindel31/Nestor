@@ -11,7 +11,7 @@
 //! itself (see `docs/PORT_STATUS.md`'s Phase 8 row and the empirical
 //! rotation-angle-grid/mutation-rate-cap sweeps that produced some of this
 //! codebase's other preserved gotchas), hence living in `nesting` rather
-//! than `src-tauri`.
+//! than `app`.
 
 use std::fs;
 use std::path::Path;

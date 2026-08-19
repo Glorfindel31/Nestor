@@ -18,7 +18,7 @@
 //! **`widenRotationsIfStalled` is now ported, but split across two places**:
 //! this module only exposes `set_rotations` (widening what future mutations
 //! can draw from); the stagnation counter that decides *when* to call it
-//! lives in `src-tauri/src/commands.rs`'s generation loop, the caller that
+//! lives in `app/src/commands.rs`'s generation loop, the caller that
 //! actually persists across many `dispatch::run_generation` calls (this
 //! module and `nesting::dispatch` both only ever see one generation at a
 //! time). **`refineStalledBest` is still not ported** - it re-runs
@@ -105,7 +105,7 @@ fn random_angles(ids: &[usize], rotations: u32, mirror: bool, rules: &PartRules,
 /// (an empty range) - `PlacementConfig`'s own use of `rotations` already
 /// guards this exact case the same way (`placement.rs`'s `config.rotations.max(1)`
 /// calls); `GaConfig` needs the same floor, since this is `pub` API reachable
-/// without going through `src-tauri`'s own `rotations == 0` request
+/// without going through `app`'s own `rotations == 0` request
 /// validation (a test, a future caller, `nesting`'s own bench harness).
 fn random_angle(id: usize, rotations: u32, mirror: bool, rules: &PartRules, rng: &mut impl Rng) -> f64 {
     let rule = rules.get(&(id & !crate::dispatch::MIRROR_ID_BIT));
@@ -415,7 +415,7 @@ mod tests {
 
     /// Regression test: `rotations: 0` used to panic immediately inside
     /// `GeneticAlgorithm::new` (`random_angles`'s `rng.gen_range(0..0)` on
-    /// an empty range) and again in `mutate`. `src-tauri` validates against
+    /// an empty range) and again in `mutate`. `app` validates against
     /// this at its own request boundary, but `GaConfig`/`GeneticAlgorithm`
     /// are `pub` API reachable without going through that check at all.
     #[test]
