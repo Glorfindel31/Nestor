@@ -40,6 +40,11 @@ let currentSnapshot = null;
 // exactly this server-side too - see that command's own doc comment for
 // the silent-corruption risk this replaces).
 let lastPartsById = null;
+// The per-part orientation rules the last run actually applied
+// (RunNestResponse::part_rules). Kept alongside lastPartsById and sent back
+// with every repack, so a manual repack can't rotate a grain-locked piece
+// into an angle the nest itself was forbidden from using.
+let lastPartRules = {};
 // Set at the start of each run so the "nest-tick" listener below can turn
 // (generation, individuals_done/individuals_total) into an overall
 // percentage - the tick event itself doesn't carry the total generation
@@ -375,6 +380,21 @@ function renderShapesTable() {
         </select>
       </td>
       <td><input type="number" class="qty-input" data-qty="${shape._uiId}" value="1" min="0" step="1" /></td>
+      <td>
+        <select data-rot="${shape._uiId}">
+          <option value="any">${t("rot_any")}</option>
+          <option value="0,180">${t("rot_0_180")}</option>
+          <option value="0,90,180,270">${t("rot_quarter")}</option>
+          <option value="0">${t("rot_fixed")}</option>
+        </select>
+      </td>
+      <td>
+        <select data-mirror="${shape._uiId}">
+          <option value="job">${t("mirror_job")}</option>
+          <option value="allow">${t("mirror_allow")}</option>
+          <option value="deny">${t("mirror_deny")}</option>
+        </select>
+      </td>
       <td><span class="dominant-flag" data-dominant="${shape._uiId}"></span></td>
     `;
     body.appendChild(row);
@@ -501,7 +521,16 @@ function buildRequest() {
       // reasonably expect it to work the same as it does for PART.
       for (let n = 0; n < qty; n++) sheets.push(shapeToPolygonDto(shape));
     } else if (role === "part" && qty > 0) {
-      parts.push({ polygon: shapeToPolygonDto(shape), quantity: qty });
+      // "any"/"job" send null, i.e. "no per-part rule" - the backend only
+      // materialises a rule for parts that actually constrain something.
+      const angles = document.querySelector(`[data-rot="${shape._uiId}"]`).value;
+      const mirror = document.querySelector(`[data-mirror="${shape._uiId}"]`).value;
+      parts.push({
+        polygon: shapeToPolygonDto(shape),
+        quantity: qty,
+        allowed_rotations: angles === "any" ? null : angles.split(",").map(Number),
+        mirror: mirror === "job" ? null : mirror === "allow",
+      });
     }
   });
 
@@ -718,17 +747,25 @@ function renderSnapshot(snapshot, request) {
 // pass, which only touches sheets under the configured threshold).
 async function handleRepackSheet(sheetIndex) {
   if (!currentSnapshot || !lastNestRequest || !lastPartsById) return;
+  if (!lastNestRequest.config) {
+    setStatus("run-status", t("repack_needs_config"), true);
+    return;
+  }
   const idx = currentSnapshot.placements.findIndex((p) => p.sheet_index === sheetIndex);
   if (idx === -1) return;
   const placement = currentSnapshot.placements[idx];
   const partsById = {};
-  for (const p of placement.parts) partsById[p.id] = lastPartsById[p.id];
+  const partRules = {};
+  for (const p of placement.parts) {
+    partsById[p.id] = lastPartsById[p.id];
+    if (lastPartRules[p.id]) partRules[p.id] = lastPartRules[p.id];
+  }
 
   const displayIndex = sheetIndex + 1; // matches the SHEET N label on the card itself, not the internal 0-based index
   setStatus("run-status", t("repack_status_running", { n: displayIndex }), false);
   try {
     const response = await invoke("repack_sheet_command", {
-      request: { sheet: lastNestRequest.sheets[sheetIndex], placement, parts_by_id: partsById, config: lastNestRequest.config },
+      request: { sheet: lastNestRequest.sheets[sheetIndex], placement, parts_by_id: partsById, config: lastNestRequest.config, part_rules: partRules },
     });
     currentSnapshot.placements[idx] = response.placement;
     renderSnapshot(currentSnapshot, lastNestRequest);
@@ -750,6 +787,7 @@ async function handleRepackSheet(sheetIndex) {
 function renderResult(response, request) {
   lastNestRequest = request;
   lastPartsById = response.parts_by_id;
+  lastPartRules = response.part_rules || {};
 
   const historyRow = el("history-row");
   const select = el("history-select");
@@ -1030,6 +1068,7 @@ async function handleReset() {
   currentSnapshot = null;
   lastNestRequest = null;
   lastPartsById = null;
+  lastPartRules = {};
   el("panel-result").hidden = true;
   el("history-row").hidden = true;
   el("history-select").innerHTML = "";
@@ -1127,7 +1166,14 @@ async function tryRecoverBestResult() {
   }
 
   lastPartsById = best.parts_by_id;
-  const request = { sheets: best.sheets };
+  lastPartRules = best.part_rules || {};
+  // `config` too, not just `sheets`: REPACK (and anything else that
+  // re-invokes the engine on a result) reads `lastNestRequest.config`, so a
+  // recovered result used to throw the moment you touched it. Older
+  // best_result.json files predate the field and legitimately have none -
+  // the buttons that need it are disabled in that case rather than failing
+  // at click time.
+  const request = { sheets: best.sheets, config: best.config || null };
   lastNestRequest = request;
   el("history-row").hidden = true;
   renderSnapshot(best, request);

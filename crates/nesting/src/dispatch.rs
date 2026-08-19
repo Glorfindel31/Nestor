@@ -272,14 +272,14 @@ mod tests {
             placement_type: PlacementType::Gravity,
             rotations: 1,
             dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD,
-            curve_tolerance: 0.3,
+            curve_tolerance: 0.3, part_rules: Default::default()
         }
     }
 
     fn setup(part_count: usize) -> (GeneticAlgorithm, Vec<LayeredPolygon>, HashMap<usize, LayeredPolygon>) {
         let parts_by_id: HashMap<usize, LayeredPolygon> = (0..part_count).map(|id| (id, square(10.0))).collect();
         let adam: Vec<usize> = (0..part_count).collect();
-        let ga = GeneticAlgorithm::new(adam, GaConfig { population_size: 6, mutation_rate: 20.0, rotations: 1, mirror: false }, Vec::new(), 0);
+        let ga = GeneticAlgorithm::new(adam, GaConfig { population_size: 6, mutation_rate: 20.0, rotations: 1, mirror: false, part_rules: Default::default() }, Vec::new(), 0);
         let sheets = vec![square(100.0)];
         (ga, sheets, parts_by_id)
     }
@@ -404,7 +404,7 @@ mod tests {
     fn a_mirrored_gene_falls_back_when_its_variant_is_not_registered() {
         let (_, sheets, parts_by_id) = setup(3);
         let adam: Vec<usize> = (0..3).collect();
-        let mut ga = GeneticAlgorithm::new(adam, GaConfig { population_size: 6, mutation_rate: 20.0, rotations: 1, mirror: true }, Vec::new(), 0);
+        let mut ga = GeneticAlgorithm::new(adam, GaConfig { population_size: 6, mutation_rate: 20.0, rotations: 1, mirror: true, part_rules: Default::default() }, Vec::new(), 0);
         let results = run_generation(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &placement_config(), &|| false, &|_, _| {}, &NfpCache::new());
         assert!(!results.is_empty());
         for r in &results {

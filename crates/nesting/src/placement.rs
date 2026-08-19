@@ -189,6 +189,105 @@ pub struct PlacementConfig {
     pub rotations: u32,
     pub dominant_part_area_threshold: f64,
     pub curve_tolerance: f64,
+    /// Per-part orientation constraints. Empty (the default) means every
+    /// part follows the global `rotations` grid and mirror switch, exactly
+    /// as before this field existed - see `PartRule`.
+    pub part_rules: PartRules,
+}
+
+/// Per-part constraints on how a part may be oriented. Absent (no entry in
+/// `PartRules` for a part id) means unconstrained - the global
+/// `rotations` grid and the global mirror switch apply, exactly as before
+/// this existed.
+///
+/// The driving case is grain direction: a part cut from material with a
+/// visible grain, a coating or a printed face may only sit at, say, 0 or
+/// 180 degrees, and may not be flipped over at all, while everything else in
+/// the same job is free.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PartRule {
+    /// The only angles this part may be placed at, in degrees, already
+    /// normalised to `[0, 360)` and deduped. Empty means unconstrained.
+    pub angles: Vec<f64>,
+    /// Whether this part may be mirrored, overriding the job-wide switch.
+    pub mirror: bool,
+}
+
+/// Part id -> its constraint. `Arc` because it rides on `PlacementConfig`
+/// and `GaConfig`, both of which are cloned per run and shared across
+/// rayon's per-individual threads; the map itself never changes during a
+/// run.
+pub type PartRules = std::sync::Arc<HashMap<usize, PartRule>>;
+
+/// The rotation angles a part may be tried at, in the order to try them,
+/// each paired with **the rotation delta to apply to reach it from the
+/// previous entry**. The first entry's delta is always `0.0` (the caller
+/// already holds the part at `from`).
+///
+/// Deltas rather than just angles because the callers rotate incrementally
+/// (`rotate_layered_polygon(&trial_polygon, delta)`), and because
+/// `advance_rotation` wraps its angle at 360 while the rotation applied to
+/// the geometry must stay a plain `step`. Recomputing the delta from wrapped
+/// angles would silently turn a `+90` into a `-270` at the wraparound.
+///
+/// **An unconstrained part gets exactly the sequence the old fixed loop
+/// produced** - `from`, then `advance_rotation` by `360/rotations`, that many
+/// times - so nothing about an unconstrained run changes, bit for bit.
+///
+/// A constrained part's allowed set **replaces** the grid rather than
+/// filtering it. Filtering would make 180 unreachable at `rotations: 3` and
+/// leave a grain-locked part silently unplaceable; and the allowed angles
+/// need not lie on the grid at all.
+#[must_use]
+pub fn rotation_steps(config: &PlacementConfig, part_id: usize, from: f64) -> Vec<(f64, f64)> {
+    let rule = config.part_rules.get(&(part_id & !crate::dispatch::MIRROR_ID_BIT));
+    match rule.filter(|r| !r.angles.is_empty()) {
+        None => {
+            let step = 360.0 / config.rotations.max(1) as f64;
+            let mut out = Vec::with_capacity(config.rotations.max(1) as usize);
+            let mut angle = from;
+            for i in 0..config.rotations.max(1) {
+                out.push((angle, if i == 0 { 0.0 } else { step }));
+                angle = advance_rotation(angle, step);
+            }
+            out
+        }
+        Some(rule) => {
+            // Start at whichever allowed angle is closest to where the part
+            // already is, then walk the rest in cyclic order - the same
+            // "carry on from the current orientation" shape the grid loop
+            // has, so a part that already placed well at one allowed angle
+            // tries that one first on the next sheet.
+            let start = rule
+                .angles
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    let d = |x: f64| {
+                        let raw = (x - from).rem_euclid(360.0);
+                        raw.min(360.0 - raw)
+                    };
+                    d(**a).total_cmp(&d(**b))
+                })
+                .map_or(0, |(i, _)| i);
+
+            let mut out = Vec::with_capacity(rule.angles.len());
+            let mut previous = from;
+            for k in 0..rule.angles.len() {
+                let angle = rule.angles[(start + k) % rule.angles.len()];
+                out.push((angle, (angle - previous).rem_euclid(360.0)));
+                previous = angle;
+            }
+            out
+        }
+    }
+}
+
+/// Whether a part may be mirrored: its own rule if it has one, otherwise the
+/// job-wide default. See `PartRule`.
+#[must_use]
+pub fn part_may_mirror(rules: &PartRules, part_id: usize, global: bool) -> bool {
+    rules.get(&(part_id & !crate::dispatch::MIRROR_ID_BIT)).map_or(global, |r| r.mirror)
 }
 
 /// A part queued for nesting. `polygon`/`rotation` are replaced (not
@@ -1075,8 +1174,10 @@ pub fn place_parts(
             if placed.is_empty() && config.rotations > 1 && matches!(config.placement_type, PlacementType::TightFit | PlacementType::GravityTightFit | PlacementType::GravityCorrective) {
                 let border_neighborhood: Vec<(Bounds, Vec<Point>)> =
                     sheet_border_band(sheet).into_iter().filter_map(|p| get_polygon_bounds(&p).map(|b| (b, p))).collect();
-                let step = 360.0 / config.rotations as f64;
-                let mut trial_rotation = parts[i].rotation;
+                // Both are set from the first `rotation_steps` entry below,
+                // whose delta is always 0 - i.e. they start exactly where the
+                // part already is.
+                let mut trial_rotation;
                 let mut trial_polygon = parts[i].polygon.clone();
                 // (contact_area, position, rotation, polygon) of the best
                 // rotation/position seen so far - contact_area first so a
@@ -1110,7 +1211,11 @@ pub fn place_parts(
                 let mut best: Option<(f64, Placement, f64, LayeredPolygon)> = None;
                 let mut candidate_traces: Vec<CandidateTrace> = Vec::new();
                 let mut best_trace_idx: Option<usize> = None;
-                for _ in 0..config.rotations {
+                for (angle, delta) in rotation_steps(config, parts[i].id, parts[i].rotation) {
+                    if delta != 0.0 {
+                        trial_polygon = rotate_layered_polygon(&trial_polygon, delta);
+                    }
+                    trial_rotation = angle;
                     // Same reasoning as the 2nd+ part rotation loop further down:
                     // each iteration is a real Clipper-backed inner-NFP lookup
                     // (plus a contact-area scan per returned vertex on a cache
@@ -1154,9 +1259,6 @@ pub fn place_parts(
                             }
                         }
                     }
-                    let new_rotation = advance_rotation(trial_rotation, step);
-                    trial_polygon = rotate_layered_polygon(&trial_polygon, step);
-                    trial_rotation = new_rotation;
                 }
 
                 if let Some(idx) = best_trace_idx {
@@ -1216,20 +1318,19 @@ pub fn place_parts(
                 // fits" is as good as any other here (unlike the 2nd+ part
                 // case below, where which rotation wins is the whole point).
                 let mut sheet_nfp: Option<Vec<Vec<Point>>> = None;
-                let step = 360.0 / config.rotations.max(1) as f64;
-                for _ in 0..config.rotations.max(1) {
+                for (angle, delta) in rotation_steps(config, parts[i].id, parts[i].rotation) {
+                    if delta != 0.0 {
+                        parts[i] = NestPart {
+                            id: parts[i].id,
+                            source_id: parts[i].source_id,
+                            polygon: rotate_layered_polygon(&parts[i].polygon, delta),
+                            rotation: angle,
+                        };
+                    }
                     sheet_nfp = cached_inner_nfp(cache, sheet, &sheet_src, &parts[i].polygon, parts[i].source_id, parts[i].rotation, config.curve_tolerance);
                     if sheet_nfp.as_ref().is_some_and(|n| !n.is_empty()) {
                         break;
                     }
-                    let new_rotation = advance_rotation(parts[i].rotation, step);
-                    let new_polygon = rotate_layered_polygon(&parts[i].polygon, step);
-                    parts[i] = NestPart {
-                        id: parts[i].id,
-                        source_id: parts[i].source_id,
-                        polygon: new_polygon,
-                        rotation: new_rotation,
-                    };
                 }
 
                 let sheet_nfp = match sheet_nfp {
@@ -1316,8 +1417,7 @@ pub fn place_parts(
             // cache as everywhere else in this file, so trying
             // `config.rotations` angles here is mostly cache hits after the
             // first few parts of any given shape have been tried.
-            let step = 360.0 / config.rotations.max(1) as f64;
-            let mut trial_rotation = parts[i].rotation;
+            let mut trial_rotation;
             let mut trial_polygon = parts[i].polygon.clone();
             // (score, result, rotation, polygon) of the best rotation seen so
             // far - `result.minarea` is always `CandidateScore::area()`'s raw
@@ -1354,7 +1454,11 @@ pub fn place_parts(
             // rotation search itself targets.
             let neighborhood = tight_fit_neighborhood(sheet, &placed, config.placement_type);
 
-            for _ in 0..config.rotations.max(1) {
+            for (angle, delta) in rotation_steps(config, parts[i].id, parts[i].rotation) {
+                if delta != 0.0 {
+                    trial_polygon = rotate_layered_polygon(&trial_polygon, delta);
+                }
+                trial_rotation = angle;
                 // Checked every iteration, not just once per part: each
                 // iteration is a real Clipper-backed placement attempt
                 // (`try_place_part_on_sheet_with_neighborhood`), so without
@@ -1395,9 +1499,6 @@ pub fn place_parts(
                         }
                     }
                 }
-                let new_rotation = advance_rotation(trial_rotation, step);
-                trial_polygon = rotate_layered_polygon(&trial_polygon, step);
-                trial_rotation = new_rotation;
             }
 
             let mut rotation_traces = rotation_traces.into_inner().expect("single-threaded call, lock never poisoned");
@@ -1557,6 +1658,7 @@ mod tests {
             rotations: 1,
             dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD,
             curve_tolerance: 0.3,
+            part_rules: Default::default(),
         }
     }
 
@@ -2182,6 +2284,132 @@ mod tests {
                     pi.placement,
                     pj.placement
                 );
+            }
+        }
+    }
+
+    // --- per-part constraints (grain direction / mirror override) -------
+
+    fn rules(entries: &[(usize, &[f64], bool)]) -> PlacementConfig {
+        let map: HashMap<usize, PartRule> =
+            entries.iter().map(|(id, angles, mirror)| (*id, PartRule { angles: angles.to_vec(), mirror: *mirror })).collect();
+        PlacementConfig { part_rules: std::sync::Arc::new(map), ..config(PlacementType::TightFit) }
+    }
+
+    /// The load-bearing one: an unconstrained part must walk exactly the
+    /// angle sequence the old fixed `for _ in 0..rotations` loop walked, with
+    /// exactly the same per-step rotation deltas. Everything else in this
+    /// file is a regression test for the engine; this is the regression test
+    /// for the refactor that made per-part rules possible at all.
+    #[test]
+    fn an_unconstrained_part_walks_the_untouched_rotation_grid() {
+        for rotations in [1u32, 2, 3, 4, 7, 12] {
+            let config = PlacementConfig { rotations, ..config(PlacementType::TightFit) };
+            let step = 360.0 / rotations as f64;
+            for from in [0.0, 90.0, 271.5] {
+                let steps = rotation_steps(&config, 0, from);
+                assert_eq!(steps.len(), rotations as usize, "rotations={rotations}");
+
+                let mut expected_angle = from;
+                for (i, (angle, delta)) in steps.iter().enumerate() {
+                    assert_eq!(*angle, expected_angle, "rotations={rotations} from={from} step {i}");
+                    // Deltas must stay a plain `step`, never a wrapped
+                    // difference - rotating geometry by -270 instead of +90
+                    // is the bug this shape exists to prevent.
+                    assert_eq!(*delta, if i == 0 { 0.0 } else { step }, "rotations={rotations} from={from} step {i}");
+                    expected_angle = advance_rotation(expected_angle, step);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_constrained_part_only_ever_offers_its_allowed_angles() {
+        let config = rules(&[(7, &[0.0, 180.0], false)]);
+        let steps = rotation_steps(&config, 7, 0.0);
+        assert_eq!(steps.iter().map(|(a, _)| *a).collect::<Vec<_>>(), vec![0.0, 180.0]);
+
+        // ...even though the global grid is much wider, and even after
+        // stagnation widening has pushed `rotations` up.
+        let widened = PlacementConfig { rotations: 32, ..config.clone() };
+        let angles: Vec<f64> = rotation_steps(&widened, 7, 0.0).iter().map(|(a, _)| *a).collect();
+        assert_eq!(angles, vec![0.0, 180.0], "a widened global grid must not leak into a constrained part");
+
+        // A part with no rule of its own is unaffected by its neighbour's.
+        assert_eq!(rotation_steps(&widened, 8, 0.0).len(), 32);
+    }
+
+    /// The allowed set *replaces* the grid rather than filtering it: 45 is
+    /// not on a `rotations: 2` grid at all, and filtering would silently
+    /// leave this part with nothing to try.
+    #[test]
+    fn allowed_angles_need_not_lie_on_the_global_grid() {
+        let config = PlacementConfig { rotations: 2, ..rules(&[(0, &[0.0, 45.0], false)]) };
+        let angles: Vec<f64> = rotation_steps(&config, 0, 0.0).iter().map(|(a, _)| *a).collect();
+        assert_eq!(angles, vec![0.0, 45.0]);
+    }
+
+    #[test]
+    fn a_constrained_part_starts_from_the_allowed_angle_nearest_where_it_is() {
+        let config = rules(&[(0, &[0.0, 90.0, 180.0, 270.0], false)]);
+        // Sitting at 200 degrees: 180 is the closest allowed angle, and the
+        // rest follow cyclically.
+        let angles: Vec<f64> = rotation_steps(&config, 0, 200.0).iter().map(|(a, _)| *a).collect();
+        assert_eq!(angles, vec![180.0, 270.0, 0.0, 90.0]);
+
+        // Deltas stay positive rotations across the 270 -> 0 wrap.
+        let deltas: Vec<f64> = rotation_steps(&config, 0, 200.0).iter().map(|(_, d)| *d).collect();
+        assert!(deltas.iter().all(|d| *d >= 0.0), "got {deltas:?}");
+        assert_eq!(deltas[2], 90.0, "270 -> 0 is a +90 rotation, not -270");
+    }
+
+    /// A mirrored part id carries `MIRROR_ID_BIT`; its rule is authored
+    /// against the un-flipped id, so lookups have to mask it off.
+    #[test]
+    fn a_mirrored_copy_obeys_its_own_parts_rule() {
+        let config = rules(&[(3, &[0.0, 180.0], true)]);
+        let angles: Vec<f64> = rotation_steps(&config, 3 ^ crate::dispatch::MIRROR_ID_BIT, 0.0).iter().map(|(a, _)| *a).collect();
+        assert_eq!(angles, vec![0.0, 180.0]);
+        assert!(part_may_mirror(&config.part_rules, 3 ^ crate::dispatch::MIRROR_ID_BIT, false));
+    }
+
+    #[test]
+    fn a_part_rule_overrides_the_job_wide_mirror_switch_in_both_directions() {
+        let deny = rules(&[(0, &[], false)]);
+        assert!(!part_may_mirror(&deny.part_rules, 0, true), "a part may opt out of a mirroring job");
+
+        let allow = rules(&[(0, &[], true)]);
+        assert!(part_may_mirror(&allow.part_rules, 0, false), "and into a non-mirroring one");
+
+        // A part with no rule follows the job.
+        assert!(part_may_mirror(&allow.part_rules, 1, true));
+        assert!(!part_may_mirror(&allow.part_rules, 1, false));
+    }
+
+    /// End to end through `place_parts`: whatever the search does, a
+    /// grain-locked part may only come to rest at an allowed angle.
+    #[test]
+    fn place_parts_never_places_a_constrained_part_off_its_allowed_angles() {
+        let config = PlacementConfig { rotations: 8, ..rules(&[(0, &[0.0, 180.0], false), (1, &[0.0, 180.0], false)]) };
+        let parts = vec![
+            NestPart { id: 0, source_id: 0, polygon: rect(0.0, 0.0, 60.0, 20.0), rotation: 45.0 },
+            NestPart { id: 1, source_id: 0, polygon: rect(0.0, 0.0, 60.0, 20.0), rotation: 135.0 },
+            // Unconstrained neighbour, free to use the whole grid.
+            NestPart { id: 2, source_id: 1, polygon: rect(0.0, 0.0, 30.0, 30.0), rotation: 0.0 },
+        ];
+        let result = place_parts(&[square(0.0, 0.0, 200.0)], parts, &config, &NfpCache::new(), &|| false, &|_, _| {}, &|_, _, _| {}).expect("places");
+        assert_eq!(result.unplaced_count, 0);
+
+        for sheet in &result.placements {
+            for placed in &sheet.parts {
+                if placed.id == 0 || placed.id == 1 {
+                    assert!(
+                        placed.rotation == 0.0 || placed.rotation == 180.0,
+                        "grain-locked part {} came to rest at {}",
+                        placed.id,
+                        placed.rotation
+                    );
+                }
             }
         }
     }

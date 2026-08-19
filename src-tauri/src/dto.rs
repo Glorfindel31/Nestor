@@ -154,6 +154,20 @@ pub struct PartDto {
     pub polygon: PolygonDto,
     #[serde(default = "one")]
     pub quantity: usize,
+    /// The only angles (degrees) this part may be placed at, replacing the
+    /// job-wide `rotations` grid for this part alone. `None` (the default)
+    /// means unconstrained. The driving case is grain direction: material
+    /// with a visible grain, a coating or a printed face often allows only
+    /// 0/180. Deliberately a *replacement* rather than a filter over the
+    /// grid - filtering would make 180 unreachable at `rotations: 3` and
+    /// leave the part silently unplaceable.
+    #[serde(default)]
+    pub allowed_rotations: Option<Vec<f64>>,
+    /// Overrides `NestConfigDto::mirror` for this part alone, so one job can
+    /// mix flippable and non-flippable pieces. `None` (the default) follows
+    /// the job-wide switch.
+    #[serde(default)]
+    pub mirror: Option<bool>,
 }
 
 fn one() -> usize {
@@ -188,14 +202,45 @@ fn one() -> usize {
 /// is genuinely different). Those extra ids are deliberately **not** in
 /// `adam`: they're alternatives the GA's rotation genes can select, not
 /// extra parts to place.
+/// What `expand_parts` produces: one entry per physical part copy, plus the
+/// per-part rules those copies inherited from their definition. Was a
+/// 3-tuple before per-part constraints existed; a named struct now that it
+/// would otherwise be four positional values.
+pub struct ExpandedParts {
+    pub adam: Vec<usize>,
+    pub parts_by_id: HashMap<usize, LayeredPolygon>,
+    pub shape_ids: HashMap<usize, usize>,
+    pub part_rules: nesting::placement::PartRules,
+}
+
+/// Normalises an authored angle list into what `PartRule` wants: degrees in
+/// `[0, 360)`, sorted, deduped at 1e-9, and non-finite values dropped. An
+/// empty result means unconstrained, which is also what a caller sending
+/// `[]` should get - "no allowed angles at all" is never a useful request,
+/// and treating it as a constraint would make the part unplaceable.
+fn normalize_angles(angles: &[f64]) -> Vec<f64> {
+    let mut out: Vec<f64> = angles.iter().filter(|a| a.is_finite()).map(|a| a.rem_euclid(360.0)).collect();
+    out.sort_by(f64::total_cmp);
+    out.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    out
+}
+
 #[must_use]
-pub fn expand_parts(parts: Vec<PartDto>, mirror: bool) -> (Vec<usize>, HashMap<usize, LayeredPolygon>, HashMap<usize, usize>) {
+pub fn expand_parts(parts: Vec<PartDto>, mirror: bool) -> ExpandedParts {
     let mut parts_by_id = HashMap::new();
     let mut shape_ids = HashMap::new();
+    let mut rules: HashMap<usize, nesting::placement::PartRule> = HashMap::new();
     let mut adam = Vec::new();
     let mut next_id = 0usize;
 
     for (source_id, part) in parts.into_iter().enumerate() {
+        let angles = part.allowed_rotations.as_deref().map(normalize_angles).unwrap_or_default();
+        let may_mirror = part.mirror.unwrap_or(mirror);
+        // Only parts that actually constrain something get an entry - an
+        // empty map is the "everything is unconstrained" fast path every
+        // lookup below already treats as free.
+        let rule = (!angles.is_empty() || may_mirror != mirror).then_some(nesting::placement::PartRule { angles, mirror: may_mirror });
+
         let polygon: LayeredPolygon = part.polygon.into();
         let Some(last) = part.quantity.checked_sub(1) else { continue };
         // Clone for every copy but the last, where a move does instead -
@@ -203,17 +248,27 @@ pub fn expand_parts(parts: Vec<PartDto>, mirror: bool) -> (Vec<usize>, HashMap<u
         for _ in 0..last {
             parts_by_id.insert(next_id, polygon.clone());
             shape_ids.insert(next_id, source_id);
+            if let Some(rule) = &rule {
+                rules.insert(next_id, rule.clone());
+            }
             adam.push(next_id);
             next_id += 1;
         }
         parts_by_id.insert(next_id, polygon);
         shape_ids.insert(next_id, source_id);
+        if let Some(rule) = rule {
+            rules.insert(next_id, rule);
+        }
         adam.push(next_id);
         next_id += 1;
     }
 
-    if mirror {
-        for (&id, poly) in parts_by_id.clone().iter() {
+    // A part's *effective* mirror flag decides whether its flipped variant is
+    // registered at all - so a mirror-denied part has no mirrored geometry
+    // for a stray gene to reach, rather than being kept honest by a check
+    // somewhere downstream.
+    for (&id, poly) in parts_by_id.clone().iter() {
+        if rules.get(&id).map_or(mirror, |r| r.mirror) {
             parts_by_id.insert(id ^ MIRROR_ID_BIT, geometry::dxf_import::mirror_layered_polygon(poly));
             shape_ids.insert(id ^ MIRROR_ID_BIT, shape_ids[&id] ^ MIRROR_ID_BIT);
         }
@@ -227,7 +282,7 @@ pub fn expand_parts(parts: Vec<PartDto>, mirror: bool) -> (Vec<usize>, HashMap<u
     adam_with_area.sort_by(|&(_, area_a), &(_, area_b)| area_b.total_cmp(&area_a));
     let adam: Vec<usize> = adam_with_area.into_iter().map(|(id, _)| id).collect();
 
-    (adam, parts_by_id, shape_ids)
+    ExpandedParts { adam, parts_by_id, shape_ids, part_rules: std::sync::Arc::new(rules) }
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -354,11 +409,14 @@ impl NestConfigDto {
             rotations: self.rotations,
             dominant_part_area_threshold: self.dominant_part_area_threshold,
             curve_tolerance: self.curve_tolerance,
+            // Filled in by the caller from `expand_parts` - this struct has
+            // no access to the parts list, only to the job-wide settings.
+            part_rules: Default::default(),
         }
     }
 
     pub fn ga_config(&self) -> GaConfig {
-        GaConfig { population_size: self.population_size, mutation_rate: self.mutation_rate, rotations: self.rotations, mirror: self.mirror }
+        GaConfig { population_size: self.population_size, mutation_rate: self.mutation_rate, rotations: self.rotations, mirror: self.mirror, part_rules: Default::default() }
     }
 }
 
@@ -392,6 +450,26 @@ pub struct SheetPlacementDto {
 /// the click-a-sheet counterpart to the automatic
 /// `NestConfigDto::cleanup_threshold_percent` pass, both backed by the same
 /// `nesting::repack::repack_sheet`.
+/// Wire form of `nesting::placement::PartRule` - the internal type lives in
+/// an I/O-free crate, same reason every other type here has a DTO twin.
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct PartRuleDto {
+    pub angles: Vec<f64>,
+    pub mirror: bool,
+}
+
+impl From<&nesting::placement::PartRule> for PartRuleDto {
+    fn from(rule: &nesting::placement::PartRule) -> Self {
+        PartRuleDto { angles: rule.angles.clone(), mirror: rule.mirror }
+    }
+}
+
+impl From<PartRuleDto> for nesting::placement::PartRule {
+    fn from(dto: PartRuleDto) -> Self {
+        nesting::placement::PartRule { angles: dto.angles, mirror: dto.mirror }
+    }
+}
+
 #[derive(Deserialize, Clone, Debug)]
 pub struct RepackSheetRequest {
     pub sheet: PolygonDto,
@@ -403,6 +481,12 @@ pub struct RepackSheetRequest {
     /// The same config used for the main run, reused verbatim - not a
     /// separate "repack settings" (same rights/techniques as the first nest).
     pub config: NestConfigDto,
+    /// Per-part orientation constraints for the parts on this sheet, keyed
+    /// by part id - the same map `RunNestResponse::part_rules` reports back.
+    /// Without it a manual repack would happily re-rotate a grain-locked
+    /// part into an orientation the main nest was forbidden from using.
+    #[serde(default)]
+    pub part_rules: HashMap<usize, PartRuleDto>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -435,6 +519,12 @@ pub struct RunNestResponse {
     /// a placement's id to the *wrong* part's geometry with no error at
     /// all - just the wrong outline silently written at that position.
     pub parts_by_id: HashMap<usize, PolygonDto>,
+    /// The per-part orientation constraints this run actually applied, keyed
+    /// the same way `parts_by_id` is. Authoritative for the same reason it
+    /// is: a later `repack_sheet_command` must be held to the same rules the
+    /// nest was, and re-deriving them from a client-resent `parts` list is
+    /// exactly the silent-corruption risk described above.
+    pub part_rules: HashMap<usize, PartRuleDto>,
     /// Every genuinely-better nest found during the run, in the order
     /// found (chronological, not sorted by fitness) - the top-level
     /// `placements`/`fitness`/etc. above are just `history`'s last entry,
@@ -481,6 +571,17 @@ pub struct BestResultDto {
     pub unplaced_ids: Vec<usize>,
     pub parts_by_id: HashMap<usize, PolygonDto>,
     pub sheets: Vec<PolygonDto>,
+    /// Defaulted so a `best_result.json` written before per-part rules
+    /// existed still loads - an old file simply has no constraints.
+    #[serde(default)]
+    pub part_rules: HashMap<usize, PartRuleDto>,
+    /// The config that produced this result. Needed because a recovered
+    /// result is a real, repackable/exportable result: without it the
+    /// frontend had `lastNestRequest` with no `.config` at all, so REPACK on
+    /// a recovered nest threw. Defaulted for the same backwards-compatibility
+    /// reason as `part_rules`.
+    #[serde(default)]
+    pub config: Option<NestConfigDto>,
 }
 
 /// What `export_dxf_command`/`export_svg_command` need to write a nest

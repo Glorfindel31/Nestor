@@ -136,7 +136,7 @@ mod tests {
     }
 
     fn ga_config() -> GaConfig {
-        GaConfig { population_size: 6, mutation_rate: 60.0, rotations: 1, mirror: false }
+        GaConfig { population_size: 6, mutation_rate: 60.0, rotations: 1, mirror: false, part_rules: Default::default() }
     }
 
     fn placement_config() -> PlacementConfig {
@@ -144,7 +144,7 @@ mod tests {
             placement_type: PlacementType::Gravity,
             rotations: 1,
             dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD,
-            curve_tolerance: 0.3,
+            curve_tolerance: 0.3, part_rules: Default::default()
         }
     }
 
@@ -194,7 +194,7 @@ mod tests {
         };
         let mut cfg = placement_config();
         cfg.rotations = 2;
-        let ga_config = GaConfig { population_size: 10, mutation_rate: 70.0, rotations: 2, mirror: false };
+        let ga_config = GaConfig { population_size: 10, mutation_rate: 70.0, rotations: 2, mirror: false, part_rules: Default::default() };
 
         let winner = repack_sheet(&sheet, &current, &parts_by_id, &HashMap::new(), &ga_config, &cfg, 80, 0, &|| false)
             .expect("this exact fixture/seed is known to find an improvement");

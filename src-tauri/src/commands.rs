@@ -32,7 +32,7 @@ use nesting::repack;
 use tauri::{Emitter, Manager};
 
 use crate::dto::{
-    expand_parts, BestResultDto, ExportRequest, NestConfigDto, NestProgressDto, NestRunCompleteDto, NestRunStartDto, NestSnapshotDto, NestTickDto,
+    expand_parts, BestResultDto, ExpandedParts, PartRuleDto, ExportRequest, NestConfigDto, NestProgressDto, NestRunCompleteDto, NestRunStartDto, NestSnapshotDto, NestTickDto,
     PlacedPartDto, PolygonDto, RepackSheetRequest, RepackSheetResponse, RunNestRequest, RunNestResponse, SheetPlacementDto,
 };
 
@@ -421,7 +421,10 @@ pub fn repack_sheet(request: RepackSheetRequest) -> Result<RepackSheetResponse, 
     // other config value (rotations, dominant area, tolerance, GA params)
     // still comes from the user's real config, only the scoring strategy
     // changes.
-    let repack_placement_config = PlacementConfig { placement_type: PlacementType::GravityTightFit, ..request.config.placement_config() };
+    let part_rules: nesting::placement::PartRules =
+        std::sync::Arc::new(request.part_rules.iter().map(|(&id, rule)| (id, rule.clone().into())).collect());
+    let repack_placement_config =
+        PlacementConfig { placement_type: PlacementType::GravityTightFit, part_rules: part_rules.clone(), ..request.config.placement_config() };
 
     // Same "0 means uncapped, otherwise a scoped pool for this call" pattern
     // run_nest_with_progress uses for the main escalation loop - without
@@ -445,7 +448,7 @@ pub fn repack_sheet(request: RepackSheetRequest) -> Result<RepackSheetResponse, 
             &current,
             &parts_by_id,
             &shape_ids,
-            &request.config.ga_config(),
+            &GaConfig { part_rules: part_rules.clone(), ..request.config.ga_config() },
             &repack_placement_config,
             request.config.generations,
             request.config.seed,
@@ -497,6 +500,10 @@ struct PreparedNestInputs {
     shape_ids: HashMap<usize, usize>,
     adam: Vec<usize>,
     placement_config: nesting::placement::PlacementConfig,
+    /// Per-part orientation constraints, also assigned onto
+    /// `placement_config` above - carried separately too because the GA
+    /// config is built by the caller, not here.
+    part_rules: nesting::placement::PartRules,
 }
 
 /// Checks shared by every entry point that builds a `GaConfig`/
@@ -587,7 +594,7 @@ fn prepare_nest_inputs(request: RunNestRequest) -> Result<PreparedNestInputs, St
         })
         .collect::<Result<_, &str>>()?;
 
-    let (adam, true_parts_by_id, shape_ids) = expand_parts(request.parts, request.config.mirror);
+    let ExpandedParts { adam, parts_by_id: true_parts_by_id, shape_ids, part_rules } = expand_parts(request.parts, request.config.mirror);
     if adam.is_empty() {
         return Err("every part had quantity 0".into());
     }
@@ -604,9 +611,13 @@ fn prepare_nest_inputs(request: RunNestRequest) -> Result<PreparedNestInputs, St
         })
         .collect::<Result<_, &str>>()?;
 
-    let placement_config = request.config.placement_config();
+    // `part_rules` reaches the engine on the two configs that are already
+    // threaded everywhere (placement and GA), rather than as a new parameter
+    // on six functions - see `nesting::placement::PartRule`.
+    let mut placement_config = request.config.placement_config();
+    placement_config.part_rules = part_rules.clone();
 
-    Ok(PreparedNestInputs { sheets, parts_by_id, parts_by_id_dto, shape_ids, adam, placement_config })
+    Ok(PreparedNestInputs { sheets, parts_by_id, parts_by_id_dto, shape_ids, adam, placement_config, part_rules })
 }
 
 /// Shared by `run_nest_with_progress` and `run_nest_live_preview` - both
@@ -653,6 +664,7 @@ fn escalated_run_config(base_ga_config: &GaConfig, base_generations: usize, run_
         // Unless there's only one run, where skipping it would mean the
         // setting silently does nothing.
         mirror: base_ga_config.mirror && (run_index > 0 || total_runs == 1),
+        part_rules: base_ga_config.part_rules.clone(),
     };
     let generations = base_generations + run_index * RUN_GENERATIONS_STEP;
     (ga_config, generations)
@@ -713,13 +725,17 @@ pub fn run_nest_with_progress(
     // are needed by the shared validation/padding logic, only by the runs/GA
     // loop below.
     let max_threads = request.config.max_threads;
-    let base_ga_config = request.config.ga_config();
+    let mut base_ga_config = request.config.ga_config();
     let base_generations = request.config.generations;
     let seed = request.config.seed;
     let total_runs = request.config.runs;
     let cleanup_threshold = request.config.cleanup_threshold_percent;
 
-    let PreparedNestInputs { sheets, parts_by_id, parts_by_id_dto, shape_ids, adam, placement_config } = prepare_nest_inputs(request)?;
+    let PreparedNestInputs { sheets, parts_by_id, parts_by_id_dto, shape_ids, adam, placement_config, part_rules } = prepare_nest_inputs(request)?;
+    // Same map on both configs: a rotation *gene* and the *placement* it
+    // produces must agree about what each part is allowed to do, or a
+    // grain-locked part gets a legal gene and an illegal placement.
+    base_ga_config.part_rules = part_rules;
 
     // One cache for the *whole* escalation - every run, every individual,
     // every generation - not a fresh one per run/generation/individual.
@@ -1082,6 +1098,7 @@ pub fn run_nest_with_progress(
         unplaced_count: best.unplaced_count,
         unplaced_ids: best.unplaced_ids,
         cancelled,
+        part_rules: placement_config.part_rules.iter().map(|(&id, rule)| (id, PartRuleDto::from(rule))).collect(),
         parts_by_id: parts_by_id_dto,
     })
 }
@@ -1171,6 +1188,10 @@ pub async fn run_nest_command(
     // recovered `BestResultDto` needs sheet geometry to render against in a
     // later session, and `request` itself won't survive past this call.
     let request_sheets = request.sheets.clone();
+    // Same reason, plus: without the config a recovered result can't be
+    // repacked or hand-edited, since every one of those paths needs the
+    // margin/spacing/rotations the nest actually ran with.
+    let request_config = Some(request.config.clone());
     // Cloned once here so the post-run persistence step below can own one -
     // `AppHandle` is cheap to clone (an `Arc` internally).
     let app_for_best = app.clone();
@@ -1238,6 +1259,8 @@ pub async fn run_nest_command(
             unplaced_ids: response.unplaced_ids.clone(),
             parts_by_id: response.parts_by_id.clone(),
             sheets: request_sheets,
+            part_rules: response.part_rules.clone(),
+            config: request_config,
         };
         // Fire-and-forget by design (an I/O failure here must never fail an
         // otherwise successful nest - see this fn's own doc comment) but the
@@ -1298,6 +1321,12 @@ mod tests {
         }
     }
 
+    /// Every test part is unconstrained unless it says otherwise - see
+    /// `PartDto::allowed_rotations`/`mirror`.
+    fn part(polygon: PolygonDto, quantity: usize) -> PartDto {
+        PartDto { polygon, quantity, allowed_rotations: None, mirror: None }
+    }
+
     fn rect_dto(w: f64, h: f64) -> PolygonDto {
         PolygonDto {
             points: vec![
@@ -1337,7 +1366,7 @@ mod tests {
     fn run_nest_places_a_simple_part_end_to_end() {
         let request = RunNestRequest {
             sheets: vec![square_dto(100.0)],
-            parts: vec![PartDto { polygon: square_dto(10.0), quantity: 3 }],
+            parts: vec![part(square_dto(10.0), 3)],
             config: config(2),
         };
 
@@ -1365,7 +1394,7 @@ mod tests {
         // dropped entirely.
         let request = RunNestRequest {
             sheets: vec![square_dto(1000.0), square_dto(1000.0)],
-            parts: vec![PartDto { polygon: square_dto(950.0), quantity: 1 }, PartDto { polygon: square_dto(20.0), quantity: 1 }],
+            parts: vec![part(square_dto(950.0), 1), part(square_dto(20.0), 1)],
             config: config(1),
         };
 
@@ -1393,10 +1422,10 @@ mod tests {
         let mut request = RunNestRequest {
             sheets: vec![square_dto(300.0), square_dto(300.0)],
             parts: vec![
-                PartDto { polygon: rect_dto(120.0, 40.0), quantity: 1 },
-                PartDto { polygon: rect_dto(90.0, 70.0), quantity: 1 },
-                PartDto { polygon: rect_dto(50.0, 50.0), quantity: 1 },
-                PartDto { polygon: rect_dto(30.0, 90.0), quantity: 1 },
+                part(rect_dto(120.0, 40.0), 1),
+                part(rect_dto(90.0, 70.0), 1),
+                part(rect_dto(50.0, 50.0), 1),
+                part(rect_dto(30.0, 90.0), 1),
             ],
             config: config(3),
         };
@@ -1417,7 +1446,7 @@ mod tests {
     fn run_nest_history_ends_with_the_same_result_as_the_top_level_fields() {
         let request = RunNestRequest {
             sheets: vec![square_dto(100.0)],
-            parts: vec![PartDto { polygon: square_dto(10.0), quantity: 3 }],
+            parts: vec![part(square_dto(10.0), 3)],
             config: config(5),
         };
 
@@ -1445,7 +1474,7 @@ mod tests {
         let mut cfg = config(1);
         cfg.margin = 0.0;
         cfg.spacing = 6.5;
-        let request = RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![PartDto { polygon: square_dto(100.0), quantity: 1 }], config: cfg };
+        let request = RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![part(square_dto(100.0), 1)], config: cfg };
 
         let response = run_nest(request).expect("full-sheet-size part should nest with zero margin");
 
@@ -1461,7 +1490,7 @@ mod tests {
         let mut cfg = config(1);
         cfg.margin = 5.0;
         cfg.spacing = 0.0;
-        let request = RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![PartDto { polygon: square_dto(100.0), quantity: 1 }], config: cfg };
+        let request = RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![part(square_dto(100.0), 1)], config: cfg };
 
         let response = run_nest(request).expect("run_nest itself should still succeed, just leave the part unplaced");
 
@@ -1476,7 +1505,7 @@ mod tests {
         cfg.max_threads = 1;
         let request = RunNestRequest {
             sheets: vec![square_dto(100.0)],
-            parts: vec![PartDto { polygon: square_dto(10.0), quantity: 3 }],
+            parts: vec![part(square_dto(10.0), 3)],
             config: cfg,
         };
 
@@ -1493,7 +1522,7 @@ mod tests {
         // can never run anything.
         let mut cfg = config(1);
         cfg.max_threads = 0;
-        let request = RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![PartDto { polygon: square_dto(10.0), quantity: 1 }], config: cfg };
+        let request = RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![part(square_dto(10.0), 1)], config: cfg };
         let response = run_nest(request).expect("max_threads: 0 must mean uncapped, not a zero-thread pool");
         assert_eq!(response.unplaced_count, 0);
     }
@@ -1508,7 +1537,7 @@ mod tests {
         cfg.spacing = 50.0; // larger than the sheet has slack for two 40-wide parts
         let request = RunNestRequest {
             sheets: vec![square_dto(100.0)],
-            parts: vec![PartDto { polygon: square_dto(40.0), quantity: 2 }],
+            parts: vec![part(square_dto(40.0), 2)],
             config: cfg,
         };
 
@@ -1524,7 +1553,7 @@ mod tests {
             cfg.margin = margin;
             cfg.spacing = spacing;
             let request =
-                RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![PartDto { polygon: square_dto(10.0), quantity: 1 }], config: cfg };
+                RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![part(square_dto(10.0), 1)], config: cfg };
             assert!(run_nest(request).is_err(), "margin={margin} spacing={spacing} should be rejected");
         }
     }
@@ -1543,6 +1572,7 @@ mod tests {
             placement: SheetPlacementDto { sheet_index: 0, parts: vec![PlacedPartDto { id: 0, x: 0.0, y: 0.0, rotation: 0.0 }] },
             parts_by_id: HashMap::from([(0, square_dto(10.0))]),
             config: cfg,
+            part_rules: HashMap::new(),
         };
         for bad_cfg in [
             { let mut c = config(1); c.margin = -1.0; c },
@@ -1579,7 +1609,7 @@ mod tests {
             cfg.curve_tolerance = curve_tolerance;
             cfg.dominant_part_area_threshold = dominant;
             let request =
-                RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![PartDto { polygon: square_dto(10.0), quantity: 1 }], config: cfg };
+                RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![part(square_dto(10.0), 1)], config: cfg };
             assert!(
                 run_nest(request).is_err(),
                 "mutation_rate={mutation_rate} curve_tolerance={curve_tolerance} dominant_part_area_threshold={dominant} should be rejected"
@@ -1589,7 +1619,7 @@ mod tests {
 
     #[test]
     fn run_nest_rejects_empty_sheets() {
-        let request = RunNestRequest { sheets: Vec::new(), parts: vec![PartDto { polygon: square_dto(10.0), quantity: 1 }], config: config(1) };
+        let request = RunNestRequest { sheets: Vec::new(), parts: vec![part(square_dto(10.0), 1)], config: config(1) };
         assert!(run_nest(request).is_err());
     }
 
@@ -1607,7 +1637,7 @@ mod tests {
         // *sheet* quantity, a different code path with different
         // semantics). If every part is quantity 0, nothing to nest at all.
         let request =
-            RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![PartDto { polygon: square_dto(10.0), quantity: 0 }], config: config(1) };
+            RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![part(square_dto(10.0), 0)], config: config(1) };
         assert!(run_nest(request).is_err());
     }
 
@@ -1616,8 +1646,8 @@ mod tests {
         let request = RunNestRequest {
             sheets: vec![square_dto(100.0)],
             parts: vec![
-                PartDto { polygon: square_dto(10.0), quantity: 2 },
-                PartDto { polygon: square_dto(20.0), quantity: 0 },
+                part(square_dto(10.0), 2),
+                part(square_dto(20.0), 0),
             ],
             config: config(2),
         };
@@ -1632,7 +1662,7 @@ mod tests {
     fn run_nest_rejects_zero_rotations() {
         let mut cfg = config(1);
         cfg.rotations = 0;
-        let request = RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![PartDto { polygon: square_dto(10.0), quantity: 1 }], config: cfg };
+        let request = RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![part(square_dto(10.0), 1)], config: cfg };
         assert!(run_nest(request).is_err());
     }
 
@@ -1642,7 +1672,7 @@ mod tests {
             let mut cfg = config(1);
             cfg.population_size = bad_size;
             let request =
-                RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![PartDto { polygon: square_dto(10.0), quantity: 1 }], config: cfg };
+                RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![part(square_dto(10.0), 1)], config: cfg };
             assert!(run_nest(request).is_err(), "population_size {bad_size} should be rejected");
         }
     }
@@ -1651,7 +1681,7 @@ mod tests {
     fn run_nest_with_progress_calls_the_hook_once_per_generation() {
         let request = RunNestRequest {
             sheets: vec![square_dto(100.0)],
-            parts: vec![PartDto { polygon: square_dto(10.0), quantity: 3 }],
+            parts: vec![part(square_dto(10.0), 3)],
             config: config(4),
         };
 
@@ -1704,9 +1734,9 @@ mod tests {
         let request = RunNestRequest {
             sheets: (0..4).map(|_| square_dto(100.0)).collect(),
             parts: vec![
-                PartDto { polygon: rect_dto(35.0, 12.0), quantity: 10 },
-                PartDto { polygon: rect_dto(18.0, 27.0), quantity: 8 },
-                PartDto { polygon: rect_dto(9.0, 41.0), quantity: 6 },
+                part(rect_dto(35.0, 12.0), 10),
+                part(rect_dto(18.0, 27.0), 8),
+                part(rect_dto(9.0, 41.0), 6),
             ],
             config: cfg,
         };
@@ -1789,9 +1819,9 @@ mod tests {
         let request = RunNestRequest {
             sheets: (0..4).map(|_| square_dto(100.0)).collect(),
             parts: vec![
-                PartDto { polygon: rect_dto(35.0, 12.0), quantity: 10 },
-                PartDto { polygon: rect_dto(18.0, 27.0), quantity: 8 },
-                PartDto { polygon: rect_dto(9.0, 41.0), quantity: 6 },
+                part(rect_dto(35.0, 12.0), 10),
+                part(rect_dto(18.0, 27.0), 8),
+                part(rect_dto(9.0, 41.0), 6),
             ],
             config: cfg,
         };
@@ -1829,7 +1859,7 @@ mod tests {
     fn run_nest_with_progress_stops_early_when_cancelled() {
         let request = RunNestRequest {
             sheets: vec![square_dto(100.0)],
-            parts: vec![PartDto { polygon: square_dto(10.0), quantity: 3 }],
+            parts: vec![part(square_dto(10.0), 3)],
             config: config(20),
         };
 
@@ -1848,7 +1878,7 @@ mod tests {
     fn run_nest_with_progress_reports_per_individual_ticks_within_a_generation() {
         let request = RunNestRequest {
             sheets: vec![square_dto(100.0)],
-            parts: vec![PartDto { polygon: square_dto(10.0), quantity: 3 }],
+            parts: vec![part(square_dto(10.0), 3)],
             config: config(2),
         };
 
@@ -1879,7 +1909,7 @@ mod tests {
         // now succeed with cancelled: true and every part reported unplaced.
         let request = RunNestRequest {
             sheets: vec![square_dto(100.0)],
-            parts: vec![PartDto { polygon: square_dto(10.0), quantity: 3 }],
+            parts: vec![part(square_dto(10.0), 3)],
             config: config(20),
         };
 
@@ -1896,7 +1926,7 @@ mod tests {
     #[test]
     fn export_dxf_round_trips_a_real_nest_result() {
         let sheets = vec![square_dto(100.0)];
-        let parts = vec![PartDto { polygon: square_dto(10.0), quantity: 3 }];
+        let parts = vec![part(square_dto(10.0), 3)];
         let request = RunNestRequest { sheets: sheets.clone(), parts, config: config(2) };
         let response = run_nest(request).expect("should nest successfully");
 
@@ -1922,7 +1952,7 @@ mod tests {
     #[test]
     fn export_dxf_omits_the_sheet_outline_when_not_requested() {
         let sheets = vec![square_dto(100.0)];
-        let parts = vec![PartDto { polygon: square_dto(10.0), quantity: 2 }];
+        let parts = vec![part(square_dto(10.0), 2)];
         let request = RunNestRequest { sheets: sheets.clone(), parts, config: config(2) };
         let response = run_nest(request).expect("should nest successfully");
 
@@ -1947,7 +1977,7 @@ mod tests {
     #[test]
     fn export_dxf_rejects_negative_sheet_spacing() {
         let sheets = vec![square_dto(100.0)];
-        let parts = vec![PartDto { polygon: square_dto(10.0), quantity: 1 }];
+        let parts = vec![part(square_dto(10.0), 1)];
         let request = RunNestRequest { sheets: sheets.clone(), parts, config: config(1) };
         let response = run_nest(request).expect("should nest successfully");
 
@@ -2047,7 +2077,7 @@ mod tests {
         // two (quantity 3 requested) can never be placed anywhere, since
         // there's only one sheet in the whole job.
         let sheets = vec![square_dto(12.0)];
-        let parts = vec![PartDto { polygon: square_dto(10.0), quantity: 3 }];
+        let parts = vec![part(square_dto(10.0), 3)];
         let request = RunNestRequest { sheets: sheets.clone(), parts, config: config(2) };
         let response = run_nest(request).expect("should nest successfully");
         let placed_count: usize = response.placements.iter().map(|sp| sp.parts.len()).sum();
@@ -2074,7 +2104,7 @@ mod tests {
     #[test]
     fn export_dxf_can_include_never_placed_parts_when_requested() {
         let sheets = vec![square_dto(12.0)];
-        let parts = vec![PartDto { polygon: square_dto(10.0), quantity: 3 }];
+        let parts = vec![part(square_dto(10.0), 3)];
         let request = RunNestRequest { sheets: sheets.clone(), parts, config: config(2) };
         let response = run_nest(request).expect("should nest successfully");
         assert!(response.unplaced_count > 0, "expected at least one unplaceable part on a single 12x12 sheet with three 10x10 parts");
@@ -2100,7 +2130,7 @@ mod tests {
     #[test]
     fn export_svg_command_writes_a_readable_svg_file() {
         let sheets = vec![square_dto(100.0)];
-        let parts = vec![PartDto { polygon: square_dto(10.0), quantity: 2 }];
+        let parts = vec![part(square_dto(10.0), 2)];
         let request = RunNestRequest { sheets: sheets.clone(), parts, config: config(2) };
         let response = run_nest(request).expect("should nest successfully");
 
@@ -2176,7 +2206,7 @@ mod tests {
             .iter()
             .enumerate()
             .filter(|(i, _)| *i != sheet_idx)
-            .map(|(_, p)| PartDto { polygon: PolygonDto::from(p), quantity: 1 })
+            .map(|(_, p)| part(PolygonDto::from(p), 1))
             .collect();
 
         let mut cfg = config(5);
@@ -2418,7 +2448,7 @@ mod tests {
             let mut cfg = config(6);
             cfg.rotations = 2;
             cfg.mirror = mirror;
-            RunNestRequest { sheets: vec![square_dto(200.0)], parts: vec![PartDto { polygon: l_shape.clone(), quantity: 6 }], config: cfg }
+            RunNestRequest { sheets: vec![square_dto(200.0)], parts: vec![part(l_shape.clone(), 6)], config: cfg }
         };
 
         let off = run_nest(build(false)).expect("nest without mirror");
@@ -2440,12 +2470,133 @@ mod tests {
     /// to compare against - unless there is only one run to give.
     #[test]
     fn mirror_leaves_the_first_run_of_several_un_mirrored() {
-        let base = GaConfig { population_size: 6, mutation_rate: 10.0, rotations: 2, mirror: true };
+        let base = GaConfig { population_size: 6, mutation_rate: 10.0, rotations: 2, mirror: true, part_rules: Default::default() };
         let mirrors: Vec<bool> = (0..3).map(|i| escalated_run_config(&base, 5, i, 3).0.mirror).collect();
         assert_eq!(mirrors, vec![false, true, true]);
         assert!(escalated_run_config(&base, 5, 0, 1).0.mirror, "a single-run job must still honour the setting");
 
         let off = GaConfig { mirror: false, ..base };
         assert!((0..3).all(|i| !escalated_run_config(&off, 5, i, 3).0.mirror));
+    }
+
+    /// Per-part mirror override, both directions, in one job - the whole
+    /// point of the feature: a grain-critical part must not be flipped even
+    /// when the job allows flipping, and vice versa.
+    #[test]
+    fn a_parts_own_mirror_setting_overrides_the_job_wide_switch() {
+        use nesting::dispatch::MIRROR_ID_BIT;
+
+        let l_shape = |scale: f64| PolygonDto {
+            points: [(0.0, 0.0), (30.0, 0.0), (30.0, 10.0), (10.0, 10.0), (10.0, 25.0), (0.0, 25.0)]
+                .iter()
+                .map(|&(x, y)| PointDto { x: x * scale, y: y * scale })
+                .collect(),
+            layer: "0".into(),
+            is_circle: None,
+            children: Vec::new(),
+            texts: Vec::new(),
+            real_boundary: None,
+        };
+
+        // Job-wide mirroring ON, but part 0 opts out.
+        let mut cfg = config(6);
+        cfg.rotations = 2;
+        cfg.mirror = true;
+        let request = RunNestRequest {
+            sheets: vec![square_dto(200.0)],
+            parts: vec![
+                PartDto { polygon: l_shape(1.0), quantity: 4, allowed_rotations: None, mirror: Some(false) },
+                PartDto { polygon: l_shape(0.8), quantity: 4, allowed_rotations: None, mirror: None },
+            ],
+            config: cfg,
+        };
+        let response = run_nest(request).expect("nests");
+
+        // Ids 0..3 are the opted-out part (expand_parts assigns sequentially
+        // in definition order), 4..7 the free one.
+        let placed: Vec<usize> = response.placements.iter().flat_map(|s| s.parts.iter().map(|p| p.id)).collect();
+        assert!(!placed.is_empty());
+        for id in &placed {
+            if id & !MIRROR_ID_BIT < 4 {
+                assert_eq!(id & MIRROR_ID_BIT, 0, "part {id} opted out of mirroring but was placed flipped");
+            }
+        }
+        // The opted-out part has no mirrored geometry registered at all -
+        // there is nothing for a stray gene to reach.
+        assert!(
+            response.parts_by_id.keys().all(|id| !(id & MIRROR_ID_BIT != 0 && id & !MIRROR_ID_BIT < 4)),
+            "no mirrored variant should exist for the opted-out part"
+        );
+        // ...while the free part does have them.
+        assert!(response.parts_by_id.keys().any(|id| id & MIRROR_ID_BIT != 0), "the un-opted-out part should still get mirrored variants");
+    }
+
+    #[test]
+    fn a_part_can_opt_into_mirroring_when_the_job_wide_switch_is_off() {
+        use nesting::dispatch::MIRROR_ID_BIT;
+        let mut cfg = config(3);
+        cfg.mirror = false;
+        let request = RunNestRequest {
+            sheets: vec![square_dto(200.0)],
+            parts: vec![
+                PartDto { polygon: square_dto(20.0), quantity: 2, allowed_rotations: None, mirror: Some(true) },
+                part(square_dto(15.0), 2),
+            ],
+            config: cfg,
+        };
+        let response = run_nest(request).expect("nests");
+        let mirrored: Vec<usize> = response.parts_by_id.keys().copied().filter(|id| id & MIRROR_ID_BIT != 0).collect();
+        assert!(!mirrored.is_empty(), "the opted-in part should have mirrored variants");
+        assert!(mirrored.iter().all(|id| id & !MIRROR_ID_BIT < 2), "only the opted-in part, got {mirrored:?}");
+    }
+
+    /// Grain direction end to end: whatever the search does, the constrained
+    /// part may only come to rest at an angle it was allowed.
+    #[test]
+    fn allowed_rotations_are_honoured_end_to_end_and_reported_back() {
+        let mut cfg = config(6);
+        cfg.rotations = 8;
+        let request = RunNestRequest {
+            sheets: vec![square_dto(300.0)],
+            parts: vec![
+                PartDto { polygon: rect_dto(80.0, 20.0), quantity: 3, allowed_rotations: Some(vec![0.0, 180.0]), mirror: None },
+                part(rect_dto(40.0, 40.0), 2),
+            ],
+            config: cfg,
+        };
+        let response = run_nest(request).expect("nests");
+
+        for sheet in &response.placements {
+            for placed in &sheet.parts {
+                if placed.id < 3 {
+                    assert!(placed.rotation == 0.0 || placed.rotation == 180.0, "grain-locked part {} placed at {}", placed.id, placed.rotation);
+                }
+            }
+        }
+
+        // The rules come back with the result so a later repack is held to
+        // the same constraints - see RepackSheetRequest::part_rules.
+        assert_eq!(response.part_rules.len(), 3, "one entry per constrained copy");
+        for id in 0..3 {
+            assert_eq!(response.part_rules[&id].angles, vec![0.0, 180.0]);
+        }
+        assert!(!response.part_rules.contains_key(&3), "the unconstrained part needs no entry");
+    }
+
+    #[test]
+    fn authored_angles_are_normalised_and_a_degenerate_list_means_unconstrained() {
+        // Out of order, out of range, duplicated, and a stray non-finite.
+        let parts = vec![PartDto {
+            polygon: square_dto(10.0),
+            quantity: 1,
+            allowed_rotations: Some(vec![540.0, -90.0, 180.0, 180.0, f64::NAN]),
+            mirror: None,
+        }];
+        let expanded = expand_parts(parts, false);
+        assert_eq!(expanded.part_rules[&0].angles, vec![180.0, 270.0], "540 -> 180 (deduped), -90 -> 270, NaN dropped");
+
+        // An explicitly empty list is not "this part may never be placed".
+        let parts = vec![PartDto { polygon: square_dto(10.0), quantity: 1, allowed_rotations: Some(Vec::new()), mirror: None }];
+        assert!(expand_parts(parts, false).part_rules.is_empty(), "an empty allow-list means unconstrained, not unplaceable");
     }
 }

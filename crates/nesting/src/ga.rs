@@ -31,7 +31,7 @@ use std::cell::Cell;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use crate::placement::PlaceResult;
+use crate::placement::{PartRules, PlaceResult};
 
 /// `background.js`'s `isBetterNest`: ranks nest results for display - fewer
 /// unplaced parts first (a trial that leaves parts out is never "better"
@@ -67,6 +67,12 @@ pub struct GaConfig {
     /// the encoding and `nesting::dispatch` for where a mirrored gene turns
     /// into mirrored geometry.
     pub mirror: bool,
+    /// Per-part orientation constraints - the same map
+    /// `PlacementConfig::part_rules` carries, so a gene and the placement it
+    /// produces can never disagree about what a part is allowed to do. Empty
+    /// (the default) means every part draws from the global grid, exactly as
+    /// before this field existed.
+    pub part_rules: PartRules,
 }
 
 /// One individual: a permutation of part ids (`placement`) and a parallel
@@ -80,8 +86,8 @@ pub struct Individual {
     pub fitness: Option<f64>,
 }
 
-fn random_angles(length: usize, rotations: u32, mirror: bool, rng: &mut impl Rng) -> Vec<f64> {
-    (0..length).map(|_| random_angle(rotations, mirror, rng)).collect()
+fn random_angles(ids: &[usize], rotations: u32, mirror: bool, rules: &PartRules, rng: &mut impl Rng) -> Vec<f64> {
+    ids.iter().map(|&id| random_angle(id, rotations, mirror, rules, rng)).collect()
 }
 
 /// One rotation gene. With `mirror` off this is the plain `k * 360/rotations`
@@ -101,10 +107,27 @@ fn random_angles(length: usize, rotations: u32, mirror: bool, rng: &mut impl Rng
 /// calls); `GaConfig` needs the same floor, since this is `pub` API reachable
 /// without going through `src-tauri`'s own `rotations == 0` request
 /// validation (a test, a future caller, `nesting`'s own bench harness).
-fn random_angle(rotations: u32, mirror: bool, rng: &mut impl Rng) -> f64 {
-    let rotations = rotations.max(1);
-    let slots = if mirror { rotations * 2 } else { rotations };
-    (rng.gen_range(0..slots) as f64) * (360.0 / rotations as f64)
+fn random_angle(id: usize, rotations: u32, mirror: bool, rules: &PartRules, rng: &mut impl Rng) -> f64 {
+    let rule = rules.get(&(id & !crate::dispatch::MIRROR_ID_BIT));
+    let mirror = rule.map_or(mirror, |r| r.mirror);
+    match rule.filter(|r| !r.angles.is_empty()) {
+        // Unconstrained: one `gen_range` over the same slot count as before,
+        // so an unconstrained run draws the identical random sequence it
+        // always did.
+        None => {
+            let rotations = rotations.max(1);
+            let slots = if mirror { rotations * 2 } else { rotations };
+            (rng.gen_range(0..slots) as f64) * (360.0 / rotations as f64)
+        }
+        // Constrained: draw from the allowed set instead of the grid, with
+        // the same "upper half means mirrored" encoding on top, so
+        // `dispatch::decode_rotation` needs no idea any of this exists.
+        Some(rule) => {
+            let n = rule.angles.len();
+            let slot = rng.gen_range(0..if mirror { n * 2 } else { n });
+            rule.angles[slot % n] + if slot >= n { 360.0 } else { 0.0 }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -141,7 +164,7 @@ impl GeneticAlgorithm {
 
         let mut rng = ga.next_rng();
         ga.population.push(Individual {
-            rotation: random_angles(adam_len, ga.config.rotations, ga.config.mirror, &mut rng),
+            rotation: random_angles(&adam, ga.config.rotations, ga.config.mirror, &ga.config.part_rules, &mut rng),
             placement: adam,
             fitness: None,
         });
@@ -152,7 +175,7 @@ impl GeneticAlgorithm {
             }
             let mut rng = ga.next_rng();
             ga.population.push(Individual {
-                rotation: random_angles(adam_len, ga.config.rotations, ga.config.mirror, &mut rng),
+                rotation: random_angles(&seed, ga.config.rotations, ga.config.mirror, &ga.config.part_rules, &mut rng),
                 placement: seed,
                 fitness: None,
             });
@@ -240,7 +263,7 @@ impl GeneticAlgorithm {
                 }
             }
             if rng.gen::<f64>() < rotation_mutation_chance {
-                clone.rotation[i] = random_angle(rotations, self.config.mirror, &mut rng);
+                clone.rotation[i] = random_angle(clone.placement[i], rotations, self.config.mirror, &self.config.part_rules, &mut rng);
             }
         }
 
@@ -377,7 +400,7 @@ mod tests {
     use super::*;
 
     fn config() -> GaConfig {
-        GaConfig { population_size: 8, mutation_rate: 10.0, rotations: 4, mirror: false }
+        GaConfig { population_size: 8, mutation_rate: 10.0, rotations: 4, mirror: false, part_rules: Default::default() }
     }
 
     fn adam(n: usize) -> Vec<usize> {
@@ -397,7 +420,7 @@ mod tests {
     /// are `pub` API reachable without going through that check at all.
     #[test]
     fn rotations_zero_does_not_panic() {
-        let cfg = GaConfig { population_size: 4, mutation_rate: 50.0, rotations: 0, mirror: false };
+        let cfg = GaConfig { population_size: 4, mutation_rate: 50.0, rotations: 0, mirror: false, part_rules: Default::default() };
         let ga = GeneticAlgorithm::new(adam(4), cfg, Vec::new(), 0);
         assert_eq!(ga.population.len(), 4);
         for individual in &ga.population {
@@ -418,7 +441,7 @@ mod tests {
     /// from must have actually widened, not just been recorded.
     #[test]
     fn set_rotations_widens_the_grid_mutate_draws_from() {
-        let mut ga = GeneticAlgorithm::new(adam(6), GaConfig { population_size: 4, mutation_rate: 100.0, rotations: 1, mirror: false }, Vec::new(), 0);
+        let mut ga = GeneticAlgorithm::new(adam(6), GaConfig { population_size: 4, mutation_rate: 100.0, rotations: 1, mirror: false, part_rules: Default::default() }, Vec::new(), 0);
         for _ in 0..20 {
             let mutant = ga.mutate(&ga.population[0]);
             assert!(mutant.rotation.iter().all(|&r| r == 0.0), "rotations: 1 should never produce a non-zero angle");
