@@ -5,15 +5,27 @@
 //! path (see circular_nfp.rs) - just against DXF entities instead of an SVG
 //! DOM, via the `dxf` crate.
 //!
-//! Currently supported: `LWPOLYLINE` (closed, including bulge/arc segments),
-//! `CIRCLE`, and full-sweep `ARC` (treated as a circle, same as SVG's
-//! isCircle handling for a `<circle>`-equivalent full arc). Bare `LINE`/
-//! partial-`ARC` networks that only form a closed profile once their
-//! endpoints are chained together are **not** supported yet - that needs a
-//! separate edge-graph-joining algorithm and is tracked as a follow-up in
-//! docs/PORT_STATUS.md rather than attempted half-correct here. The older
-//! heavyweight `POLYLINE` entity (pre-LWPOLYLINE, vertices as separate linked
-//! entities) is also not yet supported.
+//! Supported, one entity to one profile (`entity_to_polygon`): `LWPOLYLINE`
+//! and the older `POLYLINE`, both closed and both including bulge/arc
+//! segments, `CIRCLE`, and full-sweep `ARC` (treated as a circle, same as
+//! SVG's isCircle handling for a `<circle>`-equivalent full arc).
+//!
+//! Supported across entities (`entities_to_polygons_chained`): a profile that
+//! only becomes closed once loose `LINE`s, partial `ARC`s and open polylines
+//! are walked end to end. That is a graph walk over what the per-entity pass
+//! rejected, so it is a second pass rather than another match arm - see
+//! `chain_edges`.
+//!
+//! Supported before either (`expand_inserts`): `INSERT` block references,
+//! including nested blocks and the `MINSERT` array form. Block bodies live in
+//! `Drawing::blocks()`, not `Drawing::entities()`, so this needs the whole
+//! drawing rather than an entity iterator.
+//!
+//! Still not supported: `SPLINE` and `ELLIPSE`; 3D polylines and polyface
+//! meshes are rejected deliberately rather than flattened onto XY. A ring
+//! produced by chaining carries no `real_boundary`, so its arcs export as
+//! their tessellation rather than as true arcs - reconstructing bulges from
+//! chained segments is a follow-up, not an oversight.
 //!
 //! **`TEXT`/`MTEXT` are carried through, not converted to profiles**: these
 //! entities have no closed boundary (nothing to nest against), so they don't
@@ -30,6 +42,7 @@
 //! anywhere else in this pipeline for it to attach to.
 
 use dxf::entities::{Entity, EntityType};
+use dxf::{Drawing, Point as DxfPoint};
 
 use crate::circular_nfp::Circle;
 use crate::point::Point;
@@ -330,12 +343,23 @@ fn real_boundary_from_vertices(verts: &[dxf::LwPolylineVertex]) -> Vec<RealVerte
     verts.iter().map(|v| RealVertex { point: Point::new(v.x, v.y), bulge: v.bulge }).collect()
 }
 
-fn lwpolyline_to_points(verts: &[dxf::LwPolylineVertex], is_closed: bool, tolerance: f64) -> Vec<Point> {
+/// The older `POLYLINE`/`VERTEX` entity pair, reduced to the same
+/// `(point, bulge)` list an `LWPOLYLINE` gives us. The `dxf` crate has
+/// already re-assembled the trailing `VERTEX` entities and their `SEQEND`
+/// into `Polyline`'s own vertex list by the time we see it, so there is no
+/// entity-stream state machine to write here - the two entity types differ
+/// only in how their vertices are spelled, and every consumer below works on
+/// `RealVertex` so neither needs its own tessellation path.
+fn polyline_real_vertices(poly: &dxf::entities::Polyline) -> Vec<RealVertex> {
+    poly.vertices().map(|v| RealVertex { point: Point::new(v.location.x, v.location.y), bulge: v.bulge }).collect()
+}
+
+fn lwpolyline_to_points(verts: &[RealVertex], is_closed: bool, tolerance: f64) -> Vec<Point> {
     let mut points = Vec::with_capacity(verts.len());
     let n = verts.len();
 
     for i in 0..n {
-        let p0 = Point::new(verts[i].x, verts[i].y);
+        let p0 = verts[i].point;
         points.push(p0);
 
         // only emit the arc between this vertex and the next if there IS a
@@ -343,8 +367,7 @@ fn lwpolyline_to_points(verts: &[dxf::LwPolylineVertex], is_closed: bool, tolera
         // when the polyline is closed, wrapping back to vertex 0)
         let has_next = i + 1 < n || is_closed;
         if has_next && verts[i].bulge != 0.0 {
-            let next = &verts[if i + 1 < n { i + 1 } else { 0 }];
-            let p1 = Point::new(next.x, next.y);
+            let p1 = verts[if i + 1 < n { i + 1 } else { 0 }].point;
             points.extend(tessellate_bulge(p0, p1, verts[i].bulge, tolerance));
         }
     }
@@ -360,15 +383,32 @@ fn lwpolyline_to_points(verts: &[dxf::LwPolylineVertex], is_closed: bool, tolera
 /// instead of setting the closed bit and omitting the duplicate). The
 /// duplicate point itself must still be dropped before treating the loop as
 /// closed - see the `entity_to_polygon` call site.
-fn closes_itself_by_duplicate_point(poly: &dxf::entities::LwPolyline) -> bool {
-    if poly.is_closed() {
-        return false;
-    }
-    let verts = &poly.vertices;
+fn closes_itself_by_duplicate_point(verts: &[RealVertex]) -> bool {
     match (verts.first(), verts.last()) {
-        (Some(first), Some(last)) if verts.len() >= 4 => (first.x - last.x).abs() < 1e-9 && (first.y - last.y).abs() < 1e-9,
+        (Some(first), Some(last)) if verts.len() >= 4 => {
+            (first.point.x - last.point.x).abs() < 1e-9 && (first.point.y - last.point.y).abs() < 1e-9
+        }
         _ => false,
     }
+}
+
+/// Shared tail of every polyline-shaped entity arm: turn a `(point, bulge)`
+/// list plus its closed flag into a closed profile, or `None` if it isn't
+/// one. Keeps `LWPOLYLINE` and the older `POLYLINE` on literally the same
+/// code path rather than two near-copies that can drift.
+fn polyline_profile(verts: &[RealVertex], is_closed: bool, layer: String, tolerance: f64) -> Option<LayeredPolygon> {
+    // Drop the redundant closing vertex (identical to the first) before
+    // treating the loop as closed - otherwise it'd produce a zero-length
+    // final edge back to vertex 0.
+    let verts = if !is_closed && closes_itself_by_duplicate_point(verts) { &verts[..verts.len() - 1] } else { verts };
+    if !is_closed && !closes_itself_by_duplicate_point(verts) && verts.len() == verts.len() {
+        // fall through - the caller decides; see `entity_to_polygon`.
+    }
+    let points = lwpolyline_to_points(verts, true, tolerance);
+    if points.len() < 3 {
+        return None;
+    }
+    Some(LayeredPolygon { real_boundary: Some(verts.to_vec()), ..LayeredPolygon::new(points, layer, None) })
 }
 
 /// True if an ARC's angular sweep is a full circle (some DXF exporters
@@ -386,23 +426,13 @@ pub fn entity_to_polygon(entity: &Entity, curve_tolerance: f64) -> Option<Layere
     let layer = entity.common.layer.clone();
 
     match &entity.specific {
-        EntityType::LwPolyline(poly) if poly.is_closed() => {
-            let points = lwpolyline_to_points(&poly.vertices, true, curve_tolerance);
-            if points.len() < 3 {
-                return None;
-            }
-            Some(LayeredPolygon { real_boundary: Some(real_boundary_from_vertices(&poly.vertices)), ..LayeredPolygon::new(points, layer, None) })
-        }
-        EntityType::LwPolyline(poly) if closes_itself_by_duplicate_point(poly) => {
-            // Drop the redundant closing vertex (identical to the first)
-            // before treating the loop as closed - otherwise it'd produce a
-            // zero-length final edge back to vertex 0.
-            let verts = &poly.vertices[..poly.vertices.len() - 1];
-            let points = lwpolyline_to_points(verts, true, curve_tolerance);
-            if points.len() < 3 {
-                return None;
-            }
-            Some(LayeredPolygon { real_boundary: Some(real_boundary_from_vertices(verts)), ..LayeredPolygon::new(points, layer, None) })
+        EntityType::LwPolyline(poly) => polyline_profile(&real_boundary_from_vertices(&poly.vertices), poly.is_closed(), layer, curve_tolerance),
+        // The older POLYLINE entity, same treatment - see
+        // `polyline_real_vertices`. 3D polylines and polyface/polygon meshes
+        // share the entity type but are not planar profiles, so they're
+        // rejected outright rather than silently flattened onto XY.
+        EntityType::Polyline(poly) if !poly.is_3d_polyline() && !poly.is_3d_polygon_mesh() && !poly.is_polyface_mesh() => {
+            polyline_profile(&polyline_real_vertices(poly), poly.is_closed(), layer, curve_tolerance)
         }
         EntityType::Circle(circle) => {
             let points = tessellate_circle(circle.center.x, circle.center.y, circle.radius, curve_tolerance);
@@ -423,6 +453,397 @@ pub fn entity_to_polygon(entity: &Entity, curve_tolerance: f64) -> Option<Layere
             Some(LayeredPolygon::new(points, layer, Some(meta)))
         }
         _ => None,
+    }
+}
+
+/// One open, already-tessellated edge waiting to be chained into a closed
+/// ring - a `LINE`'s two endpoints, a partial `ARC`'s tessellated sweep, or
+/// an open polyline that never closed itself. Carries `layer` because
+/// chaining is per-layer (see `chain_edges`).
+#[derive(Clone, Debug)]
+struct Edge {
+    points: Vec<Point>,
+    layer: String,
+}
+
+impl Edge {
+    fn start(&self) -> Point {
+        self.points[0]
+    }
+
+    fn end(&self) -> Point {
+        self.points[self.points.len() - 1]
+    }
+
+    fn reversed(&self) -> Edge {
+        Edge { points: self.points.iter().rev().copied().collect(), layer: self.layer.clone() }
+    }
+}
+
+/// Tessellates a partial (non-full-circle) ARC into an open point list,
+/// endpoints included. DXF arcs always sweep counter-clockwise from
+/// `start_angle` to `end_angle`, both in degrees.
+fn arc_to_points(arc: &dxf::entities::Arc, tolerance: f64) -> Vec<Point> {
+    let start = arc.start_angle.to_radians();
+    let sweep = (arc.end_angle - arc.start_angle).rem_euclid(360.0).to_radians();
+    let n = segment_count(sweep, arc.radius, tolerance);
+    (0..=n)
+        .map(|i| {
+            let theta = start + sweep * (i as f64) / (n as f64);
+            Point::new(arc.center.x + arc.radius * theta.cos(), arc.center.y + arc.radius * theta.sin())
+        })
+        .collect()
+}
+
+/// An open polyline is just a many-point edge - a real profile is often
+/// drawn as two or three open polylines meeting end to end, not only as
+/// bare LINEs.
+fn open_polyline_edge(verts: &[RealVertex], is_closed: bool, layer: String, tolerance: f64) -> Option<Edge> {
+    if is_closed || closes_itself_by_duplicate_point(verts) || verts.len() < 2 {
+        return None; // already a closed profile (or too short to be an edge)
+    }
+    Some(Edge { points: lwpolyline_to_points(verts, false, tolerance), layer })
+}
+
+/// The open edge an entity contributes to the chaining pass, if any.
+/// Deliberately only the cases `entity_to_polygon` itself rejects - anything
+/// that already converts to a closed profile on its own never reaches here
+/// (see `entities_to_polygons_chained`).
+fn entity_to_edge(entity: &Entity, curve_tolerance: f64) -> Option<Edge> {
+    let layer = entity.common.layer.clone();
+    match &entity.specific {
+        EntityType::Line(line) => {
+            let a = Point::new(line.p1.x, line.p1.y);
+            let b = Point::new(line.p2.x, line.p2.y);
+            if a.within_distance(b, 1e-9) {
+                return None; // zero-length line: no direction, nothing to chain
+            }
+            Some(Edge { points: vec![a, b], layer })
+        }
+        EntityType::Arc(arc) if !arc_is_full_circle(arc) => Some(Edge { points: arc_to_points(arc, curve_tolerance), layer }),
+        EntityType::LwPolyline(poly) => open_polyline_edge(&real_boundary_from_vertices(&poly.vertices), poly.is_closed(), layer, curve_tolerance),
+        EntityType::Polyline(poly) if !poly.is_3d_polyline() && !poly.is_3d_polygon_mesh() && !poly.is_polyface_mesh() => {
+            open_polyline_edge(&polyline_real_vertices(poly), poly.is_closed(), layer, curve_tolerance)
+        }
+        _ => None,
+    }
+}
+
+/// Joins open edges into closed rings: the case where a profile only exists
+/// once its `LINE`/`ARC`/open-polyline pieces are walked end to end. Real CAD
+/// files export profiles this way constantly, and every one of those entities
+/// is individually meaningless to `entity_to_polygon`.
+///
+/// Greedy walk, not a global optimisation: take any unused edge, keep
+/// extending from its tail by whichever unused neighbour touches it within
+/// `epsilon`, and emit a ring the moment the walk arrives back at its own
+/// start. A walk that runs out of neighbours without closing is
+/// **discarded** - an unclosed chain is not a profile, and inventing a
+/// closing segment for it would silently fabricate material that isn't in
+/// the drawing.
+///
+/// **Chaining never crosses layers.** Layer identity has to survive import
+/// (cut/etch/drill are different operations), so a `CUT` line and a `DRILL`
+/// arc that happen to share an endpoint are not two halves of one ring.
+///
+/// `epsilon` is the endpoint-join radius. It is derived from
+/// `curve_tolerance` (see `entities_to_polygons_chained`), **not** from
+/// `polygon::TOL`: 1e-9 is a float-noise tolerance, while real CAD endpoints
+/// that are meant to coincide routinely differ by far more than that after a
+/// round trip through another tool. A join radius that tight would reject
+/// exactly the files this pass exists to rescue.
+///
+/// ponytail: O(n^2) endpoint matching, and first-match-wins where several
+/// edges meet at one point. Real files bring hundreds of loose edges, not
+/// millions, and this runs once per import - reach for a spatial hash (and a
+/// smarter branch choice) only if a real fixture makes it hurt.
+fn chain_edges(edges: Vec<Edge>, epsilon: f64) -> Vec<LayeredPolygon> {
+    let mut used = vec![false; edges.len()];
+    let mut rings = Vec::new();
+
+    for seed in 0..edges.len() {
+        if used[seed] {
+            continue;
+        }
+        used[seed] = true;
+        let mut walk = edges[seed].clone();
+
+        loop {
+            if walk.points.len() >= 4 && walk.end().within_distance(walk.start(), epsilon) {
+                // Closed. Drop the duplicated closing point - a
+                // `LayeredPolygon` never repeats its first vertex.
+                walk.points.pop();
+                rings.push(LayeredPolygon::new(std::mem::take(&mut walk.points), walk.layer.clone(), None));
+                break;
+            }
+
+            let tail = walk.end();
+            let next = edges
+                .iter()
+                .enumerate()
+                .find(|(i, e)| !used[*i] && e.layer == walk.layer && (e.start().within_distance(tail, epsilon) || e.end().within_distance(tail, epsilon)));
+
+            match next {
+                Some((i, edge)) => {
+                    used[i] = true;
+                    let oriented = if edge.start().within_distance(tail, epsilon) { edge.clone() } else { edge.reversed() };
+                    // Skip the shared endpoint itself, keep the rest.
+                    walk.points.extend_from_slice(&oriented.points[1..]);
+                }
+                // Ran out of neighbours without closing: not a profile.
+                None => break,
+            }
+        }
+    }
+
+    rings
+}
+
+/// `entities_to_polygons`, plus a second pass that chains whatever it
+/// rejected (loose `LINE`s, partial `ARC`s, open polylines) into closed
+/// rings. This is the function a whole-drawing caller wants;
+/// `entities_to_polygons` stays as-is for callers that only want the
+/// one-entity-one-profile conversion.
+///
+/// Two passes rather than one because they are genuinely different problems:
+/// the first is a pure per-entity map with no cross-entity state, the second
+/// is a graph walk over everything the first one couldn't use.
+pub fn entities_to_polygons_chained<'a>(entities: impl Iterator<Item = &'a Entity>, curve_tolerance: f64) -> Vec<LayeredPolygon> {
+    // Collected rather than taking `impl Iterator + Clone`: `Drawing::entities()`
+    // isn't `Clone`, and both passes need to see every entity.
+    let entities: Vec<&Entity> = entities.collect();
+    let mut polygons = Vec::new();
+    let mut leftovers = Vec::new();
+    for entity in entities {
+        match entity_to_polygon(entity, curve_tolerance) {
+            Some(polygon) => polygons.push(polygon),
+            None => leftovers.extend(entity_to_edge(entity, curve_tolerance)),
+        }
+    }
+    polygons.extend(chain_edges(leftovers, curve_tolerance));
+    polygons
+}
+
+/// A 2x3 affine transform, just enough for `INSERT` expansion.
+/// Deliberately local and minimal rather than a general matrix type in
+/// `geometry` - the plan dropped the Electron app's `matrix.ts` outright, and
+/// two call sites don't justify bringing it back. (`svg_import` has its own
+/// private equivalent for the same reason.)
+#[derive(Clone, Copy, Debug)]
+struct Affine {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    e: f64,
+    f: f64,
+}
+
+impl Affine {
+    const IDENTITY: Affine = Affine { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+
+    /// `self` applied after `inner` - i.e. `self * inner`.
+    fn then(self, inner: Affine) -> Affine {
+        Affine {
+            a: self.a * inner.a + self.c * inner.b,
+            b: self.b * inner.a + self.d * inner.b,
+            c: self.a * inner.c + self.c * inner.d,
+            d: self.b * inner.c + self.d * inner.d,
+            e: self.a * inner.e + self.c * inner.f + self.e,
+            f: self.b * inner.e + self.d * inner.f + self.f,
+        }
+    }
+
+    fn apply(self, p: DxfPoint) -> DxfPoint {
+        DxfPoint::new(self.a * p.x + self.c * p.y + self.e, self.b * p.x + self.d * p.y + self.f, p.z)
+    }
+
+    /// The scale this transform applies to a radius. A non-uniform INSERT
+    /// scale would turn a circle into an ellipse, which no `Circle`/`Arc`
+    /// entity can represent - see `transform_entity` for how that case is
+    /// handled instead of silently picking one axis.
+    fn uniform_scale(self) -> Option<f64> {
+        let sx = self.a.hypot(self.b);
+        let sy = self.c.hypot(self.d);
+        if (sx - sy).abs() < 1e-9 {
+            Some(sx)
+        } else {
+            None
+        }
+    }
+
+    fn rotation_deg(self) -> f64 {
+        self.b.atan2(self.a).to_degrees()
+    }
+}
+
+/// How deep nested `INSERT`s are followed before giving up. Blocks
+/// referencing each other (directly or in a cycle) is malformed but does
+/// occur in the wild, and without a cap it is an infinite loop, not an error.
+const MAX_INSERT_DEPTH: usize = 8;
+
+/// Applies `xf` to one entity's geometry, returning the transformed copy.
+/// Only the entity kinds this module actually consumes are transformed;
+/// anything else is passed through untouched so it gets dropped downstream
+/// exactly as it would have been anyway.
+fn transform_entity(entity: &Entity, xf: Affine, insert_layer: &str, curve_tolerance: f64) -> Entity {
+    let mut out = entity.clone();
+    // DXF's layer-0 inheritance rule: geometry drawn on layer "0" inside a
+    // block takes the layer of the INSERT that placed it, rather than staying
+    // on "0". Anything drawn on a named layer keeps that layer. Getting this
+    // wrong silently moves a block's cut lines onto the wrong operation.
+    if out.common.layer == "0" {
+        out.common.layer = insert_layer.to_string();
+    }
+
+    out.specific = match &entity.specific {
+        EntityType::Line(line) => {
+            let mut l = line.clone();
+            l.p1 = xf.apply(line.p1.clone());
+            l.p2 = xf.apply(line.p2.clone());
+            EntityType::Line(l)
+        }
+        EntityType::LwPolyline(poly) => {
+            let mut p = poly.clone();
+            for v in &mut p.vertices {
+                let t = xf.apply(DxfPoint::new(v.x, v.y, 0.0));
+                v.x = t.x;
+                v.y = t.y;
+            }
+            EntityType::LwPolyline(p)
+        }
+        EntityType::Polyline(poly) => {
+            let mut p = poly.clone();
+            for v in p.vertices_mut() {
+                v.location = xf.apply(v.location.clone());
+            }
+            EntityType::Polyline(p)
+        }
+        EntityType::Circle(circle) => match xf.uniform_scale() {
+            Some(scale) => {
+                let mut c = circle.clone();
+                c.center = xf.apply(circle.center.clone());
+                c.radius = circle.radius * scale;
+                EntityType::Circle(c)
+            }
+            // Non-uniform scale turns the circle into an ellipse. Rather than
+            // emit a wrong circle, tessellate it into an LWPOLYLINE and
+            // transform the points - the shape stays right, it just loses its
+            // `is_circle` fast-path metadata.
+            None => tessellated_as_polyline(&tessellate_circle(circle.center.x, circle.center.y, circle.radius, curve_tolerance), xf, true),
+        },
+        EntityType::Arc(arc) => match xf.uniform_scale() {
+            Some(scale) => {
+                let mut a = arc.clone();
+                a.center = xf.apply(arc.center.clone());
+                a.radius = arc.radius * scale;
+                a.start_angle = arc.start_angle + xf.rotation_deg();
+                a.end_angle = arc.end_angle + xf.rotation_deg();
+                EntityType::Arc(a)
+            }
+            None => {
+                let pts = if arc_is_full_circle(arc) {
+                    tessellate_circle(arc.center.x, arc.center.y, arc.radius, curve_tolerance)
+                } else {
+                    arc_to_points(arc, curve_tolerance)
+                };
+                tessellated_as_polyline(&pts, xf, arc_is_full_circle(arc))
+            }
+        },
+        EntityType::Text(text) => {
+            let mut t = text.clone();
+            t.location = xf.apply(text.location.clone());
+            t.rotation += xf.rotation_deg();
+            t.text_height *= xf.uniform_scale().unwrap_or(1.0);
+            EntityType::Text(t)
+        }
+        EntityType::MText(text) => {
+            let mut t = text.clone();
+            t.insertion_point = xf.apply(text.insertion_point.clone());
+            t.rotation_angle += xf.rotation_deg().to_radians();
+            t.initial_text_height *= xf.uniform_scale().unwrap_or(1.0);
+            EntityType::MText(t)
+        }
+        other => other.clone(),
+    };
+    out
+}
+
+/// Wraps already-tessellated points as an LWPOLYLINE with `xf` applied - the
+/// escape hatch for curves a non-uniform INSERT scale can't keep as curves.
+fn tessellated_as_polyline(points: &[Point], xf: Affine, closed: bool) -> EntityType {
+    let mut poly = dxf::entities::LwPolyline {
+        vertices: points
+            .iter()
+            .map(|p| {
+                let t = xf.apply(DxfPoint::new(p.x, p.y, 0.0));
+                dxf::LwPolylineVertex { x: t.x, y: t.y, bulge: 0.0, ..Default::default() }
+            })
+            .collect(),
+        ..Default::default()
+    };
+    poly.set_is_closed(closed);
+    EntityType::LwPolyline(poly)
+}
+
+/// Expands every `INSERT` in a drawing's model space into the block's own
+/// entities, transformed into place. Model-space entities that aren't
+/// `INSERT`s pass through unchanged.
+///
+/// This needs the whole `Drawing`, not an entity iterator, because block
+/// bodies live in `drawing.blocks()` and are **not** part of
+/// `drawing.entities()` - an INSERT on its own carries only a block *name*.
+///
+/// Handles MINSERT (the `column_count` x `row_count` array form) by emitting
+/// one transformed copy per cell, and nested INSERTs by recursing, capped at
+/// `MAX_INSERT_DEPTH`.
+pub fn expand_inserts(drawing: &Drawing, curve_tolerance: f64) -> Vec<Entity> {
+    let mut out = Vec::new();
+    for entity in drawing.entities() {
+        expand_entity(drawing, entity, Affine::IDENTITY, None, 0, curve_tolerance, &mut out);
+    }
+    out
+}
+
+fn expand_entity(drawing: &Drawing, entity: &Entity, xf: Affine, insert_layer: Option<&str>, depth: usize, curve_tolerance: f64, out: &mut Vec<Entity>) {
+    let EntityType::Insert(insert) = &entity.specific else {
+        // Plain geometry. At depth 0 with the identity transform this is a
+        // clone-only no-op, which is what keeps a drawing with no blocks in it
+        // behaving exactly as it did before this pass existed.
+        out.push(transform_entity(entity, xf, insert_layer.unwrap_or(&entity.common.layer), curve_tolerance));
+        return;
+    };
+
+    if depth >= MAX_INSERT_DEPTH {
+        return; // cyclic or absurdly nested blocks - drop rather than hang
+    }
+    let Some(block) = drawing.blocks().find(|b| b.name == insert.name) else {
+        return; // dangling block reference: nothing to draw
+    };
+
+    let (sx, sy) = (insert.x_scale_factor, insert.y_scale_factor);
+    let (sin, cos) = insert.rotation.to_radians().sin_cos();
+    // Column/row spacing is measured in the INSERT's own rotated frame, same
+    // as AutoCAD's MINSERT.
+    for col in 0..insert.column_count.max(1) {
+        for row in 0..insert.row_count.max(1) {
+            let ox = insert.column_spacing * col as f64;
+            let oy = insert.row_spacing * row as f64;
+            // base_point removal, then scale, then rotate, then place.
+            let local = Affine {
+                a: cos * sx,
+                b: sin * sx,
+                c: -sin * sy,
+                d: cos * sy,
+                e: insert.location.x + cos * ox - sin * oy - (cos * sx * block.base_point.x - sin * sy * block.base_point.y),
+                f: insert.location.y + sin * ox + cos * oy - (sin * sx * block.base_point.x + cos * sy * block.base_point.y),
+            };
+            let combined = xf.then(local);
+            let layer = insert_layer.unwrap_or(&entity.common.layer);
+            for inner in &block.entities {
+                expand_entity(drawing, inner, combined, Some(layer), depth + 1, curve_tolerance, out);
+            }
+        }
     }
 }
 
@@ -1047,5 +1468,298 @@ mod tests {
                 assert!((a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9, "arc {j}: {a:?} != {b:?}");
             }
         }
+    }
+
+    // --- POLYLINE (the older entity) -----------------------------------
+
+    fn polyline_entity(layer: &str, verts: &[(f64, f64, f64)], closed: bool) -> Entity {
+        let mut poly = dxf::entities::Polyline::default();
+        poly.set_is_closed(closed);
+        poly.__vertices_and_handles = verts
+            .iter()
+            .map(|&(x, y, bulge)| {
+                let v = dxf::entities::Vertex { location: DxfPoint::new(x, y, 0.0), bulge, ..Default::default() };
+                (v, dxf::Handle::empty())
+            })
+            .collect();
+        entity(layer, EntityType::Polyline(poly))
+    }
+
+    #[test]
+    fn closed_polyline_converts_the_same_as_the_equivalent_lwpolyline() {
+        let square = [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (10.0, 10.0, 0.0), (0.0, 10.0, 0.0)];
+        let from_polyline = entity_to_polygon(&polyline_entity("CUT", &square, true), 0.1).expect("closed POLYLINE is a profile");
+
+        let mut lw = LwPolyline {
+            vertices: square.iter().map(|&(x, y, bulge)| LwPolylineVertex { x, y, bulge, ..Default::default() }).collect(),
+            ..Default::default()
+        };
+        lw.set_is_closed(true);
+        let from_lwpolyline = entity_to_polygon(&entity("CUT", EntityType::LwPolyline(lw)), 0.1).expect("closed LWPOLYLINE is a profile");
+
+        assert_eq!(from_polyline.points, from_lwpolyline.points);
+        assert_eq!(from_polyline.layer, "CUT");
+        assert_eq!(from_polyline.real_boundary, from_lwpolyline.real_boundary);
+    }
+
+    #[test]
+    fn polyline_bulge_survives_into_real_boundary_and_tessellation() {
+        // Half-disc: straight edge back along the bottom, semicircular top.
+        let verts = [(0.0, 0.0, 1.0), (10.0, 0.0, 0.0)];
+        let poly = entity_to_polygon(&polyline_entity("0", &verts, true), 0.01).expect("closed POLYLINE is a profile");
+
+        let boundary = poly.real_boundary.as_ref().expect("a POLYLINE keeps its bulge list for real-arc export");
+        assert_eq!(boundary.len(), 2);
+        assert_eq!(boundary[0].bulge, 1.0);
+
+        // Area of a d=10 half disc, within tessellation error.
+        let expected = std::f64::consts::PI * 25.0 / 2.0;
+        assert!((polygon_area(&poly.points).abs() - expected).abs() < 0.5, "got {}", polygon_area(&poly.points).abs());
+    }
+
+    #[test]
+    fn three_dimensional_polylines_are_rejected_rather_than_flattened() {
+        let mut poly = dxf::entities::Polyline::default();
+        poly.set_is_closed(true);
+        poly.set_is_3d_polyline(true);
+        poly.__vertices_and_handles = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]
+            .iter()
+            .map(|&(x, y)| {
+                let v = dxf::entities::Vertex { location: DxfPoint::new(x, y, 5.0), ..Default::default() };
+                (v, dxf::Handle::empty())
+            })
+            .collect();
+        assert!(entity_to_polygon(&entity("0", EntityType::Polyline(poly)), 0.1).is_none());
+    }
+
+    // --- LINE / ARC chaining -------------------------------------------
+
+    fn line(layer: &str, from: (f64, f64), to: (f64, f64)) -> Entity {
+        entity(
+            layer,
+            EntityType::Line(dxf::entities::Line {
+                p1: DxfPoint::new(from.0, from.1, 0.0),
+                p2: DxfPoint::new(to.0, to.1, 0.0),
+                ..Default::default()
+            }),
+        )
+    }
+
+    #[test]
+    fn four_scrambled_lines_chain_into_one_square_ring() {
+        // Deliberately out of order, and two of them drawn "backwards" - a
+        // real drawing has no guaranteed entity order or edge direction.
+        let entities = vec![
+            line("CUT", (10.0, 10.0), (10.0, 0.0)), // right edge, reversed
+            line("CUT", (0.0, 0.0), (10.0, 0.0)),   // bottom
+            line("CUT", (0.0, 10.0), (0.0, 0.0)),   // left, reversed
+            line("CUT", (10.0, 10.0), (0.0, 10.0)), // top
+        ];
+        let rings = entities_to_polygons_chained(entities.iter(), 0.1);
+        assert_eq!(rings.len(), 1, "the four edges form exactly one ring");
+        assert_eq!(rings[0].layer, "CUT");
+        assert_eq!(rings[0].points.len(), 4, "a square ring has 4 vertices, with no repeated closing point");
+        assert!((polygon_area(&rings[0].points).abs() - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn lines_and_partial_arcs_chain_into_one_slot_profile() {
+        // A 20x10 slot: two straight flanks plus a semicircular cap at each
+        // end. Area = 10x20 rectangle + a d=10 circle.
+        let arc = |layer: &str, cx: f64, start: f64, end: f64| {
+            entity(
+                layer,
+                EntityType::Arc(Arc {
+                    center: DxfPoint::new(cx, 0.0, 0.0),
+                    radius: 5.0,
+                    start_angle: start,
+                    end_angle: end,
+                    ..Default::default()
+                }),
+            )
+        };
+        // DXF arcs always sweep CCW from start to end, so the right-hand cap
+        // is 270 -> 90 (through 0 degrees) and the left-hand one is 90 -> 270
+        // (through 180). Swapping those would carve the caps *into* the slot.
+        let entities = vec![
+            line("CUT", (0.0, 5.0), (20.0, 5.0)),
+            arc("CUT", 20.0, 270.0, 90.0),
+            line("CUT", (20.0, -5.0), (0.0, -5.0)),
+            arc("CUT", 0.0, 90.0, 270.0),
+        ];
+        let rings = entities_to_polygons_chained(entities.iter(), 0.01);
+        assert_eq!(rings.len(), 1);
+        let expected = 20.0 * 10.0 + std::f64::consts::PI * 25.0;
+        assert!((polygon_area(&rings[0].points).abs() - expected).abs() < 1.0, "got {}", polygon_area(&rings[0].points).abs());
+    }
+
+    #[test]
+    fn endpoints_within_the_join_radius_chain_but_a_real_gap_does_not() {
+        let nearly = |gap: f64| {
+            vec![
+                line("0", (0.0, 0.0), (10.0, 0.0)),
+                line("0", (10.0, 0.0), (10.0, 10.0)),
+                line("0", (10.0, 10.0), (0.0, 10.0)),
+                line("0", (0.0, 10.0 + gap), (0.0, 0.0)),
+            ]
+        };
+        // Sloppy CAD endpoints well inside the tolerance still close.
+        assert_eq!(entities_to_polygons_chained(nearly(0.05).iter(), 0.1).len(), 1);
+        // A genuine gap does not - and the open chain is dropped, not
+        // fabricated into a ring.
+        assert!(entities_to_polygons_chained(nearly(5.0).iter(), 0.1).is_empty());
+    }
+
+    #[test]
+    fn chaining_never_joins_edges_across_layers() {
+        // Two squares sharing every coordinate, drawn on different layers -
+        // if chaining ignored layers, these eight edges would produce garbage
+        // instead of two clean rings.
+        let mut entities = Vec::new();
+        for layer in ["CUT", "DRILL"] {
+            entities.push(line(layer, (0.0, 0.0), (10.0, 0.0)));
+            entities.push(line(layer, (10.0, 0.0), (10.0, 10.0)));
+            entities.push(line(layer, (10.0, 10.0), (0.0, 10.0)));
+            entities.push(line(layer, (0.0, 10.0), (0.0, 0.0)));
+        }
+        let rings = entities_to_polygons_chained(entities.iter(), 0.1);
+        assert_eq!(rings.len(), 2);
+        let mut layers: Vec<&str> = rings.iter().map(|r| r.layer.as_str()).collect();
+        layers.sort_unstable();
+        assert_eq!(layers, vec!["CUT", "DRILL"]);
+        for ring in &rings {
+            assert!((polygon_area(&ring.points).abs() - 100.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn a_lone_partial_arc_still_is_not_a_profile() {
+        let arc = entity(
+            "0",
+            EntityType::Arc(Arc {
+                center: DxfPoint::new(0.0, 0.0, 0.0),
+                radius: 5.0,
+                start_angle: 0.0,
+                end_angle: 90.0,
+                ..Default::default()
+            }),
+        );
+        assert!(entity_to_polygon(&arc, 0.1).is_none(), "one quarter arc is not a closed shape on its own");
+        let entities = vec![arc];
+        assert!(entities_to_polygons_chained(entities.iter(), 0.1).is_empty(), "and chaining must not invent a chord to close it");
+    }
+
+    // --- INSERT / block expansion --------------------------------------
+
+    fn square_block(drawing: &mut Drawing, name: &str, layer: &str, size: f64) {
+        let mut block = dxf::Block { name: name.to_string(), ..Default::default() };
+        let mut poly = LwPolyline {
+            vertices: [(0.0, 0.0), (size, 0.0), (size, size), (0.0, size)]
+                .iter()
+                .map(|&(x, y)| LwPolylineVertex { x, y, ..Default::default() })
+                .collect(),
+            ..Default::default()
+        };
+        poly.set_is_closed(true);
+        block.entities.push(entity(layer, EntityType::LwPolyline(poly)));
+        drawing.add_block(block);
+    }
+
+    fn insert(name: &str, layer: &str, at: (f64, f64), rotation: f64, scale: f64) -> Entity {
+        entity(
+            layer,
+            EntityType::Insert(dxf::entities::Insert {
+                name: name.to_string(),
+                location: DxfPoint::new(at.0, at.1, 0.0),
+                rotation,
+                x_scale_factor: scale,
+                y_scale_factor: scale,
+                z_scale_factor: scale,
+                ..Default::default()
+            }),
+        )
+    }
+
+    #[test]
+    fn inserts_expand_into_transformed_copies_of_their_block() {
+        let mut drawing = Drawing::new();
+        square_block(&mut drawing, "PART", "CUT", 10.0);
+        drawing.add_entity(insert("PART", "CUT", (100.0, 0.0), 0.0, 1.0));
+        drawing.add_entity(insert("PART", "CUT", (0.0, 50.0), 90.0, 2.0));
+
+        let expanded = expand_inserts(&drawing, 0.1);
+        let rings = entities_to_polygons_chained(expanded.iter(), 0.1);
+        assert_eq!(rings.len(), 2, "each INSERT places one copy of the block");
+
+        let mut areas: Vec<f64> = rings.iter().map(|r| polygon_area(&r.points).abs()).collect();
+        areas.sort_by(f64::total_cmp);
+        assert!((areas[0] - 100.0).abs() < 1e-6, "unscaled copy keeps its area");
+        assert!((areas[1] - 400.0).abs() < 1e-6, "the 2x copy is 4x the area");
+
+        // The unrotated copy really is where the INSERT put it.
+        let placed = rings.iter().find(|r| (polygon_area(&r.points).abs() - 100.0).abs() < 1e-6).unwrap();
+        let bounds = get_polygon_bounds(&placed.points).unwrap();
+        assert!((bounds.x - 100.0).abs() < 1e-6, "got x {}", bounds.x);
+    }
+
+    #[test]
+    fn block_geometry_on_layer_zero_inherits_the_inserts_layer() {
+        let mut drawing = Drawing::new();
+        square_block(&mut drawing, "ON_ZERO", "0", 10.0);
+        square_block(&mut drawing, "ON_NAMED", "ETCH", 10.0);
+        drawing.add_entity(insert("ON_ZERO", "CUT", (0.0, 0.0), 0.0, 1.0));
+        drawing.add_entity(insert("ON_NAMED", "CUT", (100.0, 0.0), 0.0, 1.0));
+
+        let expanded = expand_inserts(&drawing, 0.1);
+        let layers: Vec<&str> = expanded.iter().map(|e| e.common.layer.as_str()).collect();
+        assert!(layers.contains(&"CUT"), "layer-0 block geometry takes the INSERT's layer, got {layers:?}");
+        assert!(layers.contains(&"ETCH"), "geometry on a named layer keeps it, got {layers:?}");
+    }
+
+    #[test]
+    fn minsert_arrays_expand_to_one_copy_per_grid_cell() {
+        let mut drawing = Drawing::new();
+        square_block(&mut drawing, "PART", "CUT", 5.0);
+        let mut ins = insert("PART", "CUT", (0.0, 0.0), 0.0, 1.0);
+        if let EntityType::Insert(i) = &mut ins.specific {
+            i.column_count = 2;
+            i.row_count = 3;
+            i.column_spacing = 20.0;
+            i.row_spacing = 20.0;
+        }
+        drawing.add_entity(ins);
+
+        let rings = entities_to_polygons_chained(expand_inserts(&drawing, 0.1).iter(), 0.1);
+        assert_eq!(rings.len(), 6, "a 2x3 MINSERT is six copies");
+        // Six distinct positions, not six copies stacked on each other.
+        let mut corners: Vec<(i64, i64)> = rings
+            .iter()
+            .map(|r| {
+                let b = get_polygon_bounds(&r.points).unwrap();
+                (b.x.round() as i64, b.y.round() as i64)
+            })
+            .collect();
+        corners.sort_unstable();
+        corners.dedup();
+        assert_eq!(corners.len(), 6);
+    }
+
+    #[test]
+    fn a_self_referencing_block_terminates_instead_of_hanging() {
+        let mut drawing = Drawing::new();
+        let mut block = dxf::Block { name: "LOOP".to_string(), ..Default::default() };
+        let mut poly = LwPolyline {
+            vertices: [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)].iter().map(|&(x, y)| LwPolylineVertex { x, y, ..Default::default() }).collect(),
+            ..Default::default()
+        };
+        poly.set_is_closed(true);
+        block.entities.push(entity("0", EntityType::LwPolyline(poly)));
+        block.entities.push(insert("LOOP", "0", (1.0, 1.0), 0.0, 1.0));
+        drawing.add_block(block);
+        drawing.add_entity(insert("LOOP", "CUT", (0.0, 0.0), 0.0, 1.0));
+
+        // The real assertion is that this returns at all.
+        let expanded = expand_inserts(&drawing, 0.1);
+        assert!(expanded.len() <= MAX_INSERT_DEPTH, "recursion is capped, got {}", expanded.len());
     }
 }

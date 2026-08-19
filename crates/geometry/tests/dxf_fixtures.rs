@@ -5,7 +5,7 @@
 //! the DXF-only, layer-retaining scope change recorded in docs/PORT_STATUS.md.
 
 use dxf::Drawing;
-use geometry::dxf_import::{build_polygon_tree, entities_to_polygons};
+use geometry::dxf_import::{build_polygon_tree, entities_to_polygons, entities_to_polygons_chained};
 use geometry::inner_nfp::inner_nfp;
 use geometry::point::Point;
 use geometry::polygon::polygon_area;
@@ -153,4 +153,39 @@ fn seventeen_mm_fixture_nests_every_cutout_under_its_real_parent_not_as_a_root()
             assert!(hole.children.is_empty(), "this fixture nests exactly one level deep (outline + holes), found an unexpected island under a hole");
         }
     }
+}
+
+/// The whole point of the chaining pass, against a real file rather than
+/// hand-built entities: `line-network.dxf` draws its outer profile as four
+/// bare `LINE`s and its slot hole as two `LINE`s plus two partial `ARC`s.
+/// Every one of those entities is individually rejected by
+/// `entity_to_polygon` - before chaining existed this file imported as a
+/// single circle, silently losing the part it was describing.
+/// See `crates/geometry/examples/gen_line_network.rs` for how it's built.
+#[test]
+fn chains_a_profile_drawn_entirely_as_loose_lines_and_arcs() {
+    let drawing = Drawing::load_file(fixture_path("line-network.dxf")).expect("line-network.dxf should parse");
+
+    let unchained = entities_to_polygons(drawing.entities(), 0.01);
+    assert_eq!(unchained.len(), 1, "without chaining only the CIRCLE converts - this is the bug the pass fixes");
+
+    let flat = entities_to_polygons_chained(drawing.entities(), 0.01);
+    assert_eq!(flat.len(), 3, "outer profile + slot + drilled circle");
+
+    let tree = build_polygon_tree(flat);
+    assert_eq!(tree.len(), 1, "the slot and the circle are holes in the outer profile, not separate parts");
+    assert_eq!(tree[0].children.len(), 2);
+    assert_eq!(tree[0].layer, "CUT");
+
+    // Outer 80x60, minus a 30x10 rounded slot and a r=4 circle.
+    let slot_area = 30.0 * 10.0 + std::f64::consts::PI * 25.0;
+    let expected = 80.0 * 60.0 - slot_area - std::f64::consts::PI * 16.0;
+    // Tolerance covers arc tessellation only: the holes are inscribed
+    // polygons, so they come out marginally small and the material marginally
+    // large. At curve_tolerance 0.01 that is well under a square millimetre.
+    let material = geometry::dxf_import::polygon_material_area(&tree[0]);
+    assert!((material - expected).abs() < 1.0, "material area {material}, expected about {expected}");
+
+    // The drilled hole keeps its own layer through the tree build.
+    assert!(tree[0].children.iter().any(|c| c.layer == "DRILL"), "layer identity must survive import");
 }

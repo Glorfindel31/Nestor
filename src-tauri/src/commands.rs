@@ -203,8 +203,18 @@ pub async fn clear_best_result_command(app: tauri::AppHandle) -> Result<(), Stri
 pub fn import_dxf(path: &str, curve_tolerance: f64) -> Result<Vec<PolygonDto>, String> {
     let drawing = Drawing::load_file(path).map_err(|e| format!("couldn't parse {path} as DXF: {e}"))?;
 
-    let flat = geometry::dxf_import::entities_to_polygons(drawing.entities(), curve_tolerance);
-    let texts = geometry::dxf_import::entities_to_texts(drawing.entities());
+    // `expand_inserts` first: a block reference carries only a block *name*,
+    // and block bodies aren't in `drawing.entities()` at all, so anything
+    // drawn inside a block is invisible to every pass below until it's been
+    // expanded into real model-space geometry. A drawing with no blocks comes
+    // back from this unchanged.
+    let entities = geometry::dxf_import::expand_inserts(&drawing, curve_tolerance);
+    // `_chained`, not `entities_to_polygons`: a profile drawn as loose
+    // LINE/ARC segments (or several open polylines meeting end to end) is only
+    // a closed shape once those pieces are walked in order - see that
+    // function's doc comment.
+    let flat = geometry::dxf_import::entities_to_polygons_chained(entities.iter(), curve_tolerance);
+    let texts = geometry::dxf_import::entities_to_texts(entities.iter());
     let mut tree = geometry::dxf_import::build_polygon_tree(flat);
     geometry::dxf_import::attach_texts(&mut tree, texts);
 
@@ -2141,6 +2151,12 @@ mod tests {
     /// flat, pre-tree entity list directly instead - this test cares about
     /// placement quality, not import behavior.
     #[test]
+    // ponytail: `supernesting 20part 500x500.dxf` was never committed to this
+    // repo (only 17MM/FLAT*/hat-monotile* ever were) and isn't recoverable from
+    // git history, so this test cannot run on a clean checkout. Left in place,
+    // ignored, rather than deleted - drop the file into `tests/fixtures/` and
+    // remove the attribute to get it back.
+    #[ignore = "needs tests/fixtures/supernesting 20part 500x500.dxf, which is not in the repo"]
     fn run_nest_anchors_a_low_density_job_near_the_sheet_origin() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/supernesting 20part 500x500.dxf");
         let drawing = dxf::Drawing::load_file(path).expect("fixture should parse");
@@ -2211,7 +2227,7 @@ mod tests {
     /// shapes into a grid well clear of the sheet instead, so BROWSE...
     /// produces a normal "assign SHEET/PART roles yourself" import.
     #[test]
-    #[ignore]
+    #[ignore = "needs tests/fixtures/supernesting 20part 500x500.dxf, which is not in the repo"]
     fn generate_importable_supernesting_fixture() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/supernesting 20part 500x500.dxf");
         let drawing = dxf::Drawing::load_file(path).expect("fixture should parse");
@@ -2294,6 +2310,12 @@ mod tests {
     /// sheet." See `generate_importable_supernesting_fixture` above for a
     /// version of this same geometry that imports as 21 separate shapes.
     #[test]
+    // ponytail: `supernesting 20part 500x500.dxf` was never committed to this
+    // repo (only 17MM/FLAT*/hat-monotile* ever were) and isn't recoverable from
+    // git history, so this test cannot run on a clean checkout. Left in place,
+    // ignored, rather than deleted - drop the file into `tests/fixtures/` and
+    // remove the attribute to get it back.
+    #[ignore = "needs tests/fixtures/supernesting 20part 500x500.dxf, which is not in the repo"]
     fn import_dxf_treats_parts_drawn_inside_the_sheet_outline_as_its_holes() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/supernesting 20part 500x500.dxf");
         let polygons = import_dxf(path, 0.3).expect("fixture should parse");
