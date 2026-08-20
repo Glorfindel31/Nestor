@@ -38,6 +38,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
         });
+        shell::heading_rule(app, ui);
         ui.label(RichText::new(app.t("roles_hint")).color(theme::DIM).small());
 
         if app.shapes_collapsed {
@@ -57,7 +58,7 @@ fn table(app: &mut App, ui: &mut egui::Ui) {
     let sheet_area = app.largest_sheet_area();
     let threshold = app.cfg.dominant_threshold;
 
-    egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
+    egui::ScrollArea::vertical().max_height(560.0).auto_shrink([false, true]).show(ui, |ui| {
         egui::Grid::new("shapes").striped(true).num_columns(10).spacing([8.0, 4.0]).show(ui, |ui| {
             let mut select_all = app.select_all;
             if ui.checkbox(&mut select_all, "").on_hover_text(super::i18n::t(lang, "select_all_tooltip")).changed() {
@@ -80,7 +81,7 @@ fn table(app: &mut App, ui: &mut egui::Ui) {
                 ui.label(format!("{}-{}", row.file, index + 1));
                 let b = bounds_of(&row.poly.points);
                 ui.label(RichText::new(format!("{:.1} x {:.1}", b.w(), b.h())).color(theme::DIM));
-                canvas::thumbnail(ui, &row.poly, 44.0, None);
+                canvas::thumbnail(ui, &row.poly, 88.0, None);
 
                 ui.add_enabled_ui(!locked, |ui| {
                     shell::choice(ui, &format!("role{}", row.ui_id), &mut row.role, &Role::ALL, |r| super::i18n::t(lang, r.key()).to_string());

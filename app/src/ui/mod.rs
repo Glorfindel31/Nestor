@@ -18,6 +18,7 @@ mod config;
 mod console;
 mod i18n;
 mod import;
+mod keys;
 mod prefs;
 mod result;
 mod shapes;
@@ -32,14 +33,25 @@ use crate::worker::{ExportFormat, Msg, Worker};
 use i18n::{t, tv};
 use state::{ConfigForm, ShapeRow, Status};
 
-const PREFS_KEY: &str = "rustynesting-prefs";
+/// Bumped from `rustynesting-prefs` when the palette was replaced: the old
+/// key holds a rust/oxide `accent` hex that would silently override the new
+/// default and leave everyone on the previous theme. Language and
+/// help-dismissed reset with it, which is the cheap half of that trade.
+const PREFS_KEY: &str = "rustynesting-prefs-v2";
 
 /// A nest result as the RESULT panel displays it. Either the winner of a run,
 /// one of the earlier attempts from its history, or a recovered best result
 /// from a previous session.
+///
+/// `Clone` for the undo stack - see `App::push_undo`.
+#[derive(Clone)]
 pub struct Snapshot {
     pub placements: Vec<SheetPlacementDto>,
     pub fitness: f64,
+    /// Already a percentage (0-100), not a fraction - `nesting`'s
+    /// `recompute_totals`/`place_parts` both multiply by 100 before it ever
+    /// reaches here, and `best_result.json` stores it that way. Display it
+    /// verbatim; multiplying again is what once printed "9025.8% utilisation".
     pub utilisation: f64,
     pub unplaced_count: usize,
     pub unplaced_ids: Vec<usize>,
@@ -93,6 +105,18 @@ pub struct App {
     // ---- 03 CONFIGURE ----
     cfg: ConfigForm,
     settings_open: bool,
+    /// Whether the left-hand log panel is open.
+    console_open: bool,
+    /// Result states to restore with Ctrl+Z, oldest first.
+    ///
+    /// A dragged piece and a repacked sheet both edit the current result in
+    /// place, and a mis-aimed drag is otherwise unrecoverable without
+    /// re-running the whole nest. Whole-`Snapshot` clones rather than a
+    /// per-edit diff: a snapshot is placements plus four scalars, the edits
+    /// are user-speed rather than per-frame, and an inverse operation per
+    /// edit type is a lot of machinery to get subtly wrong for something
+    /// this small.
+    undo_stack: Vec<Snapshot>,
     advanced_open: bool,
 
     // ---- run ----
@@ -142,8 +166,11 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let prefs: prefs::Prefs = cc.storage.and_then(|s| eframe::get_value(s, PREFS_KEY)).unwrap_or_default();
-        theme::apply(&cc.egui_ctx, prefs.accent_color());
-        cc.egui_ctx.set_zoom_factor(prefs.scale.factor());
+        theme::apply(&cc.egui_ctx, prefs.accent_color(), prefs.scale.factor());
+        // Explicitly 1.0, not merely left alone: egui persists the zoom
+        // factor in its own memory, so a version that once set it would
+        // otherwise keep scaling strokes here forever.
+        cc.egui_ctx.set_zoom_factor(1.0);
 
         let worker = Worker::new(cc.egui_ctx.clone());
         worker.load_saved();
@@ -169,6 +196,8 @@ impl App {
             confirm_remove: false,
             cfg: Default::default(),
             settings_open: false,
+            console_open: false,
+            undo_stack: Vec::new(),
             advanced_open: false,
             running: false,
             progress: 0.0,
@@ -254,7 +283,7 @@ impl App {
                 self.progress = generation as f32 / generations.max(1) as f32;
                 self.console.log(
                     console::Kind::Plain,
-                    format!("gen {generation}/{generations}: fitness {best_fitness:.1}, {sheets_used} sheet(s), {unplaced_count} unplaced, {:.1}% used", utilisation * 100.0),
+                    format!("gen {generation}/{generations}: fitness {best_fitness:.1}, {sheets_used} sheet(s), {unplaced_count} unplaced, {:.1}% used", utilisation),
                 );
             }
             Msg::Tick { generation, individuals_done, individuals_total } => {
@@ -265,7 +294,7 @@ impl App {
                 self.progress = ((generation.saturating_sub(1)) as f32 + within) / self.current_generations.max(1) as f32;
             }
             Msg::RunComplete(c) => {
-                self.console.log(console::Kind::Run, format!("run {}/{} done: {} sheet(s), {} unplaced, {:.1}% used{}", c.run, c.total_runs, c.sheets_used, c.unplaced_count, c.utilisation * 100.0, if c.improved { " (new best)" } else { "" }));
+                self.console.log(console::Kind::Run, format!("run {}/{} done: {} sheet(s), {} unplaced, {:.1}% used{}", c.run, c.total_runs, c.sheets_used, c.unplaced_count, c.utilisation, if c.improved { " (new best)" } else { "" }));
             }
             Msg::NestDone(result) => {
                 self.running = false;
@@ -281,7 +310,7 @@ impl App {
                                 response.fitness,
                                 response.placements.len(),
                                 response.unplaced_count,
-                                response.utilisation * 100.0
+                                response.utilisation
                             ),
                         );
                         self.adopt_response(response);
@@ -382,15 +411,44 @@ impl App {
             response.history
         };
         self.history_index = self.history.len() - 1;
+        // A fresh run replaces the result outright - undoing into edits made
+        // against the *previous* one would restore a nest that no longer
+        // matches the parts list.
+        self.undo_stack.clear();
         self.snapshot = Some(Snapshot::from_history(&self.history[self.history_index]));
     }
 
     fn apply_repack(&mut self, index: usize, response: crate::dto::RepackSheetResponse) -> bool {
+        self.push_undo();
         let Some(snap) = &mut self.snapshot else { return false };
         let Some(slot) = snap.placements.get_mut(index) else { return false };
         let improved = response.improved;
         *slot = response.placement;
         improved
+    }
+
+    /// Remembers the current result so the next edit to it can be undone.
+    /// Call immediately *before* mutating, not after.
+    fn push_undo(&mut self) {
+        let Some(snap) = &self.snapshot else { return };
+        // Bounded: a long editing session should not grow without limit, and
+        // nobody undoes further back than this by hand.
+        const MAX_UNDO: usize = 32;
+        if self.undo_stack.len() == MAX_UNDO {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push(snap.clone());
+    }
+
+    /// Restores the result as it was before the last drag or repack.
+    fn undo(&mut self) {
+        match self.undo_stack.pop() {
+            Some(previous) => {
+                self.snapshot = Some(previous);
+                self.run_status.ok(self.t("undo_done"));
+            }
+            None => self.run_status.ok(self.t("undo_nothing")),
+        }
     }
 
     fn build_request(&self) -> Result<RunNestRequest, String> {
@@ -502,9 +560,14 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump();
         import::handle_dropped_files(self, ctx);
+        keys::handle(self, ctx);
 
         shell::header(self, ctx);
         shell::bottom_bar(self, ctx);
+        // Side panels before the central one, as egui requires: they claim
+        // their width first and the central column gets what is left.
+        shell::config_panel(self, ctx);
+        console::panel(self, ctx);
         shell::run_float(self, ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -519,7 +582,6 @@ impl eframe::App for App {
             });
         });
 
-        console::window(self, ctx);
         shell::dialogs(self, ctx);
     }
 }

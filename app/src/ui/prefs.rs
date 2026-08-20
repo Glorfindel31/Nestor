@@ -42,9 +42,17 @@ impl Prefs {
 }
 
 /// Three steps, not a free slider - matching the small/normal/large labels
-/// the UI offers. The web version multiplied a root font-size; egui's zoom
-/// factor scales spacing and stroke widths along with the text, which is
-/// what the rem-based version was approximating.
+/// the UI offers. Multiplies the font size of every text style
+/// (`theme::apply`), which is what the web version's root font-size did.
+///
+/// Deliberately *not* `ctx.set_zoom_factor`: that scales stroke widths and
+/// spacing along with the text, so the 2px chiselled bevel this look is
+/// built on thickens and the design reads as a different design rather
+/// than the same one larger.
+///
+/// The original 0.875/1.0/1.15 ladder was calibrated on a laptop panel and
+/// is unreadable on a large high-resolution monitor; `Small` is now what
+/// `Normal` used to be, so the old size is still one click away.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scale {
     Small,
@@ -57,9 +65,9 @@ impl Scale {
 
     pub fn factor(self) -> f32 {
         match self {
-            Scale::Small => 0.875,
-            Scale::Normal => 1.0,
-            Scale::Large => 1.15,
+            Scale::Small => 1.0,
+            Scale::Normal => 1.25,
+            Scale::Large => 1.5,
         }
     }
 

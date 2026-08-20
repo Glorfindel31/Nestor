@@ -33,7 +33,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     }
     shell::panel_frame(ui, |ui| {
         shell::heading(app, ui, "04", "heading_result_text");
-        ui.add_space(6.0);
+        shell::heading_rule(app, ui);
         history_selector(app, ui);
         stats(app, ui);
         unplaced(app, ui);
@@ -89,12 +89,12 @@ fn stats(app: &App, ui: &mut egui::Ui) {
         let mut stat = |key: &str, value: String| {
             ui.vertical(|ui| {
                 ui.label(RichText::new(app.t(key)).color(theme::DIM).small());
-                ui.label(RichText::new(value).strong());
+                ui.label(RichText::new(value).strong().family(theme::heavy()));
             });
             ui.add_space(20.0);
         };
         stat("stat_fitness", format!("{:.1}", snap.fitness));
-        stat("stat_utilisation", format!("{:.1}%", snap.utilisation * 100.0));
+        stat("stat_utilisation", format!("{:.1}%", snap.utilisation));
         stat("stat_unplaced", snap.unplaced_count.to_string());
         stat("stat_sheets_used", snap.placements.len().to_string());
     });
@@ -107,15 +107,15 @@ fn unplaced(app: &App, ui: &mut egui::Ui) {
     }
     ui.add_space(6.0);
     ui.label(RichText::new(app.t("unplaced_hint")).color(theme::ERROR));
-    egui::ScrollArea::horizontal().id_salt("unplaced").max_height(110.0).show(ui, |ui| {
+    egui::ScrollArea::horizontal().id_salt("unplaced").max_height(190.0).show(ui, |ui| {
         ui.horizontal(|ui| {
             for id in &snap.unplaced_ids {
                 let Some(poly) = app.parts_by_id.get(id) else { continue };
                 let too_large = !fits_any_sheet(poly, &app.result_sheets);
                 let (label, detail) = if too_large { ("unplaced_label_too_large", "unplaced_detail_too_large") } else { ("unplaced_label_no_room", "unplaced_detail_no_room") };
-                ui.allocate_ui(egui::vec2(96.0, 74.0), |ui| {
+                ui.allocate_ui(egui::vec2(136.0, 124.0), |ui| {
                     ui.vertical(|ui| {
-                        canvas::thumbnail(ui, poly, 40.0, Some(canvas::UNPLACED));
+                        canvas::thumbnail(ui, poly, 80.0, Some(canvas::UNPLACED));
                         ui.label(RichText::new(format!("#{id}")).color(theme::DIM).small());
                         ui.label(RichText::new(app.t(label)).color(theme::ERROR).small());
                     });
@@ -163,7 +163,7 @@ fn sheet_card(app: &mut App, ui: &mut egui::Ui, index: usize) {
     // the bands are untuned - they exist to make a bad sheet obvious at a
     // glance, not to be a number anyone quotes.
     let band = if util >= 75.0 {
-        Color32::from_rgb(0x4f, 0xd1, 0x5c)
+        theme::OK
     } else if util >= 45.0 {
         app.prefs.accent_color()
     } else {
@@ -214,8 +214,7 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
     let view = canvas::View::fit(sheet_bounds, rect);
 
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, Color32::from_rgb(0x0d, 0x0d, 0x0d));
-    theme::bevel(&painter, rect, false);
+    painter.rect_filled(rect, 0.0, theme::WELL);
     painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0_f32, band), egui::StrokeKind::Inside);
 
     let editable = app.result_config.is_some() && !app.controls_locked();
@@ -240,7 +239,7 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
         let mut color = None;
         if let Some(d) = &app.drag {
             if d.sheet == index && d.part_id == part.id {
-                color = Some(if d.clear { Color32::from_rgb(0x4f, 0xd1, 0x5c) } else { theme::ERROR });
+                color = Some(if d.clear { theme::OK } else { theme::ERROR });
             }
         }
 
@@ -417,6 +416,7 @@ impl App {
         match result {
             Ok(response) if response.valid => {
                 let id = drag.part_id;
+                self.push_undo();
                 if let Some(snap) = &mut self.snapshot {
                     if let Some(p) = snap.placements.get_mut(drag.sheet).and_then(|pl| pl.parts.iter_mut().find(|p| p.id == id)) {
                         p.x += drag.dx;
@@ -485,7 +485,7 @@ fn export_controls(app: &mut App, ui: &mut egui::Ui) {
         let (unplaced_label, unplaced_tip) = (app.t("export_unplaced_label"), app.t("export_unplaced_tooltip"));
         ui.checkbox(&mut app.export_outline, outline_label).on_hover_text(outline_tip);
         ui.checkbox(&mut app.export_unplaced, unplaced_label).on_hover_text(unplaced_tip);
-        if ui.add_enabled(!app.controls_locked(), egui::Button::new(shell::accent(app, app.t("btn_export")).strong())).clicked() {
+        if ui.add_enabled(!app.controls_locked(), egui::Button::new(shell::accent(app, app.t("btn_export")).strong().family(theme::heavy()))).clicked() {
             do_export(app);
         }
     });

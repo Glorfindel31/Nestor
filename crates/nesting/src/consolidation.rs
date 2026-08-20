@@ -213,7 +213,7 @@ pub fn refine_consolidation(
                     };
 
                     let Some(sheet_nfp) =
-                        cached_inner_nfp(cache, target_sheet, &sheet_source(target_sheet_index), part_geom, source_id_of(candidate.id), candidate.rotation, config.curve_tolerance)
+                        cached_inner_nfp(cache, target_sheet, sheet_source(target_sheet_index), part_geom, source_id_of(candidate.id), candidate.rotation, config.curve_tolerance)
                     else {
                         continue;
                     };

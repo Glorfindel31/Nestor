@@ -40,7 +40,6 @@ pub struct Console {
     /// individual placed, so a synchronous append here would put a file
     /// write in the middle of the frame loop hundreds of times a run.
     to_disk: mpsc::Sender<String>,
-    pub minimised: bool,
 }
 
 impl Default for Console {
@@ -56,7 +55,7 @@ impl Default for Console {
                 let _ = crate::commands::append_log(&line);
             }
         });
-        Self { lines: VecDeque::new(), to_disk, minimised: false }
+        Self { lines: VecDeque::new(), to_disk }
     }
 }
 
@@ -123,38 +122,46 @@ mod tests {
 /// The floating log window. Draggable, minimisable, and deliberately not
 /// closable - losing the only narration channel to a stray click is worse
 /// than the screen space it costs.
-pub fn window(app: &mut super::App, ctx: &egui::Context) {
+/// The log, as a collapsible left-hand side panel - the mirror of
+/// `shell::config_panel` on the right, and built the same way: a heading
+/// with the accent rule under it, a close button, and the header carrying
+/// the toggle that brings it back.
+///
+/// It used to be a floating `egui::Window`, which meant it covered whatever
+/// it was reporting on (including, once CONFIGURATION moved to the right,
+/// the settings themselves) and remembered a bad position across sessions.
+/// A panel narrows the central column instead of overlapping it, so the
+/// result stays readable with the log open.
+pub fn panel(app: &mut super::App, ctx: &egui::Context) {
+    if !app.console_open {
+        return;
+    }
     let accent = app.prefs.accent_color();
-    let title = app.t("console_title");
-    let mut minimised = app.console.minimised;
-    egui::Window::new(title)
-        .default_pos([ctx.screen_rect().right() - 400.0, 90.0])
-        .default_size([360.0, 240.0])
-        .resizable(!minimised)
-        .collapsible(false)
+    egui::SidePanel::left("console")
+        .frame(egui::Frame::new().fill(super::theme::PANEL).inner_margin(8.0))
+        .default_width(380.0)
+        .width_range(280.0..=680.0)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(app.t("console_title")).strong().family(super::theme::heavy()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(if minimised { "[]" } else { "_" }).on_hover_text("minimise").clicked() {
-                        minimised = !minimised;
+                    if ui.button("<<").on_hover_text(app.t("console_title")).clicked() {
+                        app.console_open = false;
                     }
                 });
             });
-            if minimised {
-                return;
-            }
-            ui.separator();
+            super::shell::heading_rule(app, ui);
             egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                 for line in app.console.iter() {
                     let color = match line.kind {
                         Kind::Plain => super::theme::TEXT,
                         Kind::Run => accent,
-                        Kind::Best => egui::Color32::from_rgb(0x4f, 0xd1, 0x5c),
+                        Kind::Best => super::theme::OK,
                         Kind::Error => super::theme::ERROR,
                     };
                     ui.label(egui::RichText::new(format!("[{}] {}", line.stamp, line.text)).color(color).small().monospace());
                 }
             });
         });
-    app.console.minimised = minimised;
 }
+

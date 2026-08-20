@@ -26,21 +26,63 @@ pub fn normalize_rotation(rotation: f64) -> i64 {
     ((n % 360) + 360) % 360
 }
 
-/// Port of `NfpCache.makeKey` / `nfpCacheKey`: the single NFP cache-key
-/// format both call sites now share. `a`/`b` are the part/sheet source
-/// identifiers (`A.source`/`B.source` in the original); `a_flipped`/
-/// `b_flipped` default to `false` in every call site found in the Electron
-/// repo (the fields exist in the key format but nothing ever actually sets
-/// them true - no mirrored-part feature exists yet) but are kept as real
-/// parameters rather than dropped, since they're part of the on-the-wire key
-/// format this must stay compatible with.
+/// Which namespace a cache-key source id belongs to. The original encoded
+/// this as a string prefix (`"p{id}"` / `"s{index}"`); here it is the high
+/// bit of an integer, so a key can be compared and hashed without ever
+/// touching the heap.
+const SHEET_TAG: u64 = 1 << 63;
+
+/// A part's shape identity or a sheet's index, in one integer.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SourceId(u64);
+
+impl SourceId {
+    #[must_use]
+    pub fn part(source_id: usize) -> Self {
+        Self(source_id as u64 & !SHEET_TAG)
+    }
+
+    #[must_use]
+    pub fn sheet(index: usize) -> Self {
+        Self((index as u64 & !SHEET_TAG) | SHEET_TAG)
+    }
+}
+
+/// Port of `NfpCache.makeKey` / `nfpCacheKey`: the single NFP cache-key both
+/// call sites share. `a`/`b` are the part/sheet source identifiers
+/// (`A.source`/`B.source` in the original); `a_flipped`/`b_flipped` default
+/// to `false` in every call site found in the Electron repo (the fields
+/// exist in the key format but nothing ever actually sets them true - no
+/// mirrored-part feature exists yet) but are kept as real parameters rather
+/// than dropped, since they are part of the key's identity.
+///
+/// **A `Copy` struct, not the original's `format!`ed `String`.** The string
+/// form was faithful to the original and cost three heap allocations per
+/// lookup (`part_source`'s two, plus the key itself) - on the hat benchmark
+/// that is ~11 million allocations to look up six distinct values, since
+/// every lookup is a cache hit. Rotations are stored normalized, so
+/// geometrically identical angles still collide into one entry exactly as
+/// the string form did; `i16` because `normalize_rotation` returns `[0, 360)`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct NfpKey {
+    a: SourceId,
+    b: SourceId,
+    a_rotation: i16,
+    b_rotation: i16,
+    a_flipped: bool,
+    b_flipped: bool,
+}
+
 #[must_use]
-pub fn nfp_cache_key(a: &str, b: &str, a_rotation: f64, b_rotation: f64, a_flipped: bool, b_flipped: bool) -> String {
-    let a_rotation = normalize_rotation(a_rotation);
-    let b_rotation = normalize_rotation(b_rotation);
-    let a_flipped = if a_flipped { "1" } else { "0" };
-    let b_flipped = if b_flipped { "1" } else { "0" };
-    format!("{a}-{b}-{a_rotation}-{b_rotation}-{a_flipped}-{b_flipped}")
+pub fn nfp_cache_key(a: SourceId, b: SourceId, a_rotation: f64, b_rotation: f64, a_flipped: bool, b_flipped: bool) -> NfpKey {
+    NfpKey {
+        a,
+        b,
+        a_rotation: normalize_rotation(a_rotation) as i16,
+        b_rotation: normalize_rotation(b_rotation) as i16,
+        a_flipped,
+        b_flipped,
+    }
 }
 
 #[cfg(test)]
@@ -73,22 +115,24 @@ mod tests {
     }
 
     #[test]
-    fn key_format_matches_the_original_five_dash_layout() {
-        let key = nfp_cache_key("partA", "partB", 90.0, 180.0, false, false);
-        assert_eq!(key, "partA-partB-90-180-0-0");
+    fn key_identity_survives_the_move_off_strings() {
+        let key = nfp_cache_key(SourceId::part(1), SourceId::part(2), 90.0, 180.0, false, false);
+        assert_eq!(key, nfp_cache_key(SourceId::part(1), SourceId::part(2), 90.0, 180.0, false, false));
+        // a part and a sheet with the same numeric id are different keys
+        assert_ne!(nfp_cache_key(SourceId::part(1), SourceId::part(2), 0.0, 0.0, false, false), nfp_cache_key(SourceId::sheet(1), SourceId::part(2), 0.0, 0.0, false, false));
     }
 
     #[test]
     fn geometrically_identical_angles_share_a_key() {
-        let k1 = nfp_cache_key("A", "B", 360.0, 0.0, false, false);
-        let k2 = nfp_cache_key("A", "B", 0.0, 0.0, false, false);
+        let k1 = nfp_cache_key(SourceId::part(0), SourceId::part(1), 360.0, 0.0, false, false);
+        let k2 = nfp_cache_key(SourceId::part(0), SourceId::part(1), 0.0, 0.0, false, false);
         assert_eq!(k1, k2);
     }
 
     #[test]
     fn flipped_flags_change_the_key() {
-        let k1 = nfp_cache_key("A", "B", 0.0, 0.0, false, false);
-        let k2 = nfp_cache_key("A", "B", 0.0, 0.0, true, false);
+        let k1 = nfp_cache_key(SourceId::part(0), SourceId::part(1), 0.0, 0.0, false, false);
+        let k2 = nfp_cache_key(SourceId::part(0), SourceId::part(1), 0.0, 0.0, true, false);
         assert_ne!(k1, k2);
     }
 }

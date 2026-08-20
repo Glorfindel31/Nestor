@@ -46,7 +46,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.checkbox(&mut app.cfg.mirror, t("mirror_label")).on_hover_text(t("mirror_tooltip"));
             if app.cfg.mirror {
-                ui.label(RichText::new(t("mirror_on_badge")).color(theme::ERROR).strong());
+                ui.label(RichText::new(t("mirror_on_badge")).color(theme::ERROR).strong().family(theme::heavy()));
             }
         });
         if app.cfg.mirror {

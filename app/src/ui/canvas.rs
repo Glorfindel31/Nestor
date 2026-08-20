@@ -95,7 +95,11 @@ pub fn color_for_layer(layer: &str) -> Color32 {
     for b in layer.bytes() {
         hash = hash.wrapping_mul(31).wrapping_add(b as u32);
     }
-    let hsva = egui::ecolor::Hsva::new((hash % 360) as f32 / 360.0, 0.85, 0.85, 1.0);
+    // Full value and slightly off-full saturation: these sit on `WELL`,
+    // the darkest surface in the palette, so they can afford to be the only
+    // saturated colour on screen. The chrome around them is zero-chroma by
+    // design and does not compete.
+    let hsva = egui::ecolor::Hsva::new((hash % 360) as f32 / 360.0, 0.78, 1.0, 1.0);
     hsva.into()
 }
 
@@ -126,7 +130,7 @@ pub fn thumbnail(ui: &mut egui::Ui, shape: &PolygonDto, size: f32, override_colo
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     if ui.is_rect_visible(rect) {
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, theme::BEVEL_LO);
+        painter.rect_filled(rect, 0.0, theme::WELL);
         let b = bounds_of(&shape.points);
         let pad = (b.w().max(b.h()).max(1.0) * 0.08) as f32;
         let view = View::fit(b, rect.shrink(pad.min(size / 4.0)));

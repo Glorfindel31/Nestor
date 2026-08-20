@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use geometry::point::Point;
 
-use crate::cache_key::nfp_cache_key;
+use crate::cache_key::{nfp_cache_key, NfpKey, SourceId};
 
 /// Matches `nfpDb.ts`'s `MAX_CACHE_ENTRIES`: above this many entries, stop
 /// caching new NFPs (existing entries are kept, just no more added). Bounded
@@ -85,7 +85,9 @@ pub enum CachedNfp {
 /// share one result.
 #[derive(Default, Debug)]
 pub struct NfpCache {
-    db: Mutex<HashMap<String, Arc<OnceLock<Option<CachedNfp>>>>>,
+    db: Mutex<HashMap<NfpKey, Arc<OnceLock<Option<Arc<CachedNfp>>>>>>,
+    /// Total `get_or_compute` calls, hits included - see `lookups`.
+    lookups: std::sync::atomic::AtomicUsize,
 }
 
 impl NfpCache {
@@ -101,16 +103,19 @@ impl NfpCache {
     /// internally-consistent map, since a `HashMap` can't be left in a
     /// half-mutated state by a panic between operations) is a far smaller
     /// problem than that.
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<OnceLock<Option<CachedNfp>>>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<NfpKey, Arc<OnceLock<Option<Arc<CachedNfp>>>>>> {
         self.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Returns the cached value for this key, computing it via `compute` on
     /// a genuine miss - see the struct doc comment for why concurrent
     /// callers requesting the same key can't stampede each other here.
-    /// Returns an owned, independent copy either way (not a shared
-    /// reference) - see the module doc comment for why that matters once
-    /// `Point.marked` mutation is back in the picture.
+    /// Returns a shared `Arc`, not an owned copy. The original had to deep-
+    /// copy on every read because its NFP tracing mutated `Point.marked` in
+    /// place on whatever array it was handed; nothing in this port mutates a
+    /// cached NFP, and cloning one per lookup meant copying an entire polygon
+    /// 3.7 million times on the hat benchmark to serve six distinct values.
+    /// A caller that genuinely needs to mutate one clones it itself.
     ///
     /// Past `MAX_CACHE_ENTRIES`, a genuinely new key is computed directly,
     /// uncached and uncoalesced, rather than growing the map further -
@@ -121,14 +126,15 @@ impl NfpCache {
     #[allow(clippy::too_many_arguments)]
     pub fn get_or_compute(
         &self,
-        a: &str,
-        b: &str,
+        a: SourceId,
+        b: SourceId,
         a_rotation: f64,
         b_rotation: f64,
         a_flipped: bool,
         b_flipped: bool,
         compute: impl FnOnce() -> Option<CachedNfp>,
-    ) -> Option<CachedNfp> {
+    ) -> Option<Arc<CachedNfp>> {
+        self.lookups.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let key = nfp_cache_key(a, b, a_rotation, b_rotation, a_flipped, b_flipped);
         let slot = {
             let mut db = self.lock();
@@ -136,14 +142,25 @@ impl NfpCache {
                 Arc::clone(existing)
             } else if db.len() >= MAX_CACHE_ENTRIES {
                 drop(db);
-                return compute();
+                return compute().map(Arc::new);
             } else {
                 let slot = Arc::new(OnceLock::new());
                 db.insert(key, Arc::clone(&slot));
                 slot
             }
         };
-        slot.get_or_init(compute).clone()
+        slot.get_or_init(|| compute().map(Arc::new)).clone()
+    }
+
+    /// How many times `get_or_compute` has been called - hits included, not
+    /// just the misses `stats` counts. The gap between the two is the point:
+    /// on the hat benchmark six cached NFPs serve millions of lookups, so
+    /// what the per-lookup path costs (a `format!`ed `String` key, a global
+    /// `Mutex`, a full clone of the cached polygon) dominates what computing
+    /// an NFP costs. Sizing that needs the real number, not a guess.
+    #[must_use]
+    pub fn lookups(&self) -> usize {
+        self.lookups.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[must_use]
@@ -173,16 +190,16 @@ mod tests {
     #[test]
     fn a_miss_computes_and_caches_the_result() {
         let cache = NfpCache::new();
-        let found = cache.get_or_compute("A", "B", 0.0, 0.0, false, false, || Some(sample_outer())).expect("should be cached");
-        match found {
+        let found = cache.get_or_compute(SourceId::part(1), SourceId::part(2), 0.0, 0.0, false, false, || Some(sample_outer())).expect("should be cached");
+        match &*found {
             CachedNfp::Outer { outer, .. } => assert_eq!(outer.len(), 3),
             CachedNfp::Inner(_) => panic!("wrong variant"),
         }
         assert_eq!(cache.stats(), 1);
 
         // a second call for the same key must not call `compute` again
-        let found_again = cache.get_or_compute("A", "B", 0.0, 0.0, false, false, panics_if_called).expect("should still be cached");
-        match found_again {
+        let found_again = cache.get_or_compute(SourceId::part(1), SourceId::part(2), 0.0, 0.0, false, false, panics_if_called).expect("should still be cached");
+        match &*found_again {
             CachedNfp::Outer { outer, .. } => assert_eq!(outer.len(), 3),
             CachedNfp::Inner(_) => panic!("wrong variant"),
         }
@@ -191,9 +208,9 @@ mod tests {
     #[test]
     fn geometrically_identical_rotations_share_a_cache_entry() {
         let cache = NfpCache::new();
-        let _ = cache.get_or_compute("A", "B", 360.0, 0.0, false, false, || Some(sample_outer()));
+        let _ = cache.get_or_compute(SourceId::part(1), SourceId::part(2), 360.0, 0.0, false, false, || Some(sample_outer()));
         // 0.0 normalizes to the same key as 360.0 - must hit, not recompute.
-        assert!(cache.get_or_compute("A", "B", 0.0, 0.0, false, false, panics_if_called).is_some());
+        assert!(cache.get_or_compute(SourceId::part(1), SourceId::part(2), 0.0, 0.0, false, false, panics_if_called).is_some());
     }
 
     #[test]
@@ -204,20 +221,21 @@ mod tests {
             calls.fetch_add(1, Ordering::Relaxed);
             None
         };
-        assert!(cache.get_or_compute("A", "B", 0.0, 0.0, false, false, compute).is_none());
-        assert!(cache.get_or_compute("A", "B", 0.0, 0.0, false, false, compute).is_none());
+        assert!(cache.get_or_compute(SourceId::part(1), SourceId::part(2), 0.0, 0.0, false, false, compute).is_none());
+        assert!(cache.get_or_compute(SourceId::part(1), SourceId::part(2), 0.0, 0.0, false, false, compute).is_none());
         assert_eq!(calls.load(Ordering::Relaxed), 1, "a failed computation should still be cached, not retried every call");
     }
 
     #[test]
     fn returned_copies_are_independent_of_the_cached_entry() {
         let cache = NfpCache::new();
-        let mut first = cache.get_or_compute("A", "B", 0.0, 0.0, false, false, || Some(sample_outer())).unwrap();
+        let mut first = (*cache.get_or_compute(SourceId::part(1), SourceId::part(2), 0.0, 0.0, false, false, || Some(sample_outer())).unwrap()).clone();
         if let CachedNfp::Outer { outer, .. } = &mut first {
             outer[0].marked = true;
         }
 
-        let second = cache.get_or_compute("A", "B", 0.0, 0.0, false, false, panics_if_called).unwrap();
+        let second = cache.get_or_compute(SourceId::part(1), SourceId::part(2), 0.0, 0.0, false, false, panics_if_called).unwrap();
+        let second = &*second;
         if let CachedNfp::Outer { outer, .. } = second {
             assert!(!outer[0].marked, "mutating one returned copy must not affect another");
         } else {
@@ -229,7 +247,7 @@ mod tests {
     fn stops_caching_new_keys_past_the_entry_cap_but_keeps_existing_ones() {
         let cache = NfpCache::new();
         for i in 0..MAX_CACHE_ENTRIES {
-            let _ = cache.get_or_compute(&i.to_string(), "B", 0.0, 0.0, false, false, || Some(sample_outer()));
+            let _ = cache.get_or_compute(SourceId::part(i), SourceId::part(2), 0.0, 0.0, false, false, || Some(sample_outer()));
         }
         assert_eq!(cache.stats(), MAX_CACHE_ENTRIES);
 
@@ -238,13 +256,13 @@ mod tests {
             calls.fetch_add(1, Ordering::Relaxed);
             Some(sample_outer())
         };
-        let _ = cache.get_or_compute("overflow", "B", 0.0, 0.0, false, false, compute);
+        let _ = cache.get_or_compute(SourceId::part(999_999), SourceId::part(2), 0.0, 0.0, false, false, compute);
         assert_eq!(cache.stats(), MAX_CACHE_ENTRIES, "cap should block a brand-new key from being cached");
-        let _ = cache.get_or_compute("overflow", "B", 0.0, 0.0, false, false, compute);
+        let _ = cache.get_or_compute(SourceId::part(999_999), SourceId::part(2), 0.0, 0.0, false, false, compute);
         assert_eq!(calls.load(Ordering::Relaxed), 2, "a key that never got cached (past the cap) must recompute every call");
 
         // an existing key (cached before the cap was reached) still hits.
-        assert!(cache.get_or_compute("0", "B", 0.0, 0.0, false, false, panics_if_called).is_some());
+        assert!(cache.get_or_compute(SourceId::part(0), SourceId::part(2), 0.0, 0.0, false, false, panics_if_called).is_some());
     }
 
     /// The actual regression test for the cache-stampede bug: many threads
@@ -266,7 +284,7 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait(); // maximize actual overlap, not just "eventually all called"
-                    cache.get_or_compute("A", "B", 0.0, 0.0, false, false, || {
+                    cache.get_or_compute(SourceId::part(1), SourceId::part(2), 0.0, 0.0, false, false, || {
                         calls.fetch_add(1, Ordering::Relaxed);
                         // Hold the "computation" open briefly so the other
                         // threads' get_or_compute calls actually land while

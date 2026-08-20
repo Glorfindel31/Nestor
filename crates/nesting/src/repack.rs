@@ -193,7 +193,7 @@ fn repack_around_locked(
         let mut best: Option<(f64, PlacedPart)> = None;
         for (angle, _) in rotation_steps(placement_config, part.id, part.rotation) {
             let rotated = rotate_layered_polygon(base, angle);
-            let Some(sheet_nfp) = cached_inner_nfp(cache, sheet, &sheet_src, &rotated, source_id_of(part.id), angle, placement_config.curve_tolerance) else {
+            let Some(sheet_nfp) = cached_inner_nfp(cache, sheet, sheet_src, &rotated, source_id_of(part.id), angle, placement_config.curve_tolerance) else {
                 continue;
             };
             if sheet_nfp.is_empty() {
