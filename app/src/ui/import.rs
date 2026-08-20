@@ -11,14 +11,14 @@ const FILTER: [&str; 2] = ["dxf", "svg"];
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     shell::panel_frame(ui, |ui| {
         shell::heading(app, ui, "01", "heading_import_text");
-        shell::heading_rule(app, ui);
+        shell::heading_rule(ui);
 
         ui.horizontal(|ui| {
             ui.label(RichText::new(app.t("tolerance_label")).color(theme::DIM));
             ui.add(egui::DragValue::new(&mut app.cfg.curve_tolerance).speed(0.05).range(0.01..=10.0));
 
             let enabled = !app.importing && !app.controls_locked();
-            if ui.add_enabled(enabled, egui::Button::new(shell::accent(app, app.t("btn_browse")).strong().family(theme::heavy()))).clicked() {
+            if ui.add_enabled(enabled, egui::Button::new(shell::accent(app.t("btn_browse")).strong().family(theme::heavy()))).clicked() {
                 browse(app);
             }
             if app.importing {
@@ -36,14 +36,14 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
         let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 48.0), egui::Sense::hover());
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, if hovering { app.prefs.accent_color().gamma_multiply(0.25) } else { theme::WELL });
-        theme::hairline(&painter, rect, if hovering { app.prefs.accent_color() } else { theme::LINE }, if hovering { 2.0 } else { 1.0 });
+        painter.rect_filled(rect, 0.0, if hovering { theme::ACCENT.gamma_multiply(0.25) } else { theme::WELL });
+        theme::hairline(&painter, rect, if hovering { theme::ACCENT } else { theme::LINE }, if hovering { 2.0 } else { 1.0 });
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             app.t("dropzone_text"),
             egui::TextStyle::Body.resolve(ui.style()),
-            if hovering { app.prefs.accent_color() } else { theme::DIM },
+            if hovering { theme::ACCENT } else { theme::DIM },
         );
 
         ui.add_space(8.0);
@@ -144,7 +144,7 @@ pub fn svg_unit_dialog(app: &mut App, ctx: &egui::Context) {
         });
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            if ui.button(shell::accent(app, app.t("svg_unit_ok")).strong().family(theme::heavy())).clicked() {
+            if ui.button(shell::accent(app.t("svg_unit_ok")).strong().family(theme::heavy())).clicked() {
                 go = true;
             }
             if ui.button(app.t("svg_unit_cancel")).clicked() || ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {

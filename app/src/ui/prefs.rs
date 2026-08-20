@@ -1,5 +1,11 @@
-//! Display preferences: language, accent colour, text scale, and whether the
-//! help overlay has been dismissed.
+//! Display preferences: language, text scale, and whether the help overlay
+//! has been dismissed.
+//!
+//! The accent colour used to live here too, as a `#rrggbb` string with five
+//! quick-pick swatches and a free hex field behind it. It is now a constant
+//! (`theme::ACCENT`) - see that module's own doc comment for why the app
+//! having one colour of its own beat letting every install pick a different
+//! one.
 //!
 //! The web UI kept these in four separate `localStorage` keys
 //! (`rustynesting-lang` / `-accent` / `-scale` / `-help-dismissed`). Here
@@ -13,31 +19,17 @@
 //! parameter the user reasons about, not a display preference, and the
 //! best-result recovery file is separate again.
 
-use egui::Color32;
-
-use super::theme;
-
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Debug)]
 #[serde(default)]
 pub struct Prefs {
     pub lang: super::i18n::Lang,
-    /// Stored as `#rrggbb` rather than a `Color32` so a hand-edited prefs
-    /// file stays readable, and so the hex field in the settings menu has a
-    /// canonical form to round-trip through.
-    pub accent: String,
     pub scale: Scale,
     pub help_dismissed: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { lang: Default::default(), accent: to_hex(theme::ACCENT), scale: Scale::Normal, help_dismissed: false }
-    }
-}
-
-impl Prefs {
-    pub fn accent_color(&self) -> Color32 {
-        parse_hex(&self.accent).unwrap_or(theme::ACCENT)
+        Self { lang: Default::default(), scale: Scale::Normal, help_dismissed: false }
     }
 }
 
@@ -80,49 +72,18 @@ impl Scale {
     }
 }
 
-pub fn to_hex(c: Color32) -> String {
-    format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
-}
-
-/// Accepts `#rgb` and `#rrggbb`, matching the web UI's `HEX_RE` exactly -
-/// anything else returns `None` so a half-typed value in the hex field is
-/// ignored rather than snapping the accent to black on every keystroke.
-pub fn parse_hex(s: &str) -> Option<Color32> {
-    let h = s.strip_prefix('#')?;
-    let expand = |c: u8| c * 17; // #abc -> #aabbcc
-    match h.len() {
-        3 => {
-            let v: Vec<u8> = h.chars().map(|c| c.to_digit(16).map(|d| expand(d as u8))).collect::<Option<_>>()?;
-            Some(Color32::from_rgb(v[0], v[1], v[2]))
-        }
-        6 => {
-            let v: Vec<u8> = (0..3).map(|i| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).ok()).collect::<Option<_>>()?;
-            Some(Color32::from_rgb(v[0], v[1], v[2]))
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn hex_round_trips_and_rejects_partial_input() {
-        for c in theme::ACCENTS {
-            assert_eq!(parse_hex(&to_hex(c)), Some(c));
-        }
-        assert_eq!(parse_hex("#abc"), Some(Color32::from_rgb(0xaa, 0xbb, 0xcc)));
-        // Everything a user types on the way to a valid colour must be
-        // rejected, not partially applied.
-        for bad in ["", "#", "#a", "#ab", "#abcd", "#abcde", "#abcdefg", "abcdef", "#gggggg"] {
-            assert_eq!(parse_hex(bad), None, "{bad} should not parse");
-        }
-    }
-
-    #[test]
-    fn a_broken_stored_accent_falls_back_instead_of_going_black() {
-        let p = Prefs { accent: "not a colour".into(), ..Default::default() };
-        assert_eq!(p.accent_color(), theme::ACCENT);
+    fn a_prefs_file_from_before_the_fixed_accent_still_loads() {
+        // The stored blob still carries `accent` for anyone who ran an older
+        // build; `#[serde(default)]` plus an unknown field being ignored is
+        // what keeps that from resetting language and scale to defaults.
+        let json = r##"{"lang":"Vi","accent":"#e8db1f","scale":"Large","help_dismissed":true}"##;
+        let p: Prefs = serde_json::from_str(json).expect("old prefs should still parse");
+        assert_eq!(p.scale, Scale::Large);
+        assert!(p.help_dismissed);
     }
 }

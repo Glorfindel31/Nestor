@@ -10,32 +10,33 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: windows-latest
-          - platform: macos-latest
-          - platform: ubuntu-latest
+    # Windows only, deliberately: `app/src/paths.rs` resolves config, log and
+    # recovery files from %APPDATA%/%LOCALAPPDATA%, which don't exist
+    # elsewhere. A mac/linux job would compile and then produce a binary that
+    # can't load or save anything.
+    runs-on: windows-latest
 
-    runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Linux build deps
-        if: matrix.platform == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - uses: tauri-apps/tauri-action@v0
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Publish to the release
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'RustyNesting ${{ github.ref_name }}'
-          releaseDraft: true
-          prerelease: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          # Create the release only if this tag doesn't already have one - a
+          # release published by hand keeps its notes and stays published.
+          gh release view "$tag" >/dev/null 2>&1 ||
+            gh release create "$tag" --draft --title "RustyNesting $tag" --generate-notes
+          gh release upload "$tag" \
+            "target/release/rustynesting.exe#RustyNesting_${tag#v}_x64.exe" --clobber

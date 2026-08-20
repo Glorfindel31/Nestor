@@ -136,7 +136,7 @@ pub fn panel(app: &mut super::App, ctx: &egui::Context) {
     if !app.console_open {
         return;
     }
-    let accent = app.prefs.accent_color();
+    let accent = super::theme::ACCENT;
     egui::SidePanel::left("console")
         .frame(egui::Frame::new().fill(super::theme::PANEL).inner_margin(8.0))
         .default_width(380.0)
@@ -150,7 +150,7 @@ pub fn panel(app: &mut super::App, ctx: &egui::Context) {
                     }
                 });
             });
-            super::shell::heading_rule(app, ui);
+            super::shell::heading_rule(ui);
             egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                 for line in app.console.iter() {
                     let color = match line.kind {

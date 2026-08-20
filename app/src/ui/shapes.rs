@@ -38,7 +38,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
         });
-        shell::heading_rule(app, ui);
+        shell::heading_rule(ui);
         ui.label(RichText::new(app.t("roles_hint")).color(theme::DIM).small());
 
         if app.shapes_collapsed {
@@ -52,7 +52,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
 fn table(app: &mut App, ui: &mut egui::Ui) {
     let locked = app.controls_locked();
     let lang = app.prefs.lang;
-    let accent = app.prefs.accent_color();
+    let accent = theme::ACCENT;
     // Which parts count as "closes the sheet" - computed once for the whole
     // table rather than per row, since the reference sheet is job-wide.
     let sheet_area = app.largest_sheet_area();

@@ -1,76 +1,61 @@
 //! Palette and widget styling: brutalist, neo-futuristic, industrial.
 //!
-//! Raw-concrete greys from near-black up, one high-visibility hazard signal,
-//! and nothing else. Every surface is flat and every edge is a drawn
-//! hairline - no bevels, no simulated light source, no shadows, no corner
-//! radius, no animation. The previous look was Win95-revisited (a chiselled
-//! 2px bevel over a rust/oxide palette); the tell of this one is the hard
-//! 1px rule and a single signal colour used sparingly enough to still mean
-//! something.
+//! Five colours and nothing else: black, white, one blue-grey ground
+//! (`#131c24`), one accent (`#f4833f`), one danger (`#f94a21`). Every surface
+//! is flat and every edge is a drawn hairline - no bevels, no simulated light
+//! source, no shadows, no corner radius, no animation. The tell of this look
+//! is the hard 1px rule and a signal colour used sparingly enough to still
+//! mean something.
+//!
+//! The accent is fixed. It used to be user-chosen from five swatches plus a
+//! free hex field, which meant the app had no colour of its own - every
+//! screenshot was somebody else's palette. One accent, always this one, is
+//! the identity.
 
 use egui::Color32;
 
-/// The concrete ramp, darkest to lightest. Four steps is deliberate: window
-/// ground, panel, control face, hovered face. A fifth would only register as
-/// noise at these values.
-pub const BG: Color32 = Color32::from_rgb(0x0b, 0x0b, 0x0c);
-pub const PANEL: Color32 = Color32::from_rgb(0x14, 0x14, 0x16);
-pub const FACE: Color32 = Color32::from_rgb(0x1f, 0x1f, 0x22);
-pub const FACE_HI: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2f);
+/// The ground ramp, darkest to lightest, built from `PANEL` toward black
+/// below it and toward white above. Four steps is deliberate: window ground,
+/// panel, control face, hovered face. A fifth would only register as noise at
+/// these values.
+pub const BG: Color32 = Color32::from_rgb(0x0a, 0x0e, 0x13);
+pub const PANEL: Color32 = Color32::from_rgb(0x13, 0x1c, 0x24);
+pub const FACE: Color32 = Color32::from_rgb(0x1c, 0x28, 0x33);
+pub const FACE_HI: Color32 = Color32::from_rgb(0x26, 0x34, 0x3f);
 
 /// Below the ramp, not on it: the ground behind *drawn* content - text
-/// fields, the drop target, thumbnails, the sheet canvas. Darker than `BG`
-/// so a part outline reads at full contrast wherever it is drawn.
-pub const WELL: Color32 = Color32::from_rgb(0x06, 0x06, 0x07);
+/// fields, the drop target, thumbnails, the sheet canvas. Pure black, so a
+/// part outline reads at full contrast wherever it is drawn.
+pub const WELL: Color32 = Color32::from_rgb(0x00, 0x00, 0x00);
 
 /// Structure. `LINE` is the default hairline around every control and panel;
 /// `LINE_STRONG` is for edges that separate rather than merely contain
 /// (window edges, open dropdowns).
-pub const LINE: Color32 = Color32::from_rgb(0x33, 0x33, 0x3a);
-pub const LINE_STRONG: Color32 = Color32::from_rgb(0x4a, 0x4a, 0x54);
+pub const LINE: Color32 = Color32::from_rgb(0x33, 0x43, 0x4f);
+pub const LINE_STRONG: Color32 = Color32::from_rgb(0x4a, 0x5e, 0x6d);
 
-pub const TEXT: Color32 = Color32::from_rgb(0xe6, 0xe6, 0xe8);
-pub const DIM: Color32 = Color32::from_rgb(0x8a, 0x8a, 0x93);
+pub const TEXT: Color32 = Color32::from_rgb(0xff, 0xff, 0xff);
+pub const DIM: Color32 = Color32::from_rgb(0x8b, 0x98, 0xa3);
 
-/// Default accent - hazard yellow, the one high-visibility signal. Every
-/// "forward progress" control (Browse -> Run -> Export, and each step
-/// heading's number) is drawn in whatever accent is currently chosen;
-/// `ERROR` marks the destructive/halt ones (Stop, Remove Selected, unplaced
-/// parts) and `OK` the confirmations. A three-signal system over a
-/// zero-chroma ground.
-pub const ACCENT: Color32 = Color32::from_rgb(0xe8, 0xdb, 0x1f);
+/// The accent, and the only one there is. Every "forward progress" control
+/// (Browse -> Run -> Export, each step heading's number, the sigma in the
+/// wordmark) is drawn in it.
+pub const ACCENT: Color32 = Color32::from_rgb(0xf4, 0x83, 0x3f);
 
-/// Quick-pick swatches - shortcuts, not the only allowed values: the hex
-/// field accepts any valid colour. All five are industrial signal colours
-/// chosen to clear the concrete ground by a wide margin; none of them sit in
-/// the greyscale family the rest of the palette lives in, because an accent
-/// that blends is not a signal.
-pub const ACCENTS: [Color32; 5] = [
-    Color32::from_rgb(0xe8, 0xdb, 0x1f), // hazard yellow
-    Color32::from_rgb(0xff, 0x6a, 0x00), // safety orange
-    Color32::from_rgb(0xb6, 0xf0, 0x00), // acid
-    Color32::from_rgb(0x00, 0xe5, 0xff), // signal cyan
-    Color32::from_rgb(0xff, 0x2e, 0x5b), // alarm magenta
-];
-
-/// The halt/destructive signal - safety orange, not red.
+/// The halt/destructive signal - Stop, Remove Selected, unplaced parts.
 ///
-/// Red against the hazard-yellow accent reads as an alarm state for controls
-/// that are not alarming: STOP is an ordinary thing to press, and an unplaced
-/// part is information, not a fault. Orange still separates cleanly from the
-/// accent by hue (25 degrees against 57) while sitting in the same industrial
-/// signage family as the rest of the palette.
-///
-/// One thing to know: `ACCENTS` offers safety orange as an accent choice too,
-/// so picking that one collapses the accent and halt signals into the same
-/// colour. Every other swatch keeps them apart.
-pub const ERROR: Color32 = Color32::from_rgb(0xff, 0x6a, 0x00);
-/// Success/confirmation. Lives here rather than being written out at each
-/// site - it used to be the literal `#4fd15c` in three separate files, which
-/// is exactly how a palette drifts.
-pub const OK: Color32 = Color32::from_rgb(0xb6, 0xf0, 0x00);
+/// Deliberately close to `ACCENT` in hue: this palette has no red, and a
+/// borrowed one would be the sixth colour in a five-colour system. It
+/// separates on saturation and darkness rather than hue, which is enough at
+/// the sizes it is used - always on a short word, never on a large fill.
+pub const ERROR: Color32 = Color32::from_rgb(0xf9, 0x4a, 0x21);
 
-pub fn apply(ctx: &egui::Context, accent: Color32, text_scale: f32) {
+/// Success/confirmation. The accent, not a green: green is not in this
+/// palette, and white is already ordinary text, so a confirmation drawn in it
+/// would not read as a signal at all.
+pub const OK: Color32 = ACCENT;
+
+pub fn apply(ctx: &egui::Context, text_scale: f32) {
     let mut style = (*ctx.style()).clone();
     style.animation_time = 0.0;
 
@@ -85,9 +70,9 @@ pub fn apply(ctx: &egui::Context, accent: Color32, text_scale: f32) {
     // label against a light fill. Each state sets its own `fg_stroke`
     // instead, and explicit `RichText::color` calls still win over both.
     v.override_text_color = None;
-    v.hyperlink_color = accent;
+    v.hyperlink_color = ACCENT;
     v.error_fg_color = ERROR;
-    v.warn_fg_color = accent;
+    v.warn_fg_color = ACCENT;
     v.window_stroke = egui::Stroke::new(1.0_f32, LINE_STRONG);
     v.window_shadow = egui::epaint::Shadow::NONE;
     v.popup_shadow = egui::epaint::Shadow::NONE;
@@ -97,10 +82,10 @@ pub fn apply(ctx: &egui::Context, accent: Color32, text_scale: f32) {
     // windows with different border colours is a light source by another
     // name; every edge here is the same weight regardless of stacking.
     v.window_highlight_topmost = false;
-    // Selection: accent ground, window ground for the glyphs. Every accent
-    // in `ACCENTS` is a light colour, so light-on-light has to be broken
-    // here rather than hoped away.
-    v.selection.bg_fill = accent;
+    // Selection: accent ground, window ground for the glyphs. The accent is
+    // a light colour, so light-on-light has to be broken here rather than
+    // hoped away.
+    v.selection.bg_fill = ACCENT;
     v.selection.stroke = egui::Stroke::new(1.0_f32, BG);
 
     for w in [
@@ -130,20 +115,20 @@ pub fn apply(ctx: &egui::Context, accent: Color32, text_scale: f32) {
     // rather than washing it.
     v.widgets.hovered.bg_fill = FACE_HI;
     v.widgets.hovered.weak_bg_fill = FACE_HI;
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, accent);
+    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, ACCENT);
     v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, TEXT);
 
     // Pressed: the accent floods the fill and its own hairline, at a value
     // dark enough to keep `TEXT` on top of it.
     //
-    // `fg_stroke` here must stay `TEXT`, however tempting a black-on-yellow
+    // `fg_stroke` here must stay `TEXT`, however tempting a black-on-accent
     // inversion looks: egui derives `Visuals::strong_text_color()` from
     // `widgets.active`, so anything set here also repaints every `.strong()`
     // label in the app - the wordmark and all four step headings included.
     // That is not a press state, it is a global text colour wearing one.
-    v.widgets.active.bg_fill = accent.gamma_multiply(0.55);
-    v.widgets.active.weak_bg_fill = accent.gamma_multiply(0.55);
-    v.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, accent);
+    v.widgets.active.bg_fill = ACCENT.gamma_multiply(0.55);
+    v.widgets.active.weak_bg_fill = ACCENT.gamma_multiply(0.55);
+    v.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, ACCENT);
     v.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, TEXT);
 
     v.widgets.open.bg_fill = FACE_HI;
@@ -206,7 +191,6 @@ pub fn apply(ctx: &egui::Context, accent: Color32, text_scale: f32) {
     style.spacing.interact_size.y = grown;
 
     ctx.set_style(style);
-    install_fonts(ctx);
 }
 
 /// egui's built-in monospace (Hack) has no Vietnamese coverage: every
@@ -218,7 +202,12 @@ pub fn apply(ctx: &egui::Context, accent: Color32, text_scale: f32) {
 /// the binary for one script. If it is ever missing, fall back silently to
 /// the built-in font: an app that starts with slightly wrong glyphs beats an
 /// app that refuses to start.
-fn install_fonts(ctx: &egui::Context) {
+///
+/// Call once at startup, not from `apply`: `ctx.set_fonts` throws away and
+/// rebuilds the whole font atlas, while `apply` reruns on every TEXT SIZE
+/// change. Nothing here depends on the text scale anyway - `CAP_CENTRING` is
+/// a *factor*, so it tracks the size on its own.
+pub fn install_fonts(ctx: &egui::Context) {
     const CONSOLAS: &str = r"C:\Windows\Fonts\consola.ttf";
     const CONSOLAS_BOLD: &str = r"C:\Windows\Fonts\consolab.ttf";
     let consolas_bytes = std::fs::read(CONSOLAS);

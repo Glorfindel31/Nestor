@@ -33,10 +33,11 @@ use crate::worker::{ExportFormat, Msg, Worker};
 use i18n::{t, tv};
 use state::{ConfigForm, ShapeRow, Status};
 
-/// Bumped from `rustynesting-prefs` when the palette was replaced: the old
-/// key holds a rust/oxide `accent` hex that would silently override the new
-/// default and leave everyone on the previous theme. Language and
-/// help-dismissed reset with it, which is the cheap half of that trade.
+/// Bumped from `rustynesting-prefs` when the palette was first replaced: the
+/// old key holds a rust/oxide `accent` hex that would have silently overridden
+/// the new default. Deliberately *not* bumped again now that the accent is a
+/// constant - an `accent` left in a stored blob is simply an unknown field to
+/// this struct, so language, scale and help-dismissed all survive the change.
 const PREFS_KEY: &str = "rustynesting-prefs-v2";
 
 /// A nest result as the RESULT panel displays it. Either the winner of a run,
@@ -156,7 +157,6 @@ pub struct App {
     // ---- dialogs / chrome ----
     help_open: bool,
     settings_menu_open: bool,
-    accent_hex: String,
     confirm_reset: bool,
     /// A best result found in a previous session, waiting on "recover or
     /// start fresh".
@@ -166,7 +166,10 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let prefs: prefs::Prefs = cc.storage.and_then(|s| eframe::get_value(s, PREFS_KEY)).unwrap_or_default();
-        theme::apply(&cc.egui_ctx, prefs.accent_color(), prefs.scale.factor());
+        theme::apply(&cc.egui_ctx, prefs.scale.factor());
+        // Once, here - not inside `apply`, which reruns on every TEXT SIZE
+        // change. See `install_fonts`.
+        theme::install_fonts(&cc.egui_ctx);
         // Explicitly 1.0, not merely left alone: egui persists the zoom
         // factor in its own memory, so a version that once set it would
         // otherwise keep scaling strokes here forever.
@@ -176,7 +179,6 @@ impl App {
         worker.load_saved();
 
         let mut app = Self {
-            accent_hex: prefs.accent.clone(),
             help_open: !prefs.help_dismissed,
             prefs,
             worker,
@@ -221,7 +223,7 @@ impl App {
             confirm_reset: false,
             recover_prompt: None,
         };
-        app.console.log(console::Kind::Run, "RustyNesting started");
+        app.console.log(console::Kind::Run, "Nestor started");
         app
     }
 
@@ -419,12 +421,16 @@ impl App {
     }
 
     fn apply_repack(&mut self, index: usize, response: crate::dto::RepackSheetResponse) -> bool {
+        // Both guards run *before* `push_undo`, not after: an undo entry for a
+        // repack that never happened costs the user a Ctrl-Z that reports
+        // "undid the last change" while nothing on screen moves.
+        if !matches!(&self.snapshot, Some(snap) if index < snap.placements.len()) {
+            return false;
+        }
         self.push_undo();
-        let Some(snap) = &mut self.snapshot else { return false };
-        let Some(slot) = snap.placements.get_mut(index) else { return false };
-        let improved = response.improved;
-        *slot = response.placement;
-        improved
+        let snap = self.snapshot.as_mut().expect("checked directly above");
+        snap.placements[index] = response.placement;
+        response.improved
     }
 
     /// Remembers the current result so the next edit to it can be undone.

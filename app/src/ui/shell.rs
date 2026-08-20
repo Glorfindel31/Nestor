@@ -10,7 +10,7 @@ use super::{config, prefs, theme, App};
 /// by the title. Pair it with `heading_rule` below.
 pub fn heading(app: &App, ui: &mut egui::Ui, number: &str, key: &str) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(number).color(app.prefs.accent_color()).strong().family(theme::heavy()));
+        ui.label(RichText::new(number).color(theme::ACCENT).strong().family(theme::heavy()));
         ui.label(RichText::new(app.t(key)).strong().family(theme::heavy()));
     });
 }
@@ -24,10 +24,10 @@ pub fn heading(app: &App, ui: &mut egui::Ui, number: &str, key: &str) {
 /// SHEET / REMOVE SELECTED). A full-width rule allocated inside that row
 /// consumes the width those buttons need and they end up drawn on top of
 /// it. The rule belongs after the row closes, wherever that is.
-pub fn heading_rule(app: &App, ui: &mut egui::Ui) {
+pub fn heading_rule(ui: &mut egui::Ui) {
     ui.add_space(6.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 3.0), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, app.prefs.accent_color());
+    ui.painter().rect_filled(rect, 0.0, theme::ACCENT);
     ui.add_space(8.0);
 }
 
@@ -48,12 +48,21 @@ pub fn status_label(ui: &mut egui::Ui, status: &super::state::Status) {
 pub fn header(app: &mut App, ctx: &egui::Context) {
     egui::TopBottomPanel::top("header").frame(egui::Frame::new().fill(theme::PANEL).inner_margin(8.0)).show(ctx, |ui| {
         ui.horizontal(|ui| {
-            // No inter-item spacing across these two: it is one wordmark
-            // split by colour, not two words.
+            // No inter-item spacing across these three: it is one word, split
+            // only so the sigma can carry the accent colour on its own.
+            //
+            // Greek capital sigma for the S. The other five letters of NESTOR
+            // have Greek forms too, but N/E/T/O/P are identical to their Latin
+            // counterparts - they would cost legibility and buy nothing.
             ui.scope(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                ui.label(RichText::new("RUSTY").size(20.0).strong().family(theme::heavy()).color(app.prefs.accent_color()));
-                ui.label(RichText::new("NESTING").size(20.0).strong().family(theme::heavy()));
+                for (text, accented) in [("NE", false), ("Σ", true), ("TOR", false)] {
+                    let mut mark = RichText::new(text).size(20.0).strong().family(theme::heavy());
+                    if accented {
+                        mark = mark.color(theme::ACCENT);
+                    }
+                    ui.label(mark);
+                }
             });
             ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).color(theme::DIM));
 
@@ -98,8 +107,8 @@ fn settings_menu(app: &mut App, ctx: &egui::Context) {
         .anchor(egui::Align2::RIGHT_TOP, [-12.0, 52.0])
         .show(ctx, |ui| {
             // Without a floor the window shrinks to its widest row, which is
-            // the five 22px swatches - narrower than its own title bar, so
-            // the section labels wrap and the panel reads as noise.
+            // narrower than its own title bar, so the section labels wrap and
+            // the panel reads as noise.
             ui.set_min_width(260.0);
             ui.label(RichText::new(app.t("lang_switch_label")).color(theme::DIM));
             ui.horizontal(|ui| {
@@ -116,43 +125,10 @@ fn settings_menu(app: &mut App, ctx: &egui::Context) {
                 for scale in prefs::Scale::ALL {
                     if ui.selectable_label(app.prefs.scale == scale, app.t(scale.key())).clicked() {
                         app.prefs.scale = scale;
-                        theme::apply(ctx, app.prefs.accent_color(), scale.factor());
+                        theme::apply(ctx, scale.factor());
                     }
                 }
             });
-
-            ui.separator();
-            ui.label(RichText::new(app.t("accent_switch_label")).color(theme::DIM));
-            ui.horizontal(|ui| {
-                for swatch in theme::ACCENTS {
-                    let (rect, response) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
-                    ui.painter().rect_filled(rect, 0.0, swatch);
-                    // 2px in the text colour marks the chosen one; everything
-                    // else gets the same containing hairline as any other box.
-                    let selected = app.prefs.accent_color() == swatch;
-                    let (edge, width) = if selected { (theme::TEXT, 2.0) } else { (theme::LINE, 1.0) };
-                    theme::hairline(ui.painter(), rect, edge, width);
-                    if response.clicked() {
-                        app.prefs.accent = prefs::to_hex(swatch);
-                        app.accent_hex = app.prefs.accent.clone();
-                        theme::apply(ctx, swatch, app.prefs.scale.factor());
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label(app.t("accent_hex_label"));
-                let response = ui.add(egui::TextEdit::singleline(&mut app.accent_hex).desired_width(80.0).char_limit(7));
-                if response.changed() {
-                    // Only a fully valid colour applies. A half-typed "#c8"
-                    // must not snap the whole UI to black on the way past.
-                    if let Some(c) = prefs::parse_hex(&app.accent_hex) {
-                        app.prefs.accent = app.accent_hex.clone();
-                        theme::apply(ctx, c, app.prefs.scale.factor());
-                    }
-                }
-            })
-            .response
-            .on_hover_text(app.t("accent_hex_tooltip"));
         });
     app.settings_menu_open = open;
 }
@@ -199,7 +175,7 @@ pub fn config_panel(app: &mut App, ctx: &egui::Context) {
         .width_range(360.0..=760.0)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("03").color(app.prefs.accent_color()).strong().family(theme::heavy()));
+                ui.label(RichText::new("03").color(theme::ACCENT).strong().family(theme::heavy()));
                 ui.label(RichText::new(app.t("settings_bar_text")).strong().family(theme::heavy()));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.button(">>").on_hover_text(app.t("settings_bar_text")).clicked() {
@@ -207,7 +183,7 @@ pub fn config_panel(app: &mut App, ctx: &egui::Context) {
                     }
                 });
             });
-            heading_rule(app, ui);
+            heading_rule(ui);
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| config::panel(app, ui));
         });
 }
@@ -219,6 +195,11 @@ pub fn config_panel(app: &mut App, ctx: &egui::Context) {
 /// as just another item in the row. Applied to both the label and the box:
 /// scaling the text alone would leave the same padding around a bigger word.
 const RUN_BUTTON_SCALE: f32 = 2.0;
+
+/// The RUN/STOP label, as a fraction of the size the button is built around.
+/// At 1.0 the text ran edge to edge and the control read as a slab of letters;
+/// the box is unchanged and the difference is interior margin.
+const RUN_TEXT_SHRINK: f32 = 0.5;
 
 pub fn run_float(app: &mut App, ctx: &egui::Context) {
     // Anchored to the *central column's* right edge, not the window's - this
@@ -232,8 +213,19 @@ pub fn run_float(app: &mut App, ctx: &egui::Context) {
     egui::Window::new("run").title_bar(false).resizable(false).anchor(egui::Align2::RIGHT_BOTTOM, [inset, -56.0]).show(ctx, |ui| {
         // Derived from the live button size rather than hardcoded, so this
         // keeps tracking the TEXT SIZE preference like everything else.
-        let text_size = egui::TextStyle::Button.resolve(ui.style()).size * RUN_BUTTON_SCALE;
-        let min_size = egui::vec2(0.0, (text_size + ui.spacing().button_padding.y * 2.0) * RUN_BUTTON_SCALE / 2.0);
+        let full = egui::TextStyle::Button.resolve(ui.style()).size * RUN_BUTTON_SCALE;
+        let text_size = full * RUN_TEXT_SHRINK;
+
+        // The height the control had when the label filled it, captured
+        // *before* the padding below changes: a smaller label must not shrink
+        // the button, it must sit in more air inside the same box.
+        let min_size = egui::vec2(0.0, full + ui.spacing().button_padding.y * 2.0);
+        // Width can't be pinned the same way - it shrink-wraps the label, and
+        // the label's width is whatever the current language makes it. Handing
+        // the padding roughly what the glyphs gave back keeps the footprint
+        // close to the old one without hardcoding a width per translation.
+        ui.spacing_mut().button_padding.x += full;
+
         let big = |text: RichText| egui::Button::new(text.size(text_size).strong().family(theme::heavy())).min_size(min_size);
 
         // A plain shrink-wrapping row, status first so the button still ends
@@ -243,7 +235,7 @@ pub fn run_float(app: &mut App, ctx: &egui::Context) {
         // full available width, and an auto-sized window then inflates to
         // half the screen with the button marooned in an empty panel.
         ui.horizontal(|ui| {
-            let accent = app.prefs.accent_color();
+            let accent = theme::ACCENT;
             status_label(ui, &app.run_status);
             if app.running {
                 ui.spinner();
@@ -268,7 +260,7 @@ pub fn run_float(app: &mut App, ctx: &egui::Context) {
                 egui::ProgressBar::new(app.progress)
                     .desired_width(240.0 * RUN_BUTTON_SCALE)
                     .corner_radius(egui::CornerRadius::ZERO)
-                    .fill(app.prefs.accent_color()),
+                    .fill(theme::ACCENT),
             );
         }
         if app.cfg.mirror {
@@ -363,7 +355,7 @@ fn help(app: &mut App, ctx: &egui::Context) {
     egui::Modal::new(egui::Id::new("help")).show(ctx, |ui| {
         ui.set_max_width(560.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(app.t("help_title")).strong().family(theme::heavy()).size(18.0).color(app.prefs.accent_color()));
+            ui.label(RichText::new(app.t("help_title")).strong().family(theme::heavy()).size(18.0).color(theme::ACCENT));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 for lang in super::i18n::Lang::ALL {
                     if ui.selectable_label(app.prefs.lang == lang, lang.label()).clicked() {
@@ -379,7 +371,7 @@ fn help(app: &mut App, ctx: &egui::Context) {
             ui.label(app.t(key));
         }
         ui.add_space(12.0);
-        ui.label(RichText::new(app.t("help_keys_title")).color(app.prefs.accent_color()).strong().family(theme::heavy()));
+        ui.label(RichText::new(app.t("help_keys_title")).color(theme::ACCENT).strong().family(theme::heavy()));
         ui.add_space(4.0);
         egui::Grid::new("help_keys").num_columns(2).spacing([16.0, 2.0]).show(ui, |ui| {
             for binding in super::keys::BINDINGS {
@@ -403,6 +395,16 @@ fn help(app: &mut App, ctx: &egui::Context) {
                     close = true;
                 }
             });
+        });
+        ui.add_space(10.0);
+        // Not an i18n key: a name, a year and a domain are the same in every
+        // language, and routing them through the dictionary would only create
+        // two copies to keep in sync.
+        ui.label(RichText::new("dev by Cedric Florentin 2026").color(theme::DIM).small());
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label(RichText::new("By and For Upset Climbing").color(theme::DIM).small());
+            ui.hyperlink_to(RichText::new("upsetclimbing.com").small(), "https://upsetclimbing.com");
         });
     });
     if close || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
@@ -430,6 +432,6 @@ pub fn choice<T: PartialEq + Copy>(ui: &mut egui::Ui, id: &str, current: &mut T,
 }
 
 /// Text drawn in the accent colour, for the one-off places that need it.
-pub fn accent(app: &App, text: impl Into<String>) -> RichText {
-    RichText::new(text.into()).color(app.prefs.accent_color())
+pub fn accent(text: impl Into<String>) -> RichText {
+    RichText::new(text.into()).color(theme::ACCENT)
 }

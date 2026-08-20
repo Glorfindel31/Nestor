@@ -33,7 +33,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     }
     shell::panel_frame(ui, |ui| {
         shell::heading(app, ui, "04", "heading_result_text");
-        shell::heading_rule(app, ui);
+        shell::heading_rule(ui);
         history_selector(app, ui);
         stats(app, ui);
         unplaced(app, ui);
@@ -165,7 +165,7 @@ fn sheet_card(app: &mut App, ui: &mut egui::Ui, index: usize) {
     let band = if util >= 75.0 {
         theme::OK
     } else if util >= 45.0 {
-        app.prefs.accent_color()
+        theme::ACCENT
     } else {
         theme::ERROR
     };
@@ -252,7 +252,7 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
             // Pinned parts get a visible frame - the state has to be
             // readable without hovering, or "why won't this move" is a
             // guessing game.
-            painter.rect_stroke(part_rect, 0.0, egui::Stroke::new(1.0_f32, app.prefs.accent_color()), egui::StrokeKind::Outside);
+            painter.rect_stroke(part_rect, 0.0, egui::Stroke::new(1.0_f32, theme::ACCENT), egui::StrokeKind::Outside);
         }
 
         if editable {
@@ -485,7 +485,7 @@ fn export_controls(app: &mut App, ui: &mut egui::Ui) {
         let (unplaced_label, unplaced_tip) = (app.t("export_unplaced_label"), app.t("export_unplaced_tooltip"));
         ui.checkbox(&mut app.export_outline, outline_label).on_hover_text(outline_tip);
         ui.checkbox(&mut app.export_unplaced, unplaced_label).on_hover_text(unplaced_tip);
-        if ui.add_enabled(!app.controls_locked(), egui::Button::new(shell::accent(app, app.t("btn_export")).strong().family(theme::heavy()))).clicked() {
+        if ui.add_enabled(!app.controls_locked(), egui::Button::new(shell::accent(app.t("btn_export")).strong().family(theme::heavy()))).clicked() {
             do_export(app);
         }
     });
