@@ -14,6 +14,9 @@ winresource = "0.1"
 eframe = { version = "0.32", default-features = false, features = ["glow", "persistence", "default_fonts"] }
 egui = "0.32"
 rfd = "0.17"
+# Resolves the per-OS config/data directories. See `paths.rs` for why this
+# earns its place over two env vars.
+dirs = "6"
 geometry = { path = "../crates/geometry" }
 nesting = { path = "../crates/nesting" }
 dxf = "0.6"

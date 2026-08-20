@@ -10,14 +10,39 @@ permissions:
 
 jobs:
   build:
-    # Windows only, deliberately: `app/src/paths.rs` resolves config, log and
-    # recovery files from %APPDATA%/%LOCALAPPDATA%, which don't exist
-    # elsewhere. A mac/linux job would compile and then produce a binary that
-    # can't load or save anything.
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            bin: rustynesting.exe
+            suffix: x64.exe
+          - platform: macos-latest
+            bin: rustynesting
+            suffix: macos_arm64
+          - platform: ubuntu-latest
+            bin: rustynesting
+            suffix: linux_x64
+
+    runs-on: ${{ matrix.platform }}
+    # Windows is the only platform this app has ever shipped a working build
+    # for - mac and linux were silently broken from v2.0.0 until `paths.rs`
+    # stopped reading %APPDATA% directly, and have never been compiled here.
+    # They are best-effort until they have proved themselves on a few tags;
+    # neither may hold up a Windows release.
+    continue-on-error: ${{ matrix.platform != 'windows-latest' }}
 
     steps:
       - uses: actions/checkout@v5
+
+      # eframe's glow backend needs the X11/Wayland headers and rfd needs GTK
+      # for its native dialogs. Both come preinstalled on the other two.
+      - name: Install Linux build deps
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -36,10 +61,13 @@ jobs:
           tag="$GITHUB_REF_NAME"
           # Create the release only if this tag doesn't already have one - a
           # release published by hand keeps its notes and stays published.
+          # Three jobs race here, so the losers must not treat "it already
+          # exists" as failure; they just go on and upload their own asset.
           gh release view "$tag" >/dev/null 2>&1 ||
-            gh release create "$tag" --draft --title "RustyNesting $tag" --generate-notes
+            gh release create "$tag" --draft --title "RustyNesting $tag" --generate-notes ||
+            true
           # Copy rather than pass `path#label`: gh's `#` syntax sets the
           # asset's *label*, and the file still downloads under its own name.
-          asset="RustyNesting_${tag#v}_x64.exe"
-          cp target/release/rustynesting.exe "$asset"
+          asset="RustyNesting_${tag#v}_${{ matrix.suffix }}"
+          cp "target/release/${{ matrix.bin }}" "$asset"
           gh release upload "$tag" "$asset" --clobber
