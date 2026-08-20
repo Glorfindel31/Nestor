@@ -38,5 +38,8 @@ jobs:
           # release published by hand keeps its notes and stays published.
           gh release view "$tag" >/dev/null 2>&1 ||
             gh release create "$tag" --draft --title "RustyNesting $tag" --generate-notes
-          gh release upload "$tag" \
-            "target/release/rustynesting.exe#RustyNesting_${tag#v}_x64.exe" --clobber
+          # Copy rather than pass `path#label`: gh's `#` syntax sets the
+          # asset's *label*, and the file still downloads under its own name.
+          asset="RustyNesting_${tag#v}_x64.exe"
+          cp target/release/rustynesting.exe "$asset"
+          gh release upload "$tag" "$asset" --clobber
