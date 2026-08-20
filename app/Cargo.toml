@@ -11,7 +11,12 @@ path = "src/main.rs"
 winresource = "0.1"
 
 [dependencies]
-eframe = { version = "0.32", default-features = false, features = ["glow", "persistence", "default_fonts"] }
+# `x11`/`wayland` are Linux's winit backends, and `default-features = false`
+# drops them: eframe/x11 -> egui-winit/x11 -> winit/x11. Without them winit
+# hits its own `compile_error!("The platform you're compiling for is not
+# supported")` on Linux. Inert on Windows and macOS, which need no backend
+# feature, so they stay unconditional rather than in a target table.
+eframe = { version = "0.32", default-features = false, features = ["glow", "persistence", "default_fonts", "x11", "wayland"] }
 egui = "0.32"
 rfd = "0.17"
 # Resolves the per-OS config/data directories. See `paths.rs` for why this
