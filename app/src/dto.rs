@@ -412,16 +412,20 @@ impl NestConfigDto {
             // Filled in by the caller from `expand_parts` - this struct has
             // no access to the parts list, only to the job-wide settings.
             part_rules: Default::default(),
-            // **Off.** The band packer (`nesting::banded`) is correct in its
-            // own unit tests and demonstrably finds the two-band layouts the
-            // greedy pass structurally cannot - but its pair placement is not
-            // yet right on real geometry: `commands::tests::
-            // a_tight_fit_nest_on_real_geometry_produces_no_spurious_findings`
-            // catches its output overlapping and running off the sheet, which
-            // is the NFP reference-point convention in `banded::build_unit`
-            // still being wrong. Shipping it on would trade a 76.5% sheet for
-            // an invalid one. Flip this once that test passes with it enabled.
-            banded_pass: false,
+            // **On.** The band packer (`nesting::banded`) finds the
+            // banded layouts the greedy pass structurally cannot, and
+            // `place_parts` only keeps its sheet when it holds more material
+            // than the greedy one - so on interlocking shapes, where it is
+            // bad, it simply never wins. Measured on the reference job
+            // (`sheet_spread ref 3 4 0 6`): 18 sheets -> 15, best sheet
+            // 76.5% -> 82.0%.
+            //
+            // It was off until its pairing searched the whole Pareto front of
+            // pair boxes rather than the densest one - see
+            // `banded::pareto_front`, and
+            // `nesting/tests/banded_real_geometry.rs` for the overlap and
+            // on-sheet invariants that gate it.
+            banded_pass: true,
         }
     }
 

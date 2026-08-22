@@ -90,8 +90,8 @@ const PAIR_ANGLES: [f64; 4] = [180.0, 90.0, 270.0, 0.0];
 /// two are distinct.
 const ANGLES: [f64; 2] = [0.0, 90.0];
 
-/// The best unit for one shape at one base orientation: a pair if it pairs,
-/// otherwise itself.
+/// Every unit worth considering for one shape at one base orientation: the
+/// Pareto-optimal pair boxes, plus the unpaired shape itself.
 ///
 /// **The pair position comes from the NFP, not from a heuristic push.** The
 /// obvious approach - lay the partner's bounding box onto the first's and
@@ -105,13 +105,13 @@ const ANGLES: [f64; 2] = [0.0, 90.0];
 /// bands fitting in the sheet height and not.
 ///
 /// `geometry::obstacle_nfp` already answers this exactly: it is the set of
-/// positions where B touches A without overlapping it. Every vertex of that
-/// polygon is a valid, maximally-tight placement, so the best pair box is
-/// simply the smallest union box over those vertices. It is exact, it needs no
-/// direction guessing, and it reuses machinery the greedy pass already trusts.
-fn build_unit(part: &NestPart, base_rotation: f64, available: usize, curve_tolerance: f64) -> Option<Unit> {
+/// positions where B touches A without overlapping it. Every point on that
+/// polygon is a valid, maximally-tight placement, and each gives a different
+/// pair box - so this returns the whole Pareto front of those boxes rather
+/// than one winner. See `pareto_front` for why picking one is wrong.
+fn build_units(part: &NestPart, base_rotation: f64, available: usize, curve_tolerance: f64) -> Vec<Unit> {
     let a = rotate_layered_polygon(&part.polygon, base_rotation);
-    let ab = get_polygon_bounds(&a.points)?;
+    let Some(ab) = get_polygon_bounds(&a.points) else { return Vec::new() };
     let a_area = polygon_area(&a.points).abs();
     // A unit translates rigidly, so every member's translation is
     // `target - unit_box_corner`, plus whatever extra shift that member was
@@ -121,72 +121,225 @@ fn build_unit(part: &NestPart, base_rotation: f64, available: usize, curve_toler
     // part off the sheet.
     let single = Unit { members: vec![(base_rotation, -ab.x, -ab.y)], source_id: part.source_id, width: ab.width, height: ab.height, area: a_area };
     if available < 2 {
-        return Some(single);
+        return vec![single];
     }
 
-    let mut best = single.clone();
+    // **Pairing searches the convex hulls, not the outlines.** Each candidate
+    // angle costs one `obstacle_nfp`, and that is a Minkowski sum: on
+    // `three.dxf`'s 258-point profile the eight of them take tens of seconds,
+    // per sheet, per individual, per generation - it took a 100s benchmark to
+    // 2728s. The hull is 20-odd points and answers the same question for a
+    // packer that only ever works in bounding boxes. It is conservative, never
+    // optimistic: two hulls that clear each other contain two outlines that
+    // clear each other, so a pair it finds is always legal (and `pair_is_legal`
+    // rechecks against the real outlines regardless). Box sizes below still
+    // come from the true bounds, which a hull leaves unchanged.
+    let a_hull = hull_of(&a);
+    let mut pairs: Vec<Unit> = Vec::new();
     for extra in PAIR_ANGLES {
         let rotation = base_rotation + extra;
         let b = rotate_layered_polygon(&part.polygon, rotation);
         let Some(bb) = get_polygon_bounds(&b.points) else { continue };
-        let Some(nfp) = obstacle_nfp(&a, &b, curve_tolerance) else { continue };
+        let b_hull = hull_of(&b);
+        let Some(nfp) = obstacle_nfp(&a_hull, &b_hull, curve_tolerance) else { continue };
 
         // An NFP vertex is where B's own reference point goes, so the shift
-        // that puts B there is the vertex minus that reference point.
-        let b_ref = b.points.first().copied().unwrap_or(geometry::point::Point::new(0.0, 0.0));
+        // that puts B there is the vertex minus that reference point - and
+        // "B" here is the hull the NFP was built from, whose first vertex is
+        // not the outline's. Reading the reference off the wrong polygon
+        // translates every pair by the gap between them.
+        let b_ref = b_hull.points.first().copied().unwrap_or(geometry::point::Point::new(0.0, 0.0));
         // Sampled *along* each NFP edge, not just at its vertices. Two
         // triangles pair by sliding along their shared hypotenuse, which is
-        // one NFP edge - and the tightest union box occurs partway along it,
-        // not at either end. Vertices alone gave 837x433 (0.937 density) where
-        // sliding finds materially better, and that difference decides whether
-        // two bands fit the sheet height.
-        const SAMPLES_PER_EDGE: usize = 24;
-        let positions: Vec<geometry::point::Point> = nfp
-            .outer
-            .iter()
-            .enumerate()
-            .flat_map(|(i, from)| {
-                let to = nfp.outer[(i + 1) % nfp.outer.len()];
-                (0..SAMPLES_PER_EDGE).map(move |k| {
-                    let t = k as f64 / SAMPLES_PER_EDGE as f64;
-                    geometry::point::Point::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t)
-                })
-            })
-            .collect();
-        for vertex in &positions {
-            let (sx, sy) = (vertex.x - b_ref.x, vertex.y - b_ref.y);
-            let (mx, my) = (bb.x + sx, bb.y + sy);
-            let x0 = ab.x.min(mx);
-            let y0 = ab.y.min(my);
-            let width = (ab.x + ab.width).max(mx + bb.width) - x0;
-            let height = (ab.y + ab.height).max(my + bb.height) - y0;
-            if width <= 0.0 || height <= 0.0 {
-                continue;
-            }
-            let pair = Unit {
-                members: vec![(base_rotation, -x0, -y0), (rotation, sx - x0, sy - y0)],
-                source_id: part.source_id,
-                width,
-                height,
-                area: a_area * 2.0,
-            };
-            if pair.density() > best.density() + 1e-9 {
-                best = pair;
+        // one NFP edge - and the interesting boxes occur partway along it,
+        // not at either end.
+        //
+        // **By length, not by a fixed count per edge.** A flat 32 samples put
+        // 27mm between steps on the reference job's 884mm long edge, which is
+        // enough to step straight over the boxes that matter - the front came
+        // out with a 45mm hole in it right where the useful trade-off lives.
+        // Stepping at `SAMPLE_STEP` is a few thousand iterations of pure
+        // arithmetic per shape and took the fixture sheet from 12 parts to 15.
+        // ...but capped in total. `SAMPLE_STEP` on a simple triangle's NFP is
+        // a few thousand samples; on a complex outline whose NFP runs to
+        // thousands of edges it is hundreds of thousands, per shape, per
+        // orientation, on every sheet of every individual of every generation.
+        // That took a 100s benchmark past 400s. The budget is spread across
+        // edges by length, so a big NFP just gets sampled more coarsely.
+        const SAMPLE_STEP: f64 = 0.5;
+        const SAMPLE_BUDGET: f64 = 4000.0;
+        let perimeter: f64 = nfp.outer.iter().enumerate().map(|(i, p)| p.distance_to(nfp.outer[(i + 1) % nfp.outer.len()])).sum();
+        let step = SAMPLE_STEP.max(perimeter / SAMPLE_BUDGET);
+        // The NFP boundary is where the two parts *touch*, and
+        // `placement::has_material_overlap` counts any Clipper sliver above a
+        // bare `0.0` as a real overlap - so a sample sitting exactly on the
+        // boundary is a coin toss. Nudging outward from the NFP's own interior
+        // (which is the overlapping region) by `NUDGE` separates them for
+        // certain, at a cost far below any tolerance the job cares about.
+        const NUDGE: f64 = 0.01;
+        let n = nfp.outer.len() as f64;
+        let cx = nfp.outer.iter().map(|p| p.x).sum::<f64>() / n;
+        let cy = nfp.outer.iter().map(|p| p.y).sum::<f64>() / n;
+        for (i, from) in nfp.outer.iter().enumerate() {
+            let to = nfp.outer[(i + 1) % nfp.outer.len()];
+            let samples = ((from.distance_to(to) / step).ceil() as usize).max(1);
+            for k in 0..samples {
+                let t = k as f64 / samples as f64;
+                let (mut vx, mut vy) = (from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+                let (ox, oy) = (vx - cx, vy - cy);
+                let len = ox.hypot(oy);
+                if len > 0.0 {
+                    vx += ox / len * NUDGE;
+                    vy += oy / len * NUDGE;
+                }
+                let (sx, sy) = (vx - b_ref.x, vy - b_ref.y);
+                let (mx, my) = (bb.x + sx, bb.y + sy);
+                let x0 = ab.x.min(mx);
+                let y0 = ab.y.min(my);
+                let width = (ab.x + ab.width).max(mx + bb.width) - x0;
+                let height = (ab.y + ab.height).max(my + bb.height) - y0;
+                if width <= 0.0 || height <= 0.0 {
+                    continue;
+                }
+                pairs.push(Unit {
+                    members: vec![(base_rotation, -x0, -y0), (rotation, sx - x0, sy - y0)],
+                    source_id: part.source_id,
+                    width,
+                    height,
+                    area: a_area * 2.0,
+                });
             }
         }
     }
 
-    if std::env::var("NEST_BANDED").is_ok_and(|v| v != "0") {
-        eprintln!(
-            "    unit src {} base {base_rotation} x{} {:.1}x{:.1} density {:.3}",
-            part.source_id,
-            best.count(),
-            best.width,
-            best.height,
-            best.density()
-        );
+    // A pair only earns its place by being denser than the shape alone. A
+    // solid rectangle pairs into a box it fills exactly as well as one copy
+    // does, so keeping it would only make the unit coarser - a band would have
+    // to fit 200mm where 100mm would do - for no gain.
+    let floor = single.density();
+    pairs.retain(|u| u.density() > floor + 1e-9);
+    let mut out = thin(pareto_front(pairs));
+    // The nudge above makes a boundary sample safe for convex NFPs; nothing
+    // guarantees it for a concave one, so every surviving pair is checked
+    // against the same overlap test the caller will apply. Cheap here - the
+    // front is single digits by this point - and much cheaper than shipping a
+    // sheet the audit rejects.
+    out.retain(|u| pair_is_legal(part, u));
+    out.push(single);
+    // **Absolute, not relative.** `part.polygon` arrives already rotated by
+    // `part.rotation` (`place_parts` does that on entry), while a
+    // `PlacedPart::rotation` is read downstream as the angle to turn the part's
+    // *original* outline by. Everything above works in angles relative to the
+    // polygon it was handed, so the two have to be added here. Leaving it
+    // relative is silently correct for any part the GA left at 0 degrees and
+    // wrong for every other one - which is why it survived a fixture test and
+    // put every part of a real nest off the sheet.
+    for unit in &mut out {
+        for member in &mut unit.members {
+            member.0 += part.rotation;
+        }
     }
-    Some(best)
+    if std::env::var("NEST_BANDED").is_ok_and(|v| v != "0") {
+        for u in &out {
+            eprintln!("    unit src {} base {base_rotation} x{} {:.1}x{:.1} density {:.3}", part.source_id, u.count(), u.width, u.height, u.density());
+        }
+    }
+    out
+}
+
+/// Keeps only the boxes no other box beats in *both* dimensions.
+///
+/// **Density is the wrong objective and that is what stalled this module.**
+/// A pair box is scored by `fill_band` against the band it goes in, and the
+/// band sequence is scored against the sheet height - so a slightly less dense
+/// box that is 20mm shorter can be the one that lets a second band fit at all,
+/// while the densest box wastes the leftover height entirely. Measured on the
+/// reference job the densest pairing is 837.4x433.4 (0.937); sliding along the
+/// same NFP edge trades width for height continuously, and only the search
+/// over band sequences knows which point on that trade-off it needs.
+///
+/// Boxes are snapped to `GRID` first so a 1000-sample sweep along one edge
+/// collapses to a handful of genuinely different options instead of feeding
+/// the band search a thousand near-identical branches.
+fn pareto_front(mut units: Vec<Unit>) -> Vec<Unit> {
+    const GRID: f64 = 5.0;
+    for u in &mut units {
+        u.width = (u.width / GRID).ceil() * GRID;
+        u.height = (u.height / GRID).ceil() * GRID;
+    }
+    units.sort_by(|a, b| a.width.total_cmp(&b.width).then(a.height.total_cmp(&b.height)));
+    let mut out: Vec<Unit> = Vec::new();
+    let mut best_height = f64::INFINITY;
+    for u in units {
+        if u.height < best_height {
+            best_height = u.height;
+            out.push(u);
+        }
+    }
+    out
+}
+
+/// A coarse convex shell of a polygon's outline, as a hole-free
+/// `LayeredPolygon`: hull, simplified, then grown back by the simplification
+/// tolerance so it still contains the original.
+///
+/// The hull alone is not enough. A clearance-padded outline is already close
+/// to convex - `three.dxf`'s 258 points hull to 214 - and `obstacle_nfp` on
+/// two 214-point polygons still takes ~1.7s, eight times per sheet. Simplified
+/// it is a couple of dozen points and the whole catalogue drops from 13s to
+/// well under a second.
+///
+/// **The re-offset is what keeps it honest.** Douglas-Peucker keeps a subset
+/// of the original vertices, so on a convex outline the result is *inscribed* -
+/// it would let two parts sit up to `SHELL_TOLERANCE` too close. Growing it
+/// back by that much makes the shell a superset again, so a pair the NFP calls
+/// legal really is.
+fn hull_of(poly: &geometry::dxf_import::LayeredPolygon) -> geometry::dxf_import::LayeredPolygon {
+    /// Millimetres. Parts this packer helps are hundreds of mm across, so a
+    /// couple of mm of slack in a pair box is under a percent of it.
+    const SHELL_TOLERANCE: f64 = 2.0;
+    /// Below this the hull is already cheap, and simplifying it only spends
+    /// the tolerance for nothing - it cost `two.dxf`'s six-point profile a
+    /// whole part per sheet.
+    const SIMPLIFY_ABOVE: usize = 32;
+    let hull = geometry::hull_polygon::hull(&poly.points).unwrap_or_else(|| poly.points.clone());
+    let points = if hull.len() > SIMPLIFY_ABOVE {
+        let simplified = geometry::simplify::simplify(&hull, Some(SHELL_TOLERANCE), false);
+        geometry::clipper::offset(&simplified, SHELL_TOLERANCE).into_iter().next().unwrap_or(hull)
+    } else {
+        hull
+    };
+    geometry::dxf_import::LayeredPolygon { points, children: Vec::new(), texts: Vec::new(), real_boundary: None, ..poly.clone() }
+}
+
+/// Places a unit's members at the origin and asks whether they overlap.
+fn pair_is_legal(part: &NestPart, unit: &Unit) -> bool {
+    let placed: Vec<_> = unit
+        .members
+        .iter()
+        .map(|&(rotation, dx, dy)| {
+            let rotated = rotate_layered_polygon(&part.polygon, rotation);
+            geometry::dxf_import::shift_layered_polygon(&rotated, dx, dy)
+        })
+        .collect();
+    (0..placed.len()).all(|i| ((i + 1)..placed.len()).all(|j| !crate::placement::has_material_overlap(&placed[i], &placed[j])))
+}
+
+/// Caps a Pareto front at `MAX_UNITS`, keeping its ends and spreading the
+/// rest evenly along it.
+///
+/// The front is a smooth trade-off curve, so its exact resolution buys very
+/// little - but everything downstream is priced per unit: `pair_is_legal` runs
+/// a Clipper intersection each, and `search` branches on every distinct band
+/// height. A dozen options is plenty to find the layout and keeps a
+/// pathological shape from making the band pass cost more than the nest.
+fn thin(front: Vec<Unit>) -> Vec<Unit> {
+    const MAX_UNITS: usize = 12;
+    if front.len() <= MAX_UNITS {
+        return front;
+    }
+    let last = front.len() - 1;
+    (0..MAX_UNITS).map(|i| front[i * last / (MAX_UNITS - 1)].clone()).collect()
 }
 
 /// A part type plus every copy of it still unplaced.
@@ -236,9 +389,7 @@ fn build_catalogue(parts: &[NestPart], curve_tolerance: f64) -> Vec<Unit> {
         seen.push(part.source_id);
         let available = counts.available(part.source_id);
         for angle in ANGLES {
-            if let Some(unit) = build_unit(part, angle, available, curve_tolerance) {
-                out.push(unit);
-            }
+            out.extend(build_units(part, angle, available, curve_tolerance));
         }
     }
     out
@@ -318,6 +469,9 @@ pub fn pack_sheet(sheet_bounds: Bounds, parts: &[NestPart], curve_tolerance: f64
     search(sheet_bounds, parts, &catalogue, &mut pool, sheet_bounds.height, &mut Plan::default(), &mut best, &mut budget);
     if best.bands.is_empty() {
         return None;
+    }
+    if std::env::var("NEST_BANDED").is_ok_and(|v| v != "0") {
+        eprintln!("  chosen bands: {:?}", best.bands);
     }
     Some(materialise(sheet_bounds, parts, &catalogue, &best))
 }

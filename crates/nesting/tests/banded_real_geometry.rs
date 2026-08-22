@@ -108,24 +108,27 @@ fn band_packed_real_parts_stay_on_the_sheet() {
     }
 }
 
-/// **The target, not the current state.** The band packer only earns its place
-/// if it beats the greedy pass on the shapes greedy is worst at: greedy
-/// reaches 14 parts (76.5%) on this sheet, and the reference tool reaches 16
-/// (88%). Today this places 12.
+/// **What the band packer actually reaches on real geometry, and the ceiling
+/// it cannot pass.** Greedy reaches 14 parts (76.5%) on this sheet; the band
+/// packer reaches 15 at 85.1%, so it earns its place - but not the 16 the
+/// reference tool's report implies.
 ///
-/// The blocker is measured and specific. Pairing is exact on clean geometry -
-/// two synthetic right triangles pair at density 1.000 - but the real padded
-/// parts pair at 0.937, giving an 837x433 box where the geometry allows about
-/// 789x433. That 48mm matters out of all proportion to its size: a 789-wide
-/// box fits three across a 2446mm sheet, an 837-wide box fits only two, so the
-/// excess costs an entire column per band. The padding is the cause -
-/// `offset_bevel` on the triangle's 28.5-degree tip fattens it well beyond a
-/// uniform 3mm ring, so the two copies no longer tile their own box.
+/// Sixteen is not reachable here, and the reason is the shape, not the packer.
+/// `two.dxf`'s parts look like right triangles and are not: the apex sits part
+/// way along the top edge, so a 180-degree copy tiles a *parallelogram*, never
+/// the bounding box. Probed directly - align the two boxes and step the copy
+/// perpendicular to the long edge - the two padded outlines still overlap at
+/// 40mm of separation, so the 784x433 pair box the two-band layout would need
+/// simply does not exist. The real Pareto front of pair boxes runs from
+/// 785x465 to 845x430, and `min(width + height) = 1250` against a usable sheet
+/// height of 1226: one band of each orientation cannot stack, whatever the
+/// search does.
 ///
-/// Ignored rather than deleted: it is the specification for finishing this,
-/// and the number in the failure message is the progress bar.
+/// So this asserts what is achievable and guards it. Getting past it needs
+/// common-line pairing (the reference's own 776.5x422.4 pattern unit is the
+/// bare part box, i.e. zero clearance on the shared cut) - see `PLAN.md` 2.1 -
+/// not a better band search.
 #[test]
-#[ignore = "band packer reaches 12 parts; needs 16 to beat greedy - see the doc comment"]
 fn band_packing_beats_the_greedy_ceiling_on_pairable_parts() {
     let parts = real_parts(12);
     let sheet = usable_sheet();
@@ -136,8 +139,8 @@ fn band_packing_beats_the_greedy_ceiling_on_pairable_parts() {
     let utilisation = result.area / sheet_area * 100.0;
     println!("banded: {} parts, {utilisation:.1}% of the usable sheet", result.placed.len());
     assert!(
-        result.placed.len() >= 16,
-        "expected at least 16 parts (the two-band layout), got {} at {utilisation:.1}%",
+        result.placed.len() >= 15,
+        "expected at least 15 parts (greedy reaches 14), got {} at {utilisation:.1}%",
         result.placed.len()
     );
 }
@@ -241,4 +244,49 @@ fn report_the_nfp_reference_convention() {
     println!("  if these are B-origin positions, expect 90..110 / 190..210");
     println!("  if these are B-first-vertex positions, expect 190..210 / 390..410");
     println!("  if these are pure offsets,           expect -10..10 / -10..10");
+}
+
+/// **The bug this file existed for and still missed.** `place_parts` rotates
+/// every part by its own `NestPart::rotation` *before* the band packer sees it,
+/// but a `PlacedPart::rotation` is read downstream as an angle applied to the
+/// part's original outline. So the band packer has to report `part.rotation`
+/// plus whatever it chose, and reporting only its own choice is undetectable
+/// on a fixture where every part sits at 0 degrees - which every other test
+/// here uses. With rotations enabled the real engine put all eight parts of a
+/// nest off the sheet.
+///
+/// Here the parts arrive exactly as `place_parts` hands them over: polygon
+/// already turned, `rotation` recording by how much. Materialising from the
+/// *original* outline at the reported angle is what the exporter and the audit
+/// both do, so that is what gets checked.
+#[test]
+fn placements_are_reported_at_an_absolute_rotation() {
+    const BASE: f64 = 37.0;
+    let originals = real_parts(12);
+    let parts: Vec<NestPart> = originals
+        .iter()
+        .map(|p| NestPart { polygon: rotate_layered_polygon(&p.polygon, BASE), rotation: BASE, ..p.clone() })
+        .collect();
+
+    let sheet = usable_sheet();
+    let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
+    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE).expect("should place something");
+    assert!(!result.placed.is_empty());
+
+    let placed: Vec<LayeredPolygon> = result
+        .placed
+        .iter()
+        .map(|p| {
+            let original = originals.iter().find(|q| q.id == p.id).expect("placed id must exist");
+            let rotated = rotate_layered_polygon(&original.polygon, p.rotation);
+            shift_layered_polygon(&rotated, p.placement.x, p.placement.y)
+        })
+        .collect();
+
+    for (i, part) in placed.iter().enumerate() {
+        assert!(!has_material_outside_sheet(part, &sheet), "part {} escapes the sheet", result.placed[i].id);
+        for (j, other) in placed.iter().enumerate().skip(i + 1) {
+            assert!(!has_material_overlap(part, other), "parts {} and {} overlap", result.placed[i].id, result.placed[j].id);
+        }
+    }
 }
