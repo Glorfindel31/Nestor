@@ -182,6 +182,10 @@ pub struct App {
     /// Drag in progress on the result canvas: which part, and where it has
     /// been dragged to in model coordinates.
     drag: Option<result::Drag>,
+    /// Zoom/pan per result sheet card. Absent means "fitted", which is what
+    /// every sheet starts as - a sheet only earns an entry once someone
+    /// actually moves its view.
+    sheet_views: HashMap<usize, result::SheetView>,
     repacking: Option<usize>,
 
     // ---- dialogs / chrome ----
@@ -258,6 +262,7 @@ impl App {
             export_unplaced: false,
             export_status: Default::default(),
             drag: None,
+            sheet_views: HashMap::new(),
             repacking: None,
             settings_menu_open: false,
             confirm_reset: false,

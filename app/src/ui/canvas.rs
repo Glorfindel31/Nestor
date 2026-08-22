@@ -46,6 +46,18 @@ impl View {
         Self { scale, origin, bounds }
     }
 
+    /// The same fit, zoomed by `zoom` about `rect`'s centre and then shifted
+    /// by `pan` screen pixels.
+    ///
+    /// Expressed as a transform *of the fit* rather than as its own
+    /// scale/origin pair so that a resized window still re-fits: the zoom is
+    /// a factor on whatever the sheet's fitted size currently is, not a
+    /// remembered absolute scale that would leave the sheet the wrong size in
+    /// a different-sized panel.
+    pub fn zoomed(self, center: Pos2, zoom: f32, pan: egui::Vec2) -> Self {
+        Self { scale: self.scale * zoom, origin: center + (self.origin - center) * zoom + pan, bounds: self.bounds }
+    }
+
     pub fn model_to_screen(&self, p: PointDto) -> Pos2 {
         Pos2::new(
             self.origin.x + (p.x - self.bounds.minx) as f32 * self.scale,

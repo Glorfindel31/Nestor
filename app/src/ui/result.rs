@@ -17,6 +17,11 @@ pub struct Drag {
     /// Model-space offset applied so far, relative to where the part started.
     pub dx: f64,
     pub dy: f64,
+    /// Turn applied so far, in degrees, relative to the angle the nest gave
+    /// the part. Folded into `dx`/`dy` as it is applied so the part turns
+    /// about its own centre rather than swinging around the model origin -
+    /// see `turn`.
+    pub drot: f64,
     /// Whether the pointer has moved far enough to count as a drag rather
     /// than a click. A click pins/unpins; a drag relocates.
     pub moved: bool,
@@ -268,6 +273,14 @@ fn sheet_card(app: &mut App, ui: &mut egui::Ui, index: usize) {
         if !can_edit && app.result_config.is_none() {
             ui.label(RichText::new(app.t("repack_needs_config")).color(theme::DIM).small());
         }
+        // Only once this sheet is actually zoomed: a FIT button on a fitted
+        // sheet is a button that does nothing, on every card, forever. It
+        // doubles as the only place the zoom level is written down.
+        if let Some(vs) = app.sheet_views.get(&index).copied() {
+            if ui.button(super::i18n::tv(app.prefs.lang, "sheet_fit_button", &[("zoom", &format!("{:.0}", vs.zoom * 100.0))])).on_hover_text(app.t("sheet_fit_tooltip")).clicked() {
+                app.sheet_views.remove(&index);
+            }
+        }
     });
 
     draw_sheet(app, ui, index, band);
@@ -286,15 +299,20 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
     let Some(sheet) = app.result_sheets.get(placement.sheet_index).or_else(|| app.result_sheets.first()) else { return };
 
     let sheet_bounds = bounds_of(&sheet.points);
-    // Fit-to-box, matching the web UI's own 700x500 budget. No pan, no zoom -
-    // deliberately the same as before; the mapping is `canvas::View`, so
-    // adding them later is a change in one place.
+    // Fit-to-box, matching the web UI's own 700x500 budget, then zoomed and
+    // panned on top. A 3000x1500 sheet fitted into 700x500 draws its parts a
+    // few pixels across, which is neither readable nor grabbable.
     let (w, h) = (sheet_bounds.w() as f32, sheet_bounds.h() as f32);
     let avail = ui.available_width().min(700.0);
     let scale = if w > 0.0 && h > 0.0 { (avail / w).min(500.0 / h) } else { 1.0 };
     let size = egui::vec2(w * scale, h * scale).max(egui::vec2(40.0, 40.0));
-    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let view = canvas::View::fit(sheet_bounds, rect);
+    // `click_and_drag`, and allocated *before* the parts below: egui gives an
+    // overlapping interaction to whichever widget was added last, so a drag
+    // that starts on a part still moves the part, and only a drag starting on
+    // bare canvas pans the view.
+    let (rect, background) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    let vs = pan_zoom(&mut app.sheet_views, ui, index, rect, &background);
+    let view = canvas::View::fit(sheet_bounds, rect).zoomed(rect.center(), vs.zoom, vs.pan);
 
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, theme::WELL);
@@ -302,6 +320,7 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
 
     let editable = app.result_config.is_some() && !app.controls_locked();
     let mut click_to_toggle = None;
+    let mut hovered_part = None;
     let mut drag_started = None;
     let mut drag_delta = egui::Vec2::ZERO;
     let mut drag_released = false;
@@ -310,11 +329,11 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
         let Some(poly) = app.parts_by_id.get(&part.id) else { continue };
         // The offset a drag in progress is applying to this part, so it
         // follows the pointer live rather than jumping on release.
-        let (odx, ody) = match &app.drag {
-            Some(d) if d.sheet == index && d.part_id == part.id => (d.dx, d.dy),
-            _ => (0.0, 0.0),
+        let (odx, ody, odrot) = match &app.drag {
+            Some(d) if d.sheet == index && d.part_id == part.id => (d.dx, d.dy, d.drot),
+            _ => (0.0, 0.0, 0.0),
         };
-        let pts = canvas::rotated_translated(&poly.points, part.rotation, part.x + odx, part.y + ody);
+        let pts = canvas::rotated_translated(&poly.points, part.rotation + odrot, part.x + odx, part.y + ody);
         let b = bounds_of(&pts);
         let part_rect = egui::Rect::from_two_pos(view.model_to_screen(PointDto { x: b.minx, y: b.miny }), view.model_to_screen(PointDto { x: b.maxx, y: b.maxy }));
 
@@ -327,7 +346,7 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
         }
 
         let map = |p: PointDto| {
-            let r = canvas::rotated_translated(std::slice::from_ref(&p), part.rotation, part.x + odx, part.y + ody);
+            let r = canvas::rotated_translated(std::slice::from_ref(&p), part.rotation + odrot, part.x + odx, part.y + ody);
             view.model_to_screen(r[0])
         };
         canvas::draw_shape(&painter, poly, &map, true, color);
@@ -340,6 +359,9 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
 
         if editable {
             let response = ui.interact(part_rect, egui::Id::new(("part", index, part.id)), egui::Sense::click_and_drag());
+            if response.hovered() {
+                hovered_part = Some(part.id);
+            }
             if response.drag_started() {
                 drag_started = Some(part.id);
             }
@@ -359,7 +381,7 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
         toggle_pin(app, id);
     }
     if let Some(part_id) = drag_started {
-        app.drag = Some(Drag { sheet: index, part_id, dx: 0.0, dy: 0.0, moved: false, clear: true, awaiting: false });
+        app.drag = Some(Drag { sheet: index, part_id, dx: 0.0, dy: 0.0, drot: 0.0, moved: false, clear: true, awaiting: false });
     }
     if drag_delta != egui::Vec2::ZERO {
         let (mdx, mdy) = view.model_delta(drag_delta);
@@ -377,6 +399,196 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
     if drag_released {
         commit_drag(app, index);
     }
+    if editable {
+        keyboard_edit(app, ui, index, hovered_part, background.contains_pointer());
+    }
+}
+
+/// Arrow keys nudge, R turns - on the part being dragged, or failing that the
+/// one under the pointer.
+///
+/// **No selection state, deliberately.** "Which part do the keys apply to" is
+/// answered by where the pointer already is, the same way the drag and the pin
+/// toggle answer it, so there is no third notion of a current part to keep in
+/// sync with the other two, and nothing extra to draw to explain it.
+///
+/// Both edits go down the drag path rather than editing the placement
+/// directly: that is the one route that asks the engine whether the result is
+/// legal, pins what lands and pushes an undo entry. A keyboard nudge that
+/// skipped it would be the one way to put a part somewhere the audit later
+/// rejects.
+fn keyboard_edit(app: &mut App, ui: &egui::Ui, index: usize, hovered_part: Option<usize>, canvas_hovered: bool) {
+    // A focused text field owns the arrow keys; taking them from under a
+    // half-typed number in the config panel would be its own bug.
+    if ui.memory(|m| m.focused().is_some()) {
+        return;
+    }
+    let dragging = app.drag.as_ref().filter(|d| d.sheet == index).map(|d| d.part_id);
+    if dragging.is_none() && !canvas_hovered {
+        return;
+    }
+    let Some(part_id) = dragging.or(hovered_part) else { return };
+
+    // A nudge is worth exactly one clearance: the smallest move that can
+    // change whether two parts are legal neighbours. With no spacing set
+    // there is no such distance, so fall back to a millimetre.
+    let step = match app.result_config.as_ref().map(crate::dto::NestConfigDto::effective_spacing) {
+        Some(s) if s > 0.0 => s,
+        _ => 1.0,
+    };
+    // The nest's own rotation grid - a hand-turned part landing off it would
+    // sit at an angle the engine would never have chosen for itself.
+    let turn_step = match app.result_config.as_ref().map(|c| c.rotations) {
+        Some(r) if r >= 2 => 360.0 / f64::from(r),
+        _ => 90.0,
+    };
+
+    let (mut dx, mut dy, mut drot) = (0.0, 0.0, 0.0);
+    ui.input(|i| {
+        for (key, x, y) in [
+            (egui::Key::ArrowLeft, -1.0, 0.0),
+            (egui::Key::ArrowRight, 1.0, 0.0),
+            // Model Y is up, screen Y is down: "up" on the keyboard has to
+            // mean +y here, or the part goes the way the key does not point.
+            (egui::Key::ArrowUp, 0.0, 1.0),
+            (egui::Key::ArrowDown, 0.0, -1.0),
+        ] {
+            if i.key_pressed(key) {
+                dx += x * step;
+                dy += y * step;
+            }
+        }
+        if i.key_pressed(egui::Key::R) {
+            drot += if i.modifiers.shift { -turn_step } else { turn_step };
+        }
+    });
+    if dx == 0.0 && dy == 0.0 && drot == 0.0 {
+        return;
+    }
+
+    let existing = app.drag.take().filter(|d| d.sheet == index && d.part_id == part_id);
+    let mut drag = existing.unwrap_or(Drag { sheet: index, part_id, dx: 0.0, dy: 0.0, drot: 0.0, moved: false, clear: true, awaiting: false });
+    if drag.awaiting {
+        // A drop is already out for validation; a second edit on top of it
+        // would be applied to a position the engine has not agreed to yet.
+        app.drag = Some(drag);
+        return;
+    }
+    if drot != 0.0 {
+        let (cdx, cdy) = turn(app, index, &drag, drot);
+        drag.dx += cdx;
+        drag.dy += cdy;
+        drag.drot += drot;
+    }
+    drag.dx += dx;
+    drag.dy += dy;
+    drag.moved = true;
+    let live_drag = ui.input(|i| i.pointer.any_down());
+    app.drag = Some(drag);
+    update_drag_hint(app, index);
+    // Mid-drag the pointer is still down and the drop will validate on
+    // release; a keyboard-only edit has no release, so it commits now.
+    if !live_drag {
+        commit_drag(app, index);
+    }
+}
+
+/// The translation that keeps a part's bounding-box centre still while it
+/// turns by `extra` degrees.
+///
+/// A placement is "rotate about the model origin, then translate", so turning
+/// a part in place means undoing the arc its centre would otherwise travel.
+/// Without this, turning a part sitting two metres from the origin throws it
+/// clean off the sheet, which reads as the feature being broken rather than
+/// as the convention it is.
+fn turn(app: &App, index: usize, drag: &Drag, extra: f64) -> (f64, f64) {
+    let Some(snap) = &app.snapshot else { return (0.0, 0.0) };
+    let Some(part) = snap.placements.get(index).and_then(|pl| pl.parts.iter().find(|p| p.id == drag.part_id)) else { return (0.0, 0.0) };
+    let Some(poly) = app.parts_by_id.get(&drag.part_id) else { return (0.0, 0.0) };
+    let b = bounds_of(&poly.points);
+    let centre = PointDto { x: (b.minx + b.maxx) / 2.0, y: (b.miny + b.maxy) / 2.0 };
+    let before = canvas::rotated_translated(std::slice::from_ref(&centre), part.rotation + drag.drot, 0.0, 0.0)[0];
+    let after = canvas::rotated_translated(std::slice::from_ref(&centre), part.rotation + drag.drot + extra, 0.0, 0.0)[0];
+    (before.x - after.x, before.y - after.y)
+}
+
+/// One sheet card's view transform. `Default` is the fitted view.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SheetView {
+    pub zoom: f32,
+    pub pan: egui::Vec2,
+}
+
+impl Default for SheetView {
+    fn default() -> Self {
+        Self { zoom: 1.0, pan: egui::Vec2::ZERO }
+    }
+}
+
+impl SheetView {
+    pub fn is_fitted(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Zoom is never below the fitted view - "smaller than the whole sheet" is
+/// not a useful place to be - and 40x is a millimetre or two across on a
+/// 3m sheet.
+const MAX_ZOOM: f32 = 40.0;
+
+/// Applies this frame's zoom/pan input for one sheet and returns the view
+/// transform to draw with.
+///
+/// Zoom is on ctrl+scroll (egui's own `zoom_delta`, so a trackpad pinch works
+/// too) rather than plain scroll, because the whole RESULT panel is inside a
+/// scroll area and stealing the wheel from it would make a long result
+/// impossible to scroll past.
+fn pan_zoom(views: &mut HashMap<usize, SheetView>, ui: &egui::Ui, index: usize, rect: egui::Rect, background: &egui::Response) -> SheetView {
+    let mut vs = views.get(&index).copied().unwrap_or_default();
+    // `contains_pointer`, not `hovered`: a part sitting on top of the canvas
+    // takes the hover, and the pointer is over a part almost all of the time
+    // on a well-packed sheet - so `hovered` made zoom work only in the gaps.
+    if background.contains_pointer() {
+        let zoom_delta = ui.input(|i| i.zoom_delta());
+        if zoom_delta != 1.0 {
+            let factor = (vs.zoom * zoom_delta).clamp(1.0, MAX_ZOOM) / vs.zoom;
+            // Keep whatever is under the pointer under the pointer. Derived
+            // from the composed origin rather than guessed: with
+            // `origin = centre + (fit_origin - centre) * zoom + pan`, holding
+            // point `p` fixed across a scale by `factor` gives exactly this.
+            let pointer = ui.input(|i| i.pointer.hover_pos()).unwrap_or(rect.center());
+            vs.pan = (pointer - rect.center()) * (1.0 - factor) + vs.pan * factor;
+            vs.zoom *= factor;
+        }
+    }
+    // Middle-drag pans from anywhere, read straight off the pointer rather
+    // than from a `Response`: once zoomed in, the parts' own bounding boxes
+    // cover the whole canvas, so there is no background left to grab and a
+    // primary drag belongs to the part under it anyway. Primary-drag on bare
+    // canvas still pans, for an empty or sparsely filled sheet.
+    if background.contains_pointer() && ui.input(|i| i.pointer.button_down(egui::PointerButton::Middle)) {
+        vs.pan += ui.input(|i| i.pointer.delta());
+    }
+    if background.dragged() {
+        vs.pan += background.drag_delta();
+    }
+    if background.double_clicked() {
+        vs = SheetView::default();
+    }
+
+    // Keep the sheet covering the viewport, so a pan can never lose it
+    // off-screen and leave the user staring at an empty well. At zoom 1 this
+    // pins the pan to zero, which is why panning a fitted sheet does nothing.
+    let slack = rect.size() * (vs.zoom - 1.0) / 2.0;
+    vs.pan.x = vs.pan.x.clamp(-slack.x, slack.x);
+    vs.pan.y = vs.pan.y.clamp(-slack.y, slack.y);
+
+    if vs.is_fitted() {
+        views.remove(&index);
+    } else {
+        views.insert(index, vs);
+    }
+    vs
 }
 
 fn toggle_pin(app: &mut App, id: usize) {
@@ -404,18 +616,18 @@ fn toggle_pin(app: &mut App, id: usize) {
 /// somewhere else.
 fn update_drag_hint(app: &mut App, sheet_index: usize) {
     let Some(drag) = &app.drag else { return };
-    let (part_id, dx, dy) = (drag.part_id, drag.dx, drag.dy);
+    let (part_id, dx, dy, drot) = (drag.part_id, drag.dx, drag.dy, drag.drot);
     let Some(snap) = &app.snapshot else { return };
     let Some(placement) = snap.placements.get(sheet_index) else { return };
     let Some(sheet) = app.result_sheets.get(placement.sheet_index).or_else(|| app.result_sheets.first()) else { return };
     let sheet_b = bounds_of(&sheet.points);
 
     let Some(moved) = placement.parts.iter().find(|p| p.id == part_id) else { return };
-    let Some(moved_bounds) = part_bounds(app, moved, dx, dy) else { return };
+    let Some(moved_bounds) = part_bounds(app, moved, dx, dy, drot) else { return };
 
     const EPS: f64 = 1e-9;
     let inside = moved_bounds.minx >= sheet_b.minx - EPS && moved_bounds.maxx <= sheet_b.maxx + EPS && moved_bounds.miny >= sheet_b.miny - EPS && moved_bounds.maxy <= sheet_b.maxy + EPS;
-    let overlaps = placement.parts.iter().filter(|p| p.id != part_id).filter_map(|p| part_bounds(app, p, 0.0, 0.0)).any(|b| {
+    let overlaps = placement.parts.iter().filter(|p| p.id != part_id).filter_map(|p| part_bounds(app, p, 0.0, 0.0, 0.0)).any(|b| {
         moved_bounds.minx < b.maxx - EPS && moved_bounds.maxx > b.minx + EPS && moved_bounds.miny < b.maxy - EPS && moved_bounds.maxy > b.miny + EPS
     });
 
@@ -424,9 +636,9 @@ fn update_drag_hint(app: &mut App, sheet_index: usize) {
     }
 }
 
-fn part_bounds(app: &App, part: &PlacedPartDto, dx: f64, dy: f64) -> Option<Bounds> {
+fn part_bounds(app: &App, part: &PlacedPartDto, dx: f64, dy: f64, drot: f64) -> Option<Bounds> {
     let poly = app.parts_by_id.get(&part.id)?;
-    Some(bounds_of(&canvas::rotated_translated(&poly.points, part.rotation, part.x + dx, part.y + dy)))
+    Some(bounds_of(&canvas::rotated_translated(&poly.points, part.rotation + drot, part.x + dx, part.y + dy)))
 }
 
 /// On release, ask the engine whether the new position is actually legal.
@@ -440,7 +652,7 @@ fn commit_drag(app: &mut App, sheet_index: usize) {
         app.drag = None;
         return;
     }
-    let (part_id, dx, dy) = (drag.part_id, drag.dx, drag.dy);
+    let (part_id, dx, dy, drot) = (drag.part_id, drag.dx, drag.dy, drag.drot);
     let Some(config) = app.result_config.clone() else {
         app.run_status.err(app.t("repack_needs_config"));
         app.drag = None;
@@ -454,7 +666,7 @@ fn commit_drag(app: &mut App, sheet_index: usize) {
     if let Some(d) = &mut app.drag {
         d.awaiting = true;
     }
-    app.worker.validate(drag_request(sheet, placement, sheet_parts(app, sheet_index), part, dx, dy, config));
+    app.worker.validate(drag_request(sheet, placement, sheet_parts(app, sheet_index), part, dx, dy, drot, config));
 }
 
 /// Builds the question put to the engine on drop: "this part, at its current
@@ -472,6 +684,7 @@ fn drag_request(
     part: PlacedPartDto,
     dx: f64,
     dy: f64,
+    drot: f64,
     config: crate::dto::NestConfigDto,
 ) -> ValidatePlacementRequest {
     ValidatePlacementRequest {
@@ -483,8 +696,9 @@ fn drag_request(
         // where the part started.
         x: part.x + dx,
         y: part.y + dy,
-        // A drag never rotates; the part keeps whatever angle the nest gave it.
-        rotation: part.rotation,
+        // A drag on its own never rotates, but R during one does, and so does
+        // R with the pointer over a part - `drot` is that turn.
+        rotation: part.rotation + drot,
         config,
     }
 }
@@ -504,6 +718,7 @@ impl App {
                     if let Some(p) = snap.placements.get_mut(drag.sheet).and_then(|pl| pl.parts.iter_mut().find(|p| p.id == id)) {
                         p.x += drag.dx;
                         p.y += drag.dy;
+                        p.rotation += drag.drot;
                         p.locked = true;
                     }
                     snap.locked.insert(id);
@@ -720,7 +935,7 @@ mod tests {
         let config = crate::ui::state::ConfigForm::default().to_dto();
 
         let ask = |dx: f64, dy: f64| {
-            let request = drag_request(square(100.0), placement.clone(), parts.clone(), moved, dx, dy, config.clone());
+            let request = drag_request(square(100.0), placement.clone(), parts.clone(), moved, dx, dy, 0.0, config.clone());
             (request.x, request.y, crate::commands::validate_placement(request).unwrap().valid)
         };
 
@@ -735,6 +950,12 @@ mod tests {
 
         // Dragged off the right-hand edge.
         assert!(!ask(45.0, 0.0).2, "a drop hanging off the sheet must be refused");
+
+        // A turn is asked about as an absolute angle, on top of whatever the
+        // nest gave the part - sending the delta would leave a part that was
+        // already at 90 degrees being checked at 45.
+        let turned = drag_request(square(100.0), placement.clone(), parts.clone(), PlacedPartDto { rotation: 90.0, ..moved }, 0.0, 0.0, 45.0, config.clone());
+        assert_eq!(turned.rotation, 135.0);
     }
 
     /// The "too large" label must only appear when the part genuinely cannot
