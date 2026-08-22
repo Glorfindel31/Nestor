@@ -48,6 +48,16 @@ pub const MIN_REMNANT_AREA: f64 = 400.0;
 pub struct Remnant {
     /// The true free-material outline. This is what to nest onto.
     pub outline: Vec<Point>,
+    /// Islands of *not*-free material enclosed by `outline` - the parts that
+    /// were cut out of the middle of it.
+    ///
+    /// A boolean subtraction returns a region with holes as several separate
+    /// rings, and treating each as its own remnant counts the cut parts as
+    /// reclaimable material and hands back an offcut you would nest straight
+    /// on top of them. They belong to their ring, and whoever turns a remnant
+    /// into a sheet must carry them across as that sheet's own holes - which
+    /// the engine has always supported (see this module's doc comment).
+    pub holes: Vec<Vec<Point>>,
     /// Its area, in square millimetres.
     pub area: f64,
     /// The largest axis-aligned rectangle that fits inside `outline` - the
@@ -105,15 +115,38 @@ pub fn sheet_remnants(sheet: &[Point], placed: &[PlacedOutline], spacing: f64) -
         Err(_) => return Vec::new(),
     };
 
-    let mut out: Vec<Remnant> = free
-        .into_iter()
-        .filter_map(|region| {
-            let area = polygon_area(&region).abs();
+    // **Rings, not regions.** Clipper hands back one ring per boundary: the
+    // outside of each free area, plus one for every part enclosed by it. A
+    // ring is a hole when an odd number of other rings contain it, which is
+    // the only classification that does not depend on a winding convention
+    // this wrapper does not promise.
+    let rings: Vec<Vec<Point>> = free.into_iter().filter(|r| r.len() >= 3).collect();
+    let contains = |outer: &[Point], inner: &[Point]| {
+        inner.first().is_some_and(|p| crate::polygon::point_in_polygon(*p, outer, Point::new(0.0, 0.0), None) == Some(true))
+    };
+    let depth: Vec<usize> = rings
+        .iter()
+        .map(|ring| rings.iter().filter(|other| !std::ptr::eq(other.as_slice(), ring.as_slice()) && contains(other, ring)).count())
+        .collect();
+
+    let mut out: Vec<Remnant> = rings
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| depth[*i] % 2 == 0)
+        .filter_map(|(i, ring)| {
+            let holes: Vec<Vec<Point>> = rings
+                .iter()
+                .enumerate()
+                .filter(|(j, other)| depth[*j] == depth[i] + 1 && contains(ring, other))
+                .map(|(_, other)| other.clone())
+                .collect();
+            // Net of its holes - the number someone books material against.
+            let area = polygon_area(ring).abs() - holes.iter().map(|h| polygon_area(h).abs()).sum::<f64>();
             if area < MIN_REMNANT_AREA {
                 return None;
             }
-            let usable = largest_inscribed_rect(&region)?;
-            Some(Remnant { outline: region, area, usable })
+            let usable = largest_inscribed_rect_with_holes(ring, &holes).unwrap_or(Bounds { x: 0.0, y: 0.0, width: 0.0, height: 0.0 });
+            Some(Remnant { outline: ring.clone(), holes, area, usable })
         })
         .collect();
 
@@ -137,16 +170,50 @@ pub fn sheet_remnants(sheet: &[Point], placed: &[PlacedOutline], spacing: f64) -
 /// algorithm only if that ever stops being true.
 #[must_use]
 pub fn largest_inscribed_rect(polygon: &[Point]) -> Option<Bounds> {
-    const MAX_VERTICES: usize = 64;
+    largest_inscribed_rect_with_holes(polygon, &[])
+}
+
+/// As `largest_inscribed_rect`, but the rectangle must also miss every hole.
+///
+/// **A hole is rejected by its bounding box, not its outline.** That
+/// under-reports a little - a rectangle tucked into the corner beside a
+/// triangular part is refused because it overlaps that part's box - and
+/// under-reporting is the only safe direction for a number someone is going to
+/// cut against. The exact test is a polygon intersection per candidate box,
+/// and there are tens of thousands of candidates.
+///
+/// The old vertex cap returned the polygon's own bounding box for anything
+/// complicated, which is the *unsafe* direction and is where "usable
+/// 2440 x 1220" came from on a sheet that was two thirds full. Now the
+/// candidate coordinates are thinned instead, so the search stays bounded
+/// without ever claiming material that is not there.
+#[must_use]
+pub fn largest_inscribed_rect_with_holes(polygon: &[Point], holes: &[Vec<Point>]) -> Option<Bounds> {
+    /// Most distinct candidate coordinates per axis. The sweep is O(n^4).
+    const MAX_COORDS: usize = 26;
     let bounds = get_polygon_bounds(polygon)?;
-    if polygon.len() > MAX_VERTICES {
-        return Some(bounds);
-    }
+    let hole_boxes: Vec<Bounds> = holes.iter().filter_map(|h| get_polygon_bounds(h)).collect();
 
     let mut xs: Vec<f64> = polygon.iter().map(|p| p.x).collect();
     let mut ys: Vec<f64> = polygon.iter().map(|p| p.y).collect();
+    // A usable rectangle very often stops exactly at a hole's edge, so those
+    // edges have to be candidates or the sweep cannot find it.
+    for b in &hole_boxes {
+        xs.push(b.x);
+        xs.push(b.x + b.width);
+        ys.push(b.y);
+        ys.push(b.y + b.height);
+    }
     dedup_sorted(&mut xs);
     dedup_sorted(&mut ys);
+    thin(&mut xs, MAX_COORDS);
+    thin(&mut ys, MAX_COORDS);
+
+    let clear_of_holes = |r: &Bounds| {
+        hole_boxes.iter().all(|h| {
+            r.x + r.width <= h.x + 1e-9 || h.x + h.width <= r.x + 1e-9 || r.y + r.height <= h.y + 1e-9 || h.y + h.height <= r.y + 1e-9
+        })
+    };
 
     let mut best: Option<Bounds> = None;
     for i in 0..xs.len().saturating_sub(1) {
@@ -159,14 +226,25 @@ pub fn largest_inscribed_rect(polygon: &[Point]) -> Option<Bounds> {
                     if best.as_ref().is_some_and(|b| b.width * b.height >= candidate.width * candidate.height) {
                         continue;
                     }
-                    if rect_inside(&candidate, polygon) {
+                    if clear_of_holes(&candidate) && rect_inside(&candidate, polygon) {
                         best = Some(candidate);
                     }
                 }
             }
         }
     }
-    best.or(Some(bounds))
+    let _ = bounds;
+    best
+}
+
+/// Keeps at most `max` values, spread evenly, ends always included.
+fn thin(v: &mut Vec<f64>, max: usize) {
+    if v.len() <= max || max < 2 {
+        return;
+    }
+    let last = v.len() - 1;
+    *v = (0..max).map(|i| v[i * last / (max - 1)]).collect();
+    v.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
 }
 
 fn dedup_sorted(v: &mut Vec<f64>) {
@@ -206,6 +284,30 @@ mod tests {
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> Vec<Point> {
         vec![Point::new(x, y), Point::new(x + w, y), Point::new(x + w, y + h), Point::new(x, y + h)]
+    }
+
+    /// **A part in the middle of the sheet is a hole in the offcut, not part
+    /// of it.** Clipper returns such a region as two rings - the sheet's edge
+    /// and the part's - and counting each as its own remnant reports the whole
+    /// sheet as reclaimable *and* files the cut part itself as reusable stock.
+    /// Measured before the fix: 10000mm2 of "offcut" on a sheet with a part
+    /// still in it, and a real 14-part sheet reporting 179% of itself free.
+    #[test]
+    fn a_part_enclosed_by_the_offcut_is_a_hole_in_it_not_material() {
+        let sheet = rect(0.0, 0.0, 100.0, 100.0);
+        let placed = vec![rect(45.0, 45.0, 10.0, 10.0)];
+        let remnants = sheet_remnants(&sheet, &placed, 0.0);
+
+        assert_eq!(remnants.len(), 1, "one offcut, not one per ring: {remnants:?}");
+        let offcut = &remnants[0];
+        assert!((offcut.area - 9900.0).abs() < 1.0, "area must be net of the part, got {}", offcut.area);
+        assert_eq!(offcut.holes.len(), 1, "the part must come back as a hole so nothing nests on top of it");
+
+        // And the usable rectangle must miss the part rather than swallowing it.
+        assert!(offcut.usable.width * offcut.usable.height <= 9900.0, "usable {:?} cannot exceed the free area", offcut.usable);
+        let u = &offcut.usable;
+        let hits_part = u.x < 55.0 && u.x + u.width > 45.0 && u.y < 55.0 && u.y + u.height > 45.0;
+        assert!(!hits_part, "the usable rectangle runs through the part: {u:?}");
     }
 
     /// The basic claim: cut one strip off a sheet, and what is left is

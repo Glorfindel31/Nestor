@@ -742,7 +742,18 @@ pub struct ExportRequest {
 #[derive(Deserialize, Clone, Debug)]
 pub struct ReportPartDto {
     pub name: String,
+    /// How many were ordered.
     pub quantity: usize,
+    /// How many the result actually placed. Sent rather than derived: a
+    /// `PlacedShape` carries no part identity by the time the report draws it,
+    /// so only the UI - which knows which id block belongs to which row - can
+    /// answer this. See `ui::result::report_part_list`.
+    #[serde(default)]
+    pub nested: usize,
+    /// The piece itself, holes included. Size, area, contour count and cut
+    /// length are all measured off this by the report rather than sent, so
+    /// they cannot disagree with the shape it draws.
+    pub polygon: PolygonDto,
 }
 
 /// Input for `commands::export_report`. Wraps `ExportRequest` rather than

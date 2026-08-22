@@ -702,7 +702,15 @@ pub fn compute_remnants(request: crate::dto::RemnantRequest) -> Result<Vec<crate
                 points: remnant.outline,
                 layer: sheet.layer.clone(),
                 is_circle: None,
-                children: Vec::new(),
+                // The parts cut out of the middle of this offcut, carried
+                // across as the sheet's own holes. Dropping them would offer a
+                // piece of material that is partly already-cut parts, and the
+                // next job would nest straight on top of them.
+                children: remnant
+                    .holes
+                    .into_iter()
+                    .map(|h| LayeredPolygon { points: h, layer: sheet.layer.clone(), is_circle: None, children: Vec::new(), texts: Vec::new(), real_boundary: None })
+                    .collect(),
                 texts: Vec::new(),
                 real_boundary: None,
             };
@@ -857,7 +865,18 @@ pub fn export_report(path: &str, request: ReportRequest) -> Result<(), String> {
     let config = &request.config;
     let meta = geometry::pdf_export::ReportMeta {
         title: request.title.unwrap_or_else(|| "Nesting job report".to_string()),
-        parts: request.parts.iter().map(|p| geometry::pdf_export::ReportPart { name: p.name.clone(), quantity: p.quantity }).collect(),
+        generated: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+        spacing: config.spacing,
+        parts: request
+            .parts
+            .iter()
+            .map(|p| geometry::pdf_export::ReportPart {
+                name: p.name.clone(),
+                quantity: p.quantity,
+                nested: p.nested,
+                shape: p.polygon.clone().into(),
+            })
+            .collect(),
         settings: vec![
             ("Margin".to_string(), format!("{} mm", config.margin)),
             ("Spacing".to_string(), format!("{} mm", config.spacing)),
@@ -2924,6 +2943,43 @@ mod tests {
 
     // --- PDF job report --------------------------------------------------
 
+    /// **The report behind `PLAN.md` 0.1, now a regression test.** The user
+    /// saw the audit flagging off-material issues that "cannot be real", and
+    /// it would not reproduce - because every existing test here nests one
+    /// shape, or nests at rotation 0, and the bug needed both several shapes
+    /// (so `refine_consolidation` has somewhere to relocate to) and a real
+    /// rotation grid.
+    ///
+    /// The audit was right. `refine_consolidation` relocated parts using their
+    /// *unturned* outline while reporting the rotation they were placed at, so
+    /// every consumer turned them about the origin afterwards. On a fixture
+    /// whose coordinates sit ~1500mm from the origin that threw parts
+    /// thousands of millimetres off the sheet. Nine of forty-eight, here.
+    ///
+    /// Nothing cheaper catches it: the engine's own guards all pass, because
+    /// the geometry it validated really was on the sheet - it is the
+    /// *reported* placement that was wrong.
+    #[test]
+    fn a_multi_shape_nest_with_rotations_audits_completely_clean() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/two.dxf");
+        let shapes = import_dxf(path, 0.3).expect("fixture should parse");
+        assert!(shapes.len() > 1, "this needs several shapes, or consolidation has nowhere to move a part to");
+
+        let cfg = NestConfigDto { margin: 5.0, spacing: 5.0, rotations: 4, ..config(3) };
+        let parts: Vec<_> = shapes.iter().map(|s| part(s.clone(), 12)).collect();
+        let sheets = vec![rect_dto(2440.0, 1220.0); 12];
+        let response = run_nest(RunNestRequest { sheets: sheets.clone(), parts, config: cfg.clone() }).expect("should nest");
+        assert!(
+            response.placements.iter().flat_map(|p| &p.parts).any(|p| p.rotation != 0.0),
+            "the fixture must actually use rotations, or this proves nothing"
+        );
+
+        let report = audit_nest(crate::dto::AuditRequest { sheets, placements: response.placements, parts_by_id: response.parts_by_id, config: cfg })
+            .expect("audit should run");
+        assert_eq!(report.fatal_count, 0, "engine output must not be fatal: {:?}", report.issues);
+        assert_eq!(report.warning_count, 0, "engine output must not warn either: {:?}", report.issues);
+    }
+
     #[test]
     fn export_report_writes_a_pdf_whose_numbers_match_the_result_it_drew() {
         let dir = std::env::temp_dir().join("rustynesting-report-test");
@@ -2947,7 +3003,7 @@ mod tests {
                 include_unplaced: true, // must be forced off by the command
             },
             config: config(1),
-            parts: vec![ReportPartDto { name: "bracket".into(), quantity: 2 }],
+            parts: vec![ReportPartDto { name: "bracket".into(), quantity: 2, nested: 2, polygon: square_dto(10.0) }],
             title: Some("Job 42".into()),
         };
         export_report(path.to_str().unwrap(), request).expect("writes a report");

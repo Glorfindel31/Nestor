@@ -36,7 +36,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use geometry::dxf_import::{polygon_material_area, LayeredPolygon};
+use geometry::dxf_import::{polygon_material_area, rotate_layered_polygon, LayeredPolygon};
 use geometry::polygon::polygon_area;
 
 use crate::cache::NfpCache;
@@ -171,9 +171,26 @@ pub fn refine_consolidation(
                     break;
                 }
 
-                let Some(part_geom) = parts_by_id.get(&candidate.id) else {
+                let Some(base_geom) = parts_by_id.get(&candidate.id) else {
                     continue;
                 };
+                // **Turned before it is placed.** `parts_by_id` holds every
+                // part at its *original* orientation; a `PlacedPart::rotation`
+                // is the angle that part was turned by, and both
+                // `cached_inner_nfp` and `try_place_part_on_sheet` take
+                // geometry that has already been turned (that is how
+                // `place_parts` and `repack` both call them - the rotation
+                // argument is only cache-key metadata).
+                //
+                // Passing the untouched outline and then reporting
+                // `candidate.rotation` alongside it relocates the part as if
+                // it were at 0 degrees and labels the result 90, so every
+                // consumer - the audit, the canvas, DXF export - turns it about
+                // the origin and lands it somewhere else entirely. On a fixture
+                // whose coordinates sit ~1500mm from the origin that is
+                // thousands of millimetres off the sheet, and it is exactly
+                // what the audit was reporting (see `PLAN.md` 0.1).
+                let part_geom = &rotate_layered_polygon(base_geom, candidate.rotation);
                 let part_area = polygon_area(&part_geom.points).abs();
                 let mut tried_this_part = 0usize;
 
@@ -213,7 +230,19 @@ pub fn refine_consolidation(
                     let target_obstacles: Option<Vec<PlacedObstacle>> = allplacements[target_pos]
                         .parts
                         .iter()
-                        .map(|p| parts_by_id.get(&p.id).map(|geom| PlacedObstacle { polygon: geom.clone(), id: p.id, source_id: source_id_of(p.id), rotation: p.rotation, placement: p.placement }))
+                        // Turned for the same reason as `part_geom` above: an
+                        // obstacle's polygon is what the relocated part is tested
+                        // against, so an untouched outline means colliding with a
+                        // shape that is not there.
+                        .map(|p| {
+                            parts_by_id.get(&p.id).map(|geom| PlacedObstacle {
+                                polygon: rotate_layered_polygon(geom, p.rotation),
+                                id: p.id,
+                                source_id: source_id_of(p.id),
+                                rotation: p.rotation,
+                                placement: p.placement,
+                            })
+                        })
                         .collect();
                     let Some(target_obstacles) = target_obstacles else {
                         continue;

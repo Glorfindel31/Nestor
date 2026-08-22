@@ -572,20 +572,30 @@ fn export_controls(app: &mut App, ui: &mut egui::Ui) {
         ui.checkbox(&mut app.export_outline, outline_label).on_hover_text(outline_tip);
         ui.checkbox(&mut app.export_unplaced, unplaced_label).on_hover_text(unplaced_tip);
         if ui.add_enabled(!app.controls_locked(), egui::Button::new(shell::accent(app.t("btn_export")).strong().family(theme::heavy()))).clicked() {
-            do_export(app);
+            do_export(app, app.export_format);
+        }
+        // Its own button rather than "pick PDF, then press EXPORT": the report
+        // is what gets printed and signed, and it is asked for far more often
+        // than the format picker's other entries put together.
+        let report_tip = app.t("report_tooltip");
+        if ui
+            .add_enabled(!app.controls_locked(), egui::Button::new(shell::accent(app.t("btn_report")).strong().family(theme::heavy())))
+            .on_hover_text(report_tip)
+            .clicked()
+        {
+            do_export(app, ExportFormat::Pdf);
         }
     });
     shell::status_label(ui, &app.export_status);
 }
 
-fn do_export(app: &mut App) {
+fn do_export(app: &mut App, format: ExportFormat) {
     if !(app.export_spacing >= 0.0) {
         app.export_status.err(app.t("export_invalid_spacing"));
         return;
     }
     let Some(snap) = &app.snapshot else { return };
-    let format = app.export_format;
-    let Some(path) = rfd::FileDialog::new().set_file_name(format!("nest.{}", format.ext())).add_filter(format.label(), &[format.ext()]).save_file() else {
+    let Some(path) = rfd::FileDialog::new().set_file_name(export_file_name(format.ext())).add_filter(format.label(), &[format.ext()]).save_file() else {
         return;
     };
 
@@ -613,20 +623,72 @@ fn do_export(app: &mut App) {
     app.worker.export(format, path, export, report);
 }
 
-/// The part list the PDF report prints - source shapes and their quantities,
-/// as the user defined them, not the expanded per-copy ids.
+/// Every exported file is named `NEST[hh-mm]_[YYYY-MM-DD]`, local time.
+///
+/// A fixed default meant every export landed on `nest.dxf` and quietly
+/// overwrote the last one, which is exactly wrong for a workflow that produces
+/// several attempts of the same job in a sitting. The user can still rename in
+/// the dialog; this only decides what it opens with.
+fn export_file_name(ext: &str) -> String {
+    format!("{}.{ext}", chrono::Local::now().format("NEST[%H-%M]_[%Y-%m-%d]"))
+}
+
+/// The part list the PDF report prints - source shapes as the user defined
+/// them, not the expanded per-copy ids, plus how many of each the result
+/// actually placed.
+///
+/// **How `nested` is worked out.** `dto::expand_parts` hands out instance ids
+/// in one contiguous block of `quantity` per part, walking the same list this
+/// builds - `ui::mod`'s run request filters `app.shapes` by exactly this
+/// predicate, in this order. So a placed id's block is its source row, and the
+/// cumulative quantities are the block boundaries. Mirrored copies carry
+/// `MIRROR_ID_BIT`, which is masked off first or every flipped piece would land
+/// past the end of the table.
 fn report_part_list(app: &App) -> Vec<ReportPartDto> {
-    app.shapes
-        .iter()
-        .filter(|s| s.role == super::state::Role::Part && s.qty > 0)
+    let rows: Vec<&super::state::ShapeRow> = app.shapes.iter().filter(|s| s.role == super::state::Role::Part && s.qty > 0).collect();
+
+    let mut block_end = Vec::with_capacity(rows.len());
+    let mut running = 0usize;
+    for row in &rows {
+        running += row.qty;
+        block_end.push(running);
+    }
+
+    let mut nested = vec![0usize; rows.len()];
+    if let Some(snap) = &app.snapshot {
+        for placement in &snap.placements {
+            for part in &placement.parts {
+                let id = part.id & !nesting::dispatch::MIRROR_ID_BIT;
+                let at = block_end.partition_point(|&end| end <= id);
+                if let Some(count) = nested.get_mut(at) {
+                    *count += 1;
+                }
+            }
+        }
+    }
+
+    rows.iter()
         .enumerate()
-        .map(|(i, s)| ReportPartDto { name: format!("{}-{}", s.file, i + 1), quantity: s.qty })
+        .map(|(i, s)| ReportPartDto { name: format!("{}-{}", s.file, i + 1), quantity: s.qty, nested: nested[i], polygon: s.poly.clone() })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The user asked for exactly this shape, and it is load-bearing: a fixed
+    /// default silently overwrote the previous export.
+    #[test]
+    fn every_export_is_named_for_the_moment_it_was_made() {
+        let name = export_file_name("pdf");
+        assert!(name.starts_with("NEST["), "got {name}");
+        assert!(name.ends_with("].pdf"), "got {name}");
+        // NEST[hh-mm]_[YYYY-MM-DD].pdf
+        assert_eq!(name.len(), "NEST[00-00]_[0000-00-00].pdf".len(), "got {name}");
+        let stamp: String = name.chars().map(|c| if c.is_ascii_digit() { '0' } else { c }).collect();
+        assert_eq!(stamp, "NEST[00-00]_[0000-00-00].pdf");
+    }
 
     fn poly(w: f64, h: f64) -> PolygonDto {
         PolygonDto {
