@@ -52,7 +52,7 @@
 //! downstream (rendering, export) needs the padded geometry at all; it's
 //! purely an internal detail of how placement decisions get made.
 
-use crate::clipper::offset_bevel;
+use crate::clipper::offset_round;
 use crate::point::Point;
 use crate::polygon::{get_polygon_bounds, is_rectangle};
 
@@ -99,6 +99,14 @@ fn offset_rectangle_exact(polygon: &[Point], delta: f64) -> Option<Vec<Point>> {
     )
 }
 
+/// The offset both `prepare_part` and `prepare_sheet` use.
+///
+/// **It has to grow by *exactly* `delta`, not "at most".** `prepare_sheet`
+/// nets the part padding back out by growing the sheet by `spacing / 2`, so
+/// any part whose own padding falls short of that somewhere puts that part of
+/// its true outline off the real material when placed flush - see
+/// `clipper::offset_round`, which is why this is the round join and not the
+/// cheaper bevel one.
 fn offset_clearance(polygon: &[Point], delta: f64) -> Vec<Vec<Point>> {
     if delta == 0.0 {
         return vec![polygon.to_vec()];
@@ -106,7 +114,7 @@ fn offset_clearance(polygon: &[Point], delta: f64) -> Vec<Vec<Point>> {
     if let Some(exact) = offset_rectangle_exact(polygon, delta) {
         return vec![exact];
     }
-    offset_bevel(polygon, delta)
+    offset_round(polygon, delta)
 }
 
 /// Prepares a sheet boundary for nesting: insets (or, when `spacing / 2 >
@@ -131,15 +139,16 @@ pub fn prepare_sheet(sheet: &[Point], margin: f64, spacing: f64) -> Option<Vec<P
 /// degenerates (not expected for a positive/zero outward offset on a
 /// simple closed profile).
 ///
-/// Uses `offset_bevel`, not the plain miter-join `offset` - a sliver-shaped
+/// Uses `offset_round`, not the plain miter-join `offset` - a sliver-shaped
 /// part with a sharp tip would otherwise grow far more than `spacing` at
 /// that tip (confirmed against real fixture parts: up to +44mm at a
 /// spacing of 6.5mm), potentially making an obviously-fitting part get
-/// reported as too big to place. A bevel join caps growth at exactly
-/// `spacing / 2` everywhere, corner or not - see `offset_bevel`'s doc
-/// comment for why bevel, not round (which has the same guarantee but at a
-/// real point-count cost this module used to pay unnecessarily). An exact
-/// rectangular part skips Clipper2 entirely - see `offset_rectangle_exact`.
+/// reported as too big to place. Not `offset_bevel` either, which has the
+/// same no-spike property but *under*-grows at a sharp corner, and
+/// `prepare_sheet` compensates for this padding assuming it is exact - see
+/// `clipper::offset_round` for the 1.5mm of real overhang that caused. An
+/// exact rectangular part skips Clipper2 entirely - see
+/// `offset_rectangle_exact`.
 pub fn prepare_part(part_outer: &[Point], spacing: f64) -> Option<Vec<Point>> {
     offset_clearance(part_outer, spacing / 2.0).into_iter().next()
 }
@@ -252,8 +261,8 @@ mod tests {
         // it: a miter join's spike length is unbounded as the corner angle
         // shrinks (capped only by the miter limit, e.g. 4x the offset), so
         // the bounding box could grow by many times `spacing` right at the
-        // tip. A bevel join caps growth at exactly `spacing / 2` everywhere,
-        // corner or not - see `offset_bevel`'s doc comment.
+        // tip. A round join grows by exactly `spacing / 2` everywhere,
+        // corner or not - see `clipper::offset_round`'s doc comment.
         let spacing = 6.5;
         let sliver = vec![Point::new(0.0, 0.0), Point::new(200.0, 1.0), Point::new(0.0, 2.0)];
 

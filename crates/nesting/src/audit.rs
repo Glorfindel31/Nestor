@@ -38,7 +38,7 @@
 use geometry::dxf_import::{shift_layered_polygon, LayeredPolygon};
 use geometry::polygon::{get_polygon_bounds, Bounds};
 
-use crate::placement::{bounds_within_distance, has_material_outside_sheet, has_material_overlap, PlacedObstacle};
+use crate::placement::{bounds_within_distance, has_material_overlap, material_outside_sheet_area, PlacedObstacle};
 
 /// What went wrong. Ordered worst-first, and `is_fatal` is the only thing
 /// that decides pass/fail - a warning is information, not a veto.
@@ -169,6 +169,24 @@ pub fn audit(sheets: &[AuditSheet]) -> AuditReport {
     report
 }
 
+/// How much of a part may measurably sit off the sheet before it is called
+/// scrap, in square millimetres.
+///
+/// Not a fudge factor: at `margin = 0` a part is *asked* to sit on the sheet
+/// boundary, and the geometry that puts it there has been through arc
+/// tessellation, an inscribed-chord clearance offset and Clipper's fixed-point
+/// grid. The residue measured on real fixtures is five microns of depth, which
+/// no machine could act on. This threshold is a hundred times that and still
+/// 6e-8 of one `two.dxf` part.
+///
+/// It is an *area*, which is the number already to hand, and it behaves
+/// correctly for the case that matters: a real overhang runs along an edge, so
+/// its area grows with the length of that edge and trips this easily, while a
+/// tessellation nick stays local and does not. A part hanging into one of the
+/// sheet's own holes is not measured this way at all - that is reported
+/// regardless.
+const OFF_SHEET_TOLERANCE_MM2: f64 = 0.01;
+
 fn audit_sheet(sheet: &AuditSheet, sheet_index: usize, report: &mut AuditReport) {
     let mut issue = |kind: IssueKind, part_ids: Vec<usize>| report.issues.push(Issue { kind, sheet_index, part_ids });
 
@@ -177,9 +195,9 @@ fn audit_sheet(sheet: &AuditSheet, sheet_index: usize, report: &mut AuditReport)
         // material is a different (and worse) statement than one merely
         // inside the edge keep-out, and reporting both for the same part
         // would just be noise.
-        if has_material_outside_sheet(&part.outline, &sheet.outline) {
+        if material_outside_sheet_area(&part.outline, &sheet.outline) > OFF_SHEET_TOLERANCE_MM2 {
             issue(IssueKind::OutsideSheet, vec![part.id]);
-        } else if has_material_outside_sheet(&part.outline, &sheet.usable) {
+        } else if material_outside_sheet_area(&part.outline, &sheet.usable) > OFF_SHEET_TOLERANCE_MM2 {
             issue(IssueKind::OutsideMargin, vec![part.id]);
         }
     }

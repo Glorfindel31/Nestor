@@ -434,15 +434,37 @@ pub fn has_material_overlap(a: &LayeredPolygon, b: &LayeredPolygon) -> bool {
 /// Port of `hasMaterialOutsideSheet`: true if any of `part` falls outside
 /// `sheet`'s outer boundary, or overlaps one of the sheet's own holes.
 pub fn has_material_outside_sheet(part: &LayeredPolygon, sheet: &LayeredPolygon) -> bool {
+    material_outside_sheet_area(part, sheet) > 0.0
+}
+
+/// How much of `part` lies off `sheet` (or inside one of its holes), in
+/// square millimetres. `f64::INFINITY` if the question could not be answered.
+///
+/// **Exists because "any area at all" is the right test inside the placement
+/// loop and the wrong one for a report.** A part legitimately sitting *on*
+/// the sheet boundary - which is exactly what a job with `margin = 0` asks
+/// for - meets it through a pipeline with real tolerances in it: arcs
+/// tessellated to `curve_tolerance`, a round clearance offset whose chords
+/// are inscribed in the true arc, and Clipper's own fixed-point grid. That
+/// leaves slivers. Measured on `two.dxf` at margin 0 / spacing 6: 0.0054mm of
+/// overhang, five microns, reported by the audit as 71 fatal "part is off the
+/// sheet" issues on a 200-part run. The engine's own guard stays strict - it
+/// is comparing against the sheet it was handed and has no business being
+/// generous - while `nesting::audit` judges the number against a tolerance.
+#[must_use]
+pub fn material_outside_sheet_area(part: &LayeredPolygon, sheet: &LayeredPolygon) -> f64 {
     let outside = match difference_polygons(std::slice::from_ref(&part.points), std::slice::from_ref(&sheet.points), FillRule::NonZero) {
         Ok(r) => r,
-        Err(_) => return true,
+        Err(_) => return f64::INFINITY,
     };
-    if outside.iter().any(|p| polygon_area(p).abs() > 0.0) {
-        return true;
+    let area: f64 = outside.iter().map(|p| polygon_area(p).abs()).sum();
+    if area > 0.0 {
+        return area;
     }
 
-    sheet.children.iter().any(|hole| has_material_overlap(part, hole))
+    // A part in one of the sheet's holes is off the material just as much as
+    // one over its edge, and is reported the same way.
+    sheet.children.iter().filter(|hole| has_material_overlap(part, hole)).map(|_| f64::INFINITY).next().unwrap_or(0.0)
 }
 
 /// A candidate placement's fitness, shaped by which placement type produced

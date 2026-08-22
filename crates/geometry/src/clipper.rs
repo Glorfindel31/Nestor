@@ -96,6 +96,37 @@ pub fn offset(polygon: &[Point], delta: f64) -> Vec<Vec<Point>> {
 /// more than `delta` growth, often exactly `delta`) while flat-cutting each
 /// corner with a single extra segment instead of an arc - about 2x the
 /// original point count on real parts, not ~14x.
+/// Outward offset with a **round** join: every point of the result is at
+/// exactly `delta` from the original boundary, corners included.
+///
+/// This is the one `clearance.rs` needs, and the distinction from
+/// `offset_bevel` is not cosmetic. A bevel caps growth at `delta` but
+/// *under*-grows at a sharp corner - the chord across the corner passes
+/// within `delta * cos(angle / 2)` of the original vertex, which goes to zero
+/// as the corner sharpens. `prepare_sheet` compensates for part padding by
+/// growing the sheet by exactly `spacing / 2`, so a part whose padding is
+/// less than that at some corner has that corner hanging off the real
+/// material once it is placed flush - measured at 1.5mm on `two.dxf`'s
+/// triangles at spacing 6, i.e. scrap.
+///
+/// **The point-count objection turned out not to hold.** `offset_bevel`'s doc
+/// records round being dropped for producing ~14x the points and dominating
+/// NFP cost. Re-measured: `hat_bench` is unchanged in both utilisation and
+/// time (4.6s), and the reference 200-part job goes from 15 sheets to 14 -
+/// exact padding packs *better*, not just more honestly. The multi-sheet
+/// benchmarks pay 1.2-3.4x in time. The 14x figure came from a 4-point
+/// rectangle, and rectangles never reach here at all: `offset_rectangle_exact`
+/// short-circuits them before any Clipper call.
+#[must_use]
+pub fn offset_round(polygon: &[Point], delta: f64) -> Vec<Vec<Point>> {
+    if delta == 0.0 {
+        return vec![polygon.to_vec()];
+    }
+    let paths: Paths<DeepnestScale> = Paths::from(vec![polygon.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()]);
+    let result = inflate(paths, delta, JoinType::Round, EndType::Polygon, 4.0);
+    result.iter().map(|path| path.iter().map(|p| Point::new(p.x(), p.y())).collect()).collect()
+}
+
 pub fn offset_bevel(polygon: &[Point], delta: f64) -> Vec<Vec<Point>> {
     // Same deliberate exact-zero short-circuit as `offset` above, same reason.
     if delta == 0.0 {
