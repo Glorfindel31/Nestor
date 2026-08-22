@@ -243,10 +243,18 @@ fn run(scenario: &Scenario, generations: usize, rotations: u32) {
         println!("  (seed order interleaved across {} part types)", expanded.len());
     }
 
-    let mut ga = GeneticAlgorithm::new(adam, ga_config, Vec::new(), SEED);
-
+    // `NEST_PATTERNS=1` runs `nesting::pattern` instead: optimise one sheet
+    // hard, stamp it as many times as the quantities allow, repeat. See that
+    // module for why, and `PLAN.md` 1.2. A measurement switch like
+    // `NEST_NO_BANDED`, so the two can be compared on identical inputs.
     let started = Instant::now();
-    let result = dispatch::run(&mut ga, &sheets, &parts_by_id, &shape_ids, &placement_config, generations, &|| false, &|_, _| {});
+    let result = if std::env::var("NEST_PATTERNS").is_ok_and(|v| v != "0") {
+        println!("  (pattern replication: {generations} generation(s) per pattern)");
+        nesting::pattern::run(&sheets, adam, &parts_by_id, &shape_ids, &ga_config, &placement_config, generations, SEED, &|| false)
+    } else {
+        let mut ga = GeneticAlgorithm::new(adam, ga_config, Vec::new(), SEED);
+        dispatch::run(&mut ga, &sheets, &parts_by_id, &shape_ids, &placement_config, generations, &|| false, &|_, _| {})
+    };
     let elapsed = started.elapsed();
 
     let Some(result) = result else {
