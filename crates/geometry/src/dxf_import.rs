@@ -411,6 +411,119 @@ fn polyline_profile(verts: &[RealVertex], is_closed: bool, layer: String, tolera
     Some(LayeredPolygon { real_boundary: Some(verts.to_vec()), ..LayeredPolygon::new(points, layer, None) })
 }
 
+/// Samples a DXF `SPLINE` into points.
+///
+/// **Why this is here rather than a crate.** A DXF spline is a clamped,
+/// possibly rational B-spline: control points, a knot vector, and optional
+/// weights. Evaluating one is de Boor's algorithm, which is the twenty lines
+/// below - and nothing else in a NURBS library would be used. The `dxf` crate
+/// parses the fields and stops there.
+///
+/// Real CAD files lean on this constantly. Anything drawn with a freehand or
+/// fitted curve exports as `SPLINE`, and without this such a file imports as
+/// no geometry at all rather than as a bad approximation of some.
+///
+/// Rational splines (a `weight_values` list of the right length) are handled
+/// in homogeneous coordinates; the far more common non-rational case skips
+/// that entirely.
+#[must_use]
+pub fn tessellate_spline(spline: &dxf::entities::Spline, tolerance: f64) -> Vec<Point> {
+    let degree = spline.degree_of_curve.max(1) as usize;
+    let control: Vec<Point> = spline.control_points.iter().map(|p| Point::new(p.x, p.y)).collect();
+    let knots = &spline.knot_values;
+    // A valid clamped B-spline has exactly `points + degree + 1` knots. Junk
+    // that does not satisfy that cannot be evaluated, and guessing at a repair
+    // would invent geometry the drawing does not contain.
+    if control.len() <= degree || knots.len() != control.len() + degree + 1 {
+        return Vec::new();
+    }
+    let weights: Option<&Vec<f64>> = (spline.weight_values.len() == control.len()).then_some(&spline.weight_values);
+
+    // The curve only exists over `knots[degree] ..= knots[n]`; the repeated
+    // knots either side are the clamping.
+    let (lo, hi) = (knots[degree], knots[control.len()]);
+    if !(hi > lo) {
+        return Vec::new();
+    }
+
+    // One sample budget per knot span, from how far that span's control
+    // points wander - a nearly straight span needs two points, a tight curl
+    // needs many. `segment_count` on the span's own polygon length against
+    // `tolerance` is the same sagitta rule the arc and bulge tessellators use.
+    let mut points: Vec<Point> = Vec::new();
+    for span in degree..control.len() {
+        let (a, b) = (knots[span], knots[span + 1]);
+        if b <= a {
+            continue; // repeated knot: no parameter range, no samples
+        }
+        let reach: f64 = control[span - degree..=span].windows(2).map(|w| w[0].distance_to(w[1])).sum();
+        let steps = segment_count(1.0, reach, tolerance).max(2);
+        for i in 0..steps {
+            let t = a + (b - a) * (i as f64) / (steps as f64);
+            points.push(de_boor(t, degree, &control, knots, weights));
+        }
+    }
+    points.push(de_boor(hi, degree, &control, knots, weights));
+    points.dedup_by(|a, b| a.within_distance(*b, 1e-9));
+    points
+}
+
+/// One point on a B-spline, by de Boor's algorithm.
+fn de_boor(t: f64, degree: usize, control: &[Point], knots: &[f64], weights: Option<&Vec<f64>>) -> Point {
+    // The span `t` falls in: the last index whose knot is still <= t, clamped
+    // so the very end of the curve evaluates on the final span rather than
+    // running off the end of the array.
+    let last = control.len() - 1;
+    let mut span = degree;
+    for k in degree..control.len() {
+        if t >= knots[k] {
+            span = k;
+        }
+    }
+    span = span.min(last);
+
+    // Work in homogeneous coordinates so a rational spline needs no separate
+    // path: a non-rational one is simply every weight = 1.
+    let w = |i: usize| weights.map_or(1.0, |v| v[i]);
+    let mut d: Vec<(f64, f64, f64)> = (0..=degree)
+        .map(|j| {
+            let i = span + j - degree;
+            let wi = w(i);
+            (control[i].x * wi, control[i].y * wi, wi)
+        })
+        .collect();
+
+    for r in 1..=degree {
+        for j in (r..=degree).rev() {
+            let i = span + j - degree;
+            let denom = knots[i + degree + 1 - r] - knots[i];
+            let alpha = if denom.abs() < 1e-12 { 0.0 } else { (t - knots[i]) / denom };
+            let (p, q) = (d[j - 1], d[j]);
+            d[j] = (p.0 + (q.0 - p.0) * alpha, p.1 + (q.1 - p.1) * alpha, p.2 + (q.2 - p.2) * alpha);
+        }
+    }
+
+    let (x, y, weight) = d[degree];
+    if weight.abs() < 1e-12 {
+        Point::new(x, y)
+    } else {
+        Point::new(x / weight, y / weight)
+    }
+}
+
+/// Whether a sampled spline comes back to where it started.
+///
+/// The `is_closed` flag is the documented way to say so and real files do not
+/// always set it - LibreCAD writes `flags 4096` on a closed loop, which is not
+/// any documented spline flag - so the geometry is the authority and the flag
+/// is a hint.
+fn spline_is_closed(spline: &dxf::entities::Spline, points: &[Point]) -> bool {
+    if spline.is_closed() || spline.is_periodic() {
+        return true;
+    }
+    matches!((points.first(), points.last()), (Some(a), Some(b)) if a.within_distance(*b, 1e-6) && points.len() > 2)
+}
+
 /// True if an ARC's angular sweep is a full circle (some DXF exporters
 /// represent circles as a 0-360 degree ARC rather than a CIRCLE entity).
 fn arc_is_full_circle(arc: &dxf::entities::Arc) -> bool {
@@ -433,6 +546,24 @@ pub fn entity_to_polygon(entity: &Entity, curve_tolerance: f64) -> Option<Layere
         // rejected outright rather than silently flattened onto XY.
         EntityType::Polyline(poly) if !poly.is_3d_polyline() && !poly.is_3d_polygon_mesh() && !poly.is_polyface_mesh() => {
             polyline_profile(&polyline_real_vertices(poly), poly.is_closed(), layer, curve_tolerance)
+        }
+        // A spline that comes back to its own start is a profile in its own
+        // right; one that does not is an edge for `entity_to_edge` to chain.
+        EntityType::Spline(spline) => {
+            let mut points = tessellate_spline(spline, curve_tolerance);
+            if !spline_is_closed(spline, &points) {
+                return None;
+            }
+            // Drop the duplicated closing point: every consumer here treats a
+            // point list as implicitly closed, and keeping it would leave a
+            // zero-length final edge.
+            if matches!((points.first(), points.last()), (Some(a), Some(b)) if a.within_distance(*b, 1e-6)) {
+                points.pop();
+            }
+            if points.len() < 3 {
+                return None;
+            }
+            Some(LayeredPolygon::new(points, layer, None))
         }
         EntityType::Circle(circle) => {
             let points = tessellate_circle(circle.center.x, circle.center.y, circle.radius, curve_tolerance);
@@ -521,6 +652,13 @@ fn entity_to_edge(entity: &Entity, curve_tolerance: f64) -> Option<Edge> {
             Some(Edge { points: vec![a, b], layer })
         }
         EntityType::Arc(arc) if !arc_is_full_circle(arc) => Some(Edge { points: arc_to_points(arc, curve_tolerance), layer }),
+        EntityType::Spline(spline) => {
+            let points = tessellate_spline(spline, curve_tolerance);
+            // A closed spline is already a profile - `entity_to_polygon` took
+            // it - and offering it here as well would let the chainer emit the
+            // same ring twice.
+            (points.len() >= 2 && !spline_is_closed(spline, &points)).then_some(Edge { points, layer })
+        }
         EntityType::LwPolyline(poly) => open_polyline_edge(&real_boundary_from_vertices(&poly.vertices), poly.is_closed(), layer, curve_tolerance),
         EntityType::Polyline(poly) if !poly.is_3d_polyline() && !poly.is_3d_polygon_mesh() && !poly.is_polyface_mesh() => {
             open_polyline_edge(&polyline_real_vertices(poly), poly.is_closed(), layer, curve_tolerance)
@@ -1195,6 +1333,104 @@ mod tests {
             let dist_from_origin = (p.x * p.x + p.y * p.y).sqrt();
             assert!((dist_from_origin - 1.0).abs() < 0.01, "point {p:?} isn't on the unit circle (dist {dist_from_origin})");
         }
+    }
+
+    /// A `SPLINE` whose answer is known by construction: the standard
+    /// four-arc cubic B-spline circle. Its area has to come out as pi r
+    /// squared, which nothing about the evaluator could fake.
+    #[test]
+    fn a_spline_circle_encloses_the_area_a_circle_should() {
+        const R: f64 = 100.0;
+        // The standard control polygon for a circle as four cubic Bezier
+        // quarter-arcs, with knot multiplicity 3 at each join and the first
+        // point repeated to close - the same 13-point/17-knot structure
+        // LibreCAD writes, which is what makes this a real check on the
+        // evaluator rather than on a hand-rolled approximation. (Two
+        // half-circle segments, the tempting shortcut, is a poor enough fit
+        // to be 1.8% out on area on its own.)
+        const K: f64 = 0.552_284_749_830_793_4; // 4/3 * (sqrt(2) - 1)
+        let c = |x: f64, y: f64| dxf::Point::new(x * R, y * R, 0.0);
+        let control = vec![
+            c(1.0, 0.0), c(1.0, K), c(K, 1.0), c(0.0, 1.0),
+            c(-K, 1.0), c(-1.0, K), c(-1.0, 0.0),
+            c(-1.0, -K), c(-K, -1.0), c(0.0, -1.0),
+            c(K, -1.0), c(1.0, -K), c(1.0, 0.0),
+        ];
+        let knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0, 4.0];
+        let spline = dxf::entities::Spline { degree_of_curve: 3, control_points: control, knot_values: knots, ..Default::default() };
+
+        let points = tessellate_spline(&spline, 0.01);
+        assert!(points.len() > 20, "expected a real tessellation, got {}", points.len());
+        let area = crate::polygon::polygon_area(&points).abs();
+        let expected = std::f64::consts::PI * R * R;
+        assert!(
+            (area - expected).abs() / expected < 0.005,
+            "a spline circle of radius {R} should enclose {expected:.0}, got {area:.0}"
+        );
+    }
+
+    /// Degree 1 is a polyline in spline clothing, so the curve must pass
+    /// exactly through every control point - the cheapest possible check that
+    /// de Boor is indexing its knot spans correctly rather than merely
+    /// producing something smooth.
+    #[test]
+    fn a_degree_one_spline_is_its_own_control_polygon() {
+        let spline = dxf::entities::Spline {
+            degree_of_curve: 1,
+            control_points: vec![dxf::Point::new(0.0, 0.0, 0.0), dxf::Point::new(10.0, 0.0, 0.0), dxf::Point::new(10.0, 5.0, 0.0)],
+            knot_values: vec![0.0, 0.0, 1.0, 2.0, 2.0],
+            ..Default::default()
+        };
+        let points = tessellate_spline(&spline, 0.1);
+        for corner in [Point::new(0.0, 0.0), Point::new(10.0, 0.0), Point::new(10.0, 5.0)] {
+            assert!(points.iter().any(|p| p.within_distance(corner, 1e-6)), "control point {corner:?} missing from {points:?}");
+        }
+        for p in &points {
+            let on_first = p.y.abs() < 1e-6 && (0.0..=10.0).contains(&p.x);
+            let on_second = (p.x - 10.0).abs() < 1e-6 && (0.0..=5.0).contains(&p.y);
+            assert!(on_first || on_second, "degree 1 must stay on the control polygon, got {p:?}");
+        }
+    }
+
+    /// A knot vector that does not match the control points is not a spline
+    /// this can evaluate. It must decline rather than panic or, worse, invent
+    /// a shape - some exporter's malformed entity is not material.
+    #[test]
+    fn a_spline_with_an_impossible_knot_vector_is_declined_not_guessed_at() {
+        let bad = dxf::entities::Spline {
+            degree_of_curve: 3,
+            control_points: vec![dxf::Point::new(0.0, 0.0, 0.0), dxf::Point::new(1.0, 1.0, 0.0)],
+            knot_values: vec![0.0, 1.0],
+            ..Default::default()
+        };
+        assert!(tessellate_spline(&bad, 0.1).is_empty());
+        assert!(tessellate_spline(&dxf::entities::Spline::default(), 0.1).is_empty());
+    }
+
+    /// **The file this was written for.** `CURVY.dxf` is two closed cubic
+    /// splines and nothing else - no polylines, no arcs - and before this the
+    /// importer found no geometry in it at all. The small one sits inside the
+    /// big one, so it has to come back as a hole rather than a second part.
+    #[test]
+    fn a_drawing_made_only_of_splines_imports_as_a_profile_with_its_hole() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/curvy.dxf");
+        let drawing = dxf::Drawing::load_file(path).expect("fixture should parse");
+        let tree = build_polygon_tree(entities_to_polygons(drawing.entities(), 0.02));
+
+        assert_eq!(tree.len(), 1, "one outer profile, not two loose shapes");
+        let shape = &tree[0];
+        assert_eq!(shape.children.len(), 1, "the inner spline is a hole in the outer one");
+
+        let bounds = crate::polygon::get_polygon_bounds(&shape.points).expect("has points");
+        assert!((bounds.width - 477.7).abs() < 1.0, "width {:.2}", bounds.width);
+        assert!((bounds.height - 327.0).abs() < 1.0, "height {:.2}", bounds.height);
+
+        // The hole is a circle drawn as a spline: 99.33mm across encloses
+        // 7750mm2, and a tessellation that is wrong in any interesting way
+        // will not land on that.
+        let hole = crate::polygon::polygon_area(&shape.children[0].points).abs();
+        assert!((hole - 7750.0).abs() < 40.0, "the round hole should enclose ~7750mm2, got {hole:.0}");
+        assert!(polygon_material_area(shape) < crate::polygon::polygon_area(&shape.points).abs(), "the hole must be subtracted from the material area");
     }
 
     /// `real_boundary` exists so a rounded-corner part can be written back
