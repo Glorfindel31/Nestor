@@ -30,6 +30,7 @@ pub struct Binding {
 pub const BINDINGS: &[Binding] = &[
     Binding { keys: "Ctrl+R", description_key: "help_keys_run" },
     Binding { keys: "Ctrl+Z", description_key: "help_keys_undo" },
+    Binding { keys: "Ctrl+Y", description_key: "help_keys_redo" },
     Binding { keys: "Ctrl+L", description_key: "help_keys_console" },
     Binding { keys: "Ctrl+,", description_key: "help_keys_config" },
     Binding { keys: "F1", description_key: "help_keys_help" },
@@ -78,6 +79,12 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Z)) {
         app.undo();
+    }
+
+    // Both spellings: Ctrl+Y is the Windows convention this app is built for,
+    // Ctrl+Shift+Z is what anyone coming from a drawing tool will try first.
+    if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Y)) || ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Z)) {
+        app.redo();
     }
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::L)) {

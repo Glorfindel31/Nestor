@@ -64,6 +64,23 @@ pub struct Snapshot {
     pub locked: std::collections::HashSet<usize>,
 }
 
+/// Moves one step along the edit history: takes the newest state off `from`,
+/// makes it current, and puts the state being left onto `to`. `false` when
+/// there was nothing to move.
+///
+/// Undo and redo are the same operation with the stacks swapped, and writing
+/// it once is what makes them exactly inverse - the failure mode of two
+/// hand-written versions is a redo that pushes a *clone* of the current state
+/// rather than the state itself, which quietly duplicates entries and makes
+/// undo/redo/undo land somewhere other than where it started.
+fn step_history(from: &mut Vec<Snapshot>, to: &mut Vec<Snapshot>, current: &mut Option<Snapshot>) -> bool {
+    let Some(previous) = from.pop() else { return false };
+    if let Some(leaving) = current.replace(previous) {
+        to.push(leaving);
+    }
+    true
+}
+
 impl Snapshot {
     fn from_history(h: &NestSnapshotDto) -> Self {
         Self {
@@ -126,6 +143,10 @@ pub struct App {
     /// edit type is a lot of machinery to get subtly wrong for something
     /// this small.
     undo_stack: Vec<Snapshot>,
+    /// The other half of `undo_stack`: states undone and not yet redone,
+    /// newest last. Cleared by any *new* edit, which is what stops a redo
+    /// from restoring a result that no longer follows from what is on screen.
+    redo_stack: Vec<Snapshot>,
     advanced_open: bool,
 
     // ---- run ----
@@ -237,6 +258,7 @@ impl App {
             settings_open: false,
             console_open: false,
             undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             advanced_open: false,
             running: false,
             progress: 0.0,
@@ -502,6 +524,7 @@ impl App {
         // against the *previous* one would restore a nest that no longer
         // matches the parts list.
         self.undo_stack.clear();
+        self.redo_stack.clear();
         self.snapshot = Some(Snapshot::from_history(&self.history[self.history_index]));
         self.consume_used_remnants();
         self.request_audit();
@@ -595,17 +618,30 @@ impl App {
             self.undo_stack.remove(0);
         }
         self.undo_stack.push(snap.clone());
+        // A fresh edit forks the history: whatever was undone is no longer
+        // reachable from here, and offering it would paste an unrelated
+        // arrangement over the current one.
+        self.redo_stack.clear();
     }
 
     /// Restores the result as it was before the last drag or repack.
     fn undo(&mut self) {
-        match self.undo_stack.pop() {
-            Some(previous) => {
-                self.snapshot = Some(previous);
-                self.request_audit();
-                self.run_status.ok(self.t("undo_done"));
-            }
-            None => self.run_status.ok(self.t("undo_nothing")),
+        if step_history(&mut self.undo_stack, &mut self.redo_stack, &mut self.snapshot) {
+            self.request_audit();
+            self.run_status.ok(self.t("undo_done"));
+        } else {
+            self.run_status.ok(self.t("undo_nothing"));
+        }
+    }
+
+    /// Re-applies the last undone change. Only reachable until the next edit,
+    /// which clears the stack - see `push_undo`.
+    fn redo(&mut self) {
+        if step_history(&mut self.redo_stack, &mut self.undo_stack, &mut self.snapshot) {
+            self.request_audit();
+            self.run_status.ok(self.t("redo_done"));
+        } else {
+            self.run_status.ok(self.t("redo_nothing"));
         }
     }
 
@@ -750,5 +786,37 @@ impl eframe::App for App {
         });
 
         shell::dialogs(self, ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(fitness: f64) -> Snapshot {
+        Snapshot { placements: Vec::new(), fitness, utilisation: 0.0, unplaced_count: 0, unplaced_ids: Vec::new(), locked: Default::default() }
+    }
+
+    /// Undo then redo has to land exactly back where it started, however many
+    /// times it is done - the property the whole feature is, and the one a
+    /// second hand-written stack juggle would break.
+    #[test]
+    fn undo_and_redo_are_inverse() {
+        let (mut undo, mut redo) = (vec![snap(1.0), snap(2.0)], Vec::new());
+        let mut current = Some(snap(3.0));
+
+        assert!(step_history(&mut undo, &mut redo, &mut current));
+        assert_eq!(current.as_ref().unwrap().fitness, 2.0);
+        assert!(step_history(&mut undo, &mut redo, &mut current));
+        assert_eq!(current.as_ref().unwrap().fitness, 1.0);
+        assert!(!step_history(&mut undo, &mut redo, &mut current), "nothing left to undo");
+        assert_eq!(current.as_ref().unwrap().fitness, 1.0, "a failed step must not move anything");
+
+        assert!(step_history(&mut redo, &mut undo, &mut current));
+        assert!(step_history(&mut redo, &mut undo, &mut current));
+        assert_eq!(current.as_ref().unwrap().fitness, 3.0, "back where it started");
+        assert!(redo.is_empty());
+        assert_eq!(undo.len(), 2, "the undo stack must be rebuilt, not duplicated");
+        assert!(!step_history(&mut redo, &mut undo, &mut current));
     }
 }

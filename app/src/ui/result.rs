@@ -318,6 +318,16 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
     painter.rect_filled(rect, 0.0, theme::WELL);
     painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0_f32, band), egui::StrokeKind::Inside);
 
+    // A scrolled-past sheet costs nothing. The space is already allocated, so
+    // the layout is unchanged; what is skipped is tessellating every part and
+    // every hole on it, which on a 120-sheet result was being done for all 120
+    // sheets on every frame to draw the two or three actually on screen.
+    // `canvas::thumbnail` has guarded itself this way from the start; the
+    // sheet canvas never did.
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+
     let editable = app.result_config.is_some() && !app.controls_locked();
     let mut click_to_toggle = None;
     let mut hovered_part = None;
