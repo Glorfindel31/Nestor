@@ -56,7 +56,7 @@ use crate::placement::{NestPart, Placement, PlacedPart};
 /// bounding box onto the first's, and ask whether the two share material.
 /// Anything that tiles its own box in two - triangles, L-shapes,
 /// parallelograms - passes; anything else stays a single unit.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Unit {
     /// `(rotation, dx, dy)` per member, relative to the unit's own box corner.
     members: Vec<(f64, f64, f64)>,
@@ -65,6 +65,19 @@ struct Unit {
     height: f64,
     /// True material area of every member combined.
     area: f64,
+    /// How far along the row the *next copy of this same unit* has to sit -
+    /// which is not the same as the unit's width, and that difference is
+    /// worth a sheet.
+    ///
+    /// Two triangles paired at 180 degrees form a parallelogram. Its bounding
+    /// box is 62mm wider than the lattice it tiles, because the slanted end of
+    /// one copy slots into the slanted end of the next. Advancing a row by the
+    /// box width throws that overhang away every time - on the reference job
+    /// it is the difference between 2 units across and 3, i.e. 14 parts on the
+    /// sheet against 16, 77.1% against 88.1%. Measured on the shells, so it is
+    /// conservative, and only ever used between two copies of the *same* unit
+    /// (see `fill_band`); anything else advances by the full width.
+    step: f64,
 }
 
 impl Unit {
@@ -110,6 +123,52 @@ const ANGLES: [f64; 2] = [0.0, 90.0];
 /// pair box - so this returns the whole Pareto front of those boxes rather
 /// than one winner. See `pareto_front` for why picking one is wrong.
 fn build_units(part: &NestPart, base_rotation: f64, available: usize, curve_tolerance: f64) -> Vec<Unit> {
+    // **Memoised, because none of this depends on the sheet.** A unit
+    // catalogue is a property of the shapes alone, but `pack_sheet` is called
+    // once per sheet, per individual, per generation - so a 15-sheet job at
+    // population 10 over 3 generations rebuilt the identical catalogue 450
+    // times, each one a fistful of Minkowski sums and, since `row_step`, a
+    // bisection of Clipper intersections per unit on top.
+    let key = unit_cache_key(part, base_rotation, available, curve_tolerance);
+    if let Some(hit) = UNIT_CACHE.lock().ok().and_then(|c| c.get(&key).cloned()) {
+        return hit;
+    }
+    let out = build_units_uncached(part, base_rotation, available, curve_tolerance);
+    if let Ok(mut cache) = UNIT_CACHE.lock() {
+        // Same cap policy as `NfpCache`: stop growing, keep what is there.
+        if cache.len() < MAX_UNIT_CACHE_ENTRIES {
+            cache.insert(key, out.clone());
+        }
+    }
+    out
+}
+
+/// Identifies a shape by what `build_units` actually reads off it. `source_id`
+/// alone would be wrong - ids restart with every job, and a cache that lives
+/// as long as the process would then hand a new job the previous one's
+/// geometry - so the outline's own fingerprint is part of the key.
+type UnitCacheKey = (usize, u64, bool, u64, usize, u64, u64);
+
+fn unit_cache_key(part: &NestPart, base_rotation: f64, available: usize, curve_tolerance: f64) -> UnitCacheKey {
+    let first = part.polygon.points.first().copied().unwrap_or(geometry::point::Point::new(0.0, 0.0));
+    (
+        part.source_id,
+        (base_rotation + part.rotation).to_bits(),
+        available >= 2,
+        curve_tolerance.to_bits(),
+        part.polygon.points.len(),
+        polygon_area(&part.polygon.points).to_bits(),
+        (first.x * 1e6 + first.y).to_bits(),
+    )
+}
+
+/// A unit list is a handful of small polygons; this cap is memory insurance
+/// against a pathological job, not a working limit.
+const MAX_UNIT_CACHE_ENTRIES: usize = 4096;
+
+static UNIT_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<UnitCacheKey, Vec<Unit>>>> = std::sync::LazyLock::new(Default::default);
+
+fn build_units_uncached(part: &NestPart, base_rotation: f64, available: usize, curve_tolerance: f64) -> Vec<Unit> {
     let a = rotate_layered_polygon(&part.polygon, base_rotation);
     let Some(ab) = get_polygon_bounds(&a.points) else { return Vec::new() };
     let a_area = polygon_area(&a.points).abs();
@@ -119,7 +178,10 @@ fn build_units(part: &NestPart, base_rotation: f64, available: usize, curve_tole
     // an offset from the polygon's first vertex - puts parts wherever that
     // vertex happens to be, which is how an early version of this put every
     // part off the sheet.
-    let single = Unit { members: vec![(base_rotation, -ab.x, -ab.y)], source_id: part.source_id, width: ab.width, height: ab.height, area: a_area };
+    let a_hull = hull_of(&a);
+    let mut single =
+        Unit { members: vec![(base_rotation, -ab.x, -ab.y)], source_id: part.source_id, width: ab.width, height: ab.height, area: a_area, step: ab.width };
+    single.step = row_step(part, &single);
     if available < 2 {
         return vec![single];
     }
@@ -134,7 +196,6 @@ fn build_units(part: &NestPart, base_rotation: f64, available: usize, curve_tole
     // clear each other, so a pair it finds is always legal (and `pair_is_legal`
     // rechecks against the real outlines regardless). Box sizes below still
     // come from the true bounds, which a hull leaves unchanged.
-    let a_hull = hull_of(&a);
     let mut pairs: Vec<Unit> = Vec::new();
     for extra in PAIR_ANGLES {
         let rotation = base_rotation + extra;
@@ -207,6 +268,7 @@ fn build_units(part: &NestPart, base_rotation: f64, available: usize, curve_tole
                     width,
                     height,
                     area: a_area * 2.0,
+                    step: width,
                 });
             }
         }
@@ -225,6 +287,12 @@ fn build_units(part: &NestPart, base_rotation: f64, available: usize, curve_tole
     // front is single digits by this point - and much cheaper than shipping a
     // sheet the audit rejects.
     out.retain(|u| pair_is_legal(part, u));
+    // After thinning and the legality filter, not before: `row_step` is a
+    // bisection of real intersections and the front arrives here thousands of
+    // samples long.
+    for u in &mut out {
+        u.step = row_step(part, u);
+    }
     out.push(single);
     // **Absolute, not relative.** `part.polygon` arrives already rotated by
     // `part.rotation` (`place_parts` does that on entry), while a
@@ -310,6 +378,55 @@ fn hull_of(poly: &geometry::dxf_import::LayeredPolygon) -> geometry::dxf_import:
         hull
     };
     geometry::dxf_import::LayeredPolygon { points, children: Vec::new(), texts: Vec::new(), real_boundary: None, ..poly.clone() }
+}
+
+/// The tightest horizontal distance at which a unit can repeat along a row
+/// without any of its parts touching the copy's.
+///
+/// Bisected on the shells rather than solved: the shells are convex, so for
+/// any pair of them the overlapping offsets form a single interval and "all
+/// clear" is monotonic in `dx` - which is exactly what makes bisection valid
+/// here. A concave outline could break that, which is one more reason this
+/// runs on shells (see `hull_of`): conservative, never optimistic.
+///
+/// Falls back to the full width whenever the shells still clash at it, so a
+/// shape with no useful overhang costs nothing but the bisection.
+fn row_step(part: &NestPart, unit: &Unit) -> f64 {
+    /// Millimetres. Ten times finer than the 5mm grid `pareto_front` snaps
+    /// boxes to, so the step is never the coarse number in the layout.
+    const RESOLUTION: f64 = 0.5;
+    // Rebuilt here rather than carried on the `Unit`: `fill_band` clones every
+    // catalogue entry on every placement, and hanging two polygons off each
+    // one cost more than this whole measurement saves.
+    let shells: Vec<_> = unit
+        .members
+        .iter()
+        .map(|&(rotation, dx, dy)| {
+            let shell = hull_of(&rotate_layered_polygon(&part.polygon, rotation));
+            geometry::dxf_import::shift_layered_polygon(&shell, dx, dy)
+        })
+        .collect();
+    let clear = |dx: f64| {
+        shells.iter().all(|a| {
+            shells.iter().all(|b| {
+                let shifted = geometry::dxf_import::shift_layered_polygon(b, dx, 0.0);
+                !crate::placement::has_material_overlap(a, &shifted)
+            })
+        })
+    };
+    if !clear(unit.width) {
+        return unit.width;
+    }
+    let (mut lo, mut hi) = (0.0, unit.width);
+    while hi - lo > RESOLUTION {
+        let mid = (lo + hi) / 2.0;
+        if clear(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi
 }
 
 /// Places a unit's members at the origin and asks whether they overlap.
@@ -565,24 +682,36 @@ fn fill_band(
     placed: &mut Vec<PlacedPart>,
     consumed: &mut Vec<usize>,
 ) -> usize {
-    let mut x = sheet_bounds.x;
+    // Two cursors: where the next unit goes if it is a fresh one, and where
+    // it goes if it is another copy of the one just placed. `step` is only
+    // legal between identical units - a different shape slotted into the
+    // overhang would overlap it - so a mixed band pays the full width at every
+    // change of unit, exactly as before.
+    let mut cursor = sheet_bounds.x;
+    let mut cursor_repeat = sheet_bounds.x;
     let right = sheet_bounds.x + sheet_bounds.width;
+    let mut previous: Option<Unit> = None;
     let mut count = 0;
 
     loop {
-        let width_left = right - x;
+        let origin = |u: &Unit| if previous.as_ref() == Some(u) { cursor_repeat } else { cursor };
         let Some(chosen) = shape_options(catalogue, pool)
             .into_iter()
+            .filter(|&u| origin(u) + u.width <= right + f64::EPSILON && u.height <= band_height + f64::EPSILON)
             .cloned()
-            .filter(|u| u.width <= width_left + f64::EPSILON && u.height <= band_height + f64::EPSILON)
             // **Occupancy of the band slice**, not raw area. Two orientations
             // of one shape have identical area, so an area score ties and any
             // width tie-break picks the *wider* one. In a 776.5-tall band that
             // is the 776.5x422.4 orientation: 3 across, 354mm of band height
             // wasted - where 422.4x776.5 fits 5 and fills the band exactly.
             // Dividing by the slice the unit occupies scores those 0.54 vs 1.0.
+            //
+            // The slice is `step`, not `width`: a unit that interlocks with
+            // its own next copy really does occupy only `step` of the row, and
+            // scoring it on its box is what would keep picking a fatter unit
+            // that packs worse.
             .max_by(|a, b| {
-                let occupancy = |u: &Unit| u.area / (u.width * band_height).max(f64::MIN_POSITIVE);
+                let occupancy = |u: &Unit| u.area / (u.step * band_height).max(f64::MIN_POSITIVE);
                 occupancy(a).total_cmp(&occupancy(b)).then(a.area.total_cmp(&b.area))
             })
         else {
@@ -602,6 +731,7 @@ fn fill_band(
             break;
         }
 
+        let x = origin(&chosen);
         for (index, &(rotation, dx, dy)) in taken.iter().zip(chosen.members.iter()) {
             // The engine expresses a placement as a translation applied to the
             // part's own polygon, so convert from "where the box goes" to
@@ -611,8 +741,10 @@ fn fill_band(
             count += 1;
         }
 
-        x += chosen.width;
-        if x >= right {
+        cursor = x + chosen.width;
+        cursor_repeat = x + chosen.step;
+        previous = Some(chosen);
+        if cursor_repeat >= right {
             break;
         }
     }

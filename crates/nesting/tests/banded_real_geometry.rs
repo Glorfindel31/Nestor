@@ -145,6 +145,42 @@ fn band_packing_beats_the_greedy_ceiling_on_pairable_parts() {
     );
 }
 
+/// **The row-step invariant.** A row advances by the distance at which a unit
+/// can repeat, not by the width of its bounding box.
+///
+/// Two of these triangles paired at 180 degrees form a parallelogram whose box
+/// is ~62mm wider than the lattice it tiles, because the slanted end of one
+/// copy slots into the next. Advancing by the box width wastes that overhang
+/// on every unit, which on this sheet is the difference between 2 pair-boxes
+/// across and 3 - 14 parts against 16, 77.1% against 88.1%. 16 is also
+/// exactly what the commercial nester this job was measured against puts on
+/// the same sheet, at the same 6mm spacing, so it is a real ceiling and not a
+/// number picked to match the current code.
+///
+/// One profile only: mixing shapes lets the band packer fill a tail with
+/// something else and hides whether the step itself is being used.
+#[test]
+fn a_row_advances_by_the_lattice_step_not_the_box_width() {
+    let parts: Vec<NestPart> = real_parts(20).into_iter().filter(|p| p.source_id == 1).collect();
+    assert!(!parts.is_empty(), "two.dxf should have a second profile");
+    let sheet = usable_sheet();
+    let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
+    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE).expect("should place something");
+
+    let utilisation = result.area / polygon_area(&sheet.points).abs() * 100.0;
+    assert!(result.placed.len() >= 16, "expected 16 parts on the sheet, got {} at {utilisation:.1}%", result.placed.len());
+
+    // ...and legally. A step measured too short is exactly the failure this
+    // buys, and it would show up as more parts, not fewer.
+    let placed = materialise(&parts, &result);
+    for i in 0..placed.len() {
+        assert!(!has_material_outside_sheet(&placed[i], &sheet), "part {i} hangs off the sheet");
+        for j in (i + 1)..placed.len() {
+            assert!(!has_material_overlap(&placed[i], &placed[j]), "parts {i} and {j} overlap");
+        }
+    }
+}
+
 /// Diagnostic: how much of the pairing loss is the clearance padding?
 ///
 /// If the true outlines pair tightly and only the padded ones do not, the fix
