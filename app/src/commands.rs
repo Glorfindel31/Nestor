@@ -632,6 +632,204 @@ pub fn validate_placement(request: ValidatePlacementRequest) -> Result<ValidateP
     Ok(ValidatePlacementResponse { valid })
 }
 
+/// Loads the saved parts library and remnant shelf.
+///
+/// A corrupt or unreadable store returns `Err`, and the caller is expected to
+/// carry on with an empty library *and say so* rather than treating it as an
+/// empty one. Silently starting blank is how someone loses a library they
+/// spent months building without ever noticing it happened.
+pub fn load_shape_store() -> Result<crate::dto::ShapeStore, String> {
+    let path = crate::paths::shape_store_file()?;
+    if !path.exists() {
+        return Ok(crate::dto::ShapeStore::default());
+    }
+    let json = std::fs::read_to_string(&path).map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
+    serde_json::from_str(&json).map_err(|e| format!("{} is not a readable shape store: {e}", path.display()))
+}
+
+/// Writes the store, atomically.
+///
+/// Temp file plus rename, unlike `save_config`'s plain write: a config lost
+/// to a half-written file costs the user a few settings they can retype, but
+/// this file *is* their saved work. A crash mid-write must leave the previous
+/// version intact rather than a truncated one.
+pub fn save_shape_store(store: &crate::dto::ShapeStore) -> Result<(), String> {
+    let path = crate::paths::shape_store_file()?;
+    let temp = path.with_extension("json.tmp");
+    let json = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
+    std::fs::write(&temp, json).map_err(|e| format!("couldn't write {}: {e}", temp.display()))?;
+    std::fs::rename(&temp, &path).map_err(|e| format!("couldn't replace {}: {e}", path.display()))
+}
+
+/// Computes the reusable offcuts of a finished nest.
+///
+/// Everything geometric is `geometry::remnant`; this resolves ids to shapes
+/// and applies the same `spacing` the nest ran with, so an offcut can never
+/// include material that has to stay attached to a part for clearance.
+///
+/// Deliberately computed for *every* sheet, not only the last one. A job that
+/// leaves four sheets half-empty has four offcuts, and only reporting the
+/// final one would quietly throw the other three away - which is the waste
+/// this whole feature exists to stop.
+pub fn compute_remnants(request: crate::dto::RemnantRequest) -> Result<Vec<crate::dto::RemnantDto>, String> {
+    validate_nest_config(&request.config)?;
+    let spacing = request.config.spacing;
+
+    let parts: HashMap<usize, LayeredPolygon> = request.parts_by_id.into_iter().map(|(id, dto)| (id, dto.into())).collect();
+
+    let mut out = Vec::new();
+    for placement in &request.placements {
+        let Some(sheet_dto) = request.sheets.get(placement.sheet_index) else { continue };
+        let sheet: LayeredPolygon = sheet_dto.clone().into();
+
+        // Outer outlines only - a part's holes are not free material. A
+        // drilled hole belongs to a piece someone is going to pick up, and
+        // treating it as reclaimable would produce offcuts that physically
+        // fall out of the sheet.
+        let placed: Vec<Vec<geometry::point::Point>> = placement
+            .parts
+            .iter()
+            .filter_map(|p| {
+                parts.get(&p.id).map(|poly| {
+                    let rotated = rotate_layered_polygon(poly, p.rotation);
+                    rotated.points.iter().map(|pt| geometry::point::Point::new(pt.x + p.x, pt.y + p.y)).collect()
+                })
+            })
+            .collect();
+
+        for remnant in geometry::remnant::sheet_remnants(&sheet.points, &placed, spacing) {
+            let polygon = LayeredPolygon {
+                points: remnant.outline,
+                layer: sheet.layer.clone(),
+                is_circle: None,
+                children: Vec::new(),
+                texts: Vec::new(),
+                real_boundary: None,
+            };
+            out.push(crate::dto::RemnantDto {
+                sheet_index: placement.sheet_index,
+                polygon: (&polygon).into(),
+                area: remnant.area,
+                usable_width: remnant.usable.width,
+                usable_height: remnant.usable.height,
+            });
+        }
+    }
+    // Biggest first: the useful ones should be at the top of any list this
+    // ends up in.
+    out.sort_by(|a, b| b.area.total_cmp(&a.area));
+    Ok(out)
+}
+
+/// Checks a whole nest result for manufacturability: overlapping parts,
+/// parts off the sheet, and clearances below what was asked for.
+///
+/// The engine validates each part as it places it, but two things can change
+/// a result afterwards - `repack_sheet` and the UI's drag - and neither
+/// re-checks the sheet as a whole. So without this, the arrangement a user
+/// exports is not one anything has ever validated end to end.
+///
+/// Everything geometric lives in `nesting::audit`; this is only the boundary
+/// work - resolve ids to shapes, and build both the true and the padded
+/// outline of each part through the *same* `prepare_sheet`/`prepare_part`
+/// calls `run_nest` used. That last point is what stops the audit from being
+/// a second opinion that can disagree with the nest on a technicality: it
+/// checks the clearances the nest was actually generated under.
+pub fn audit_nest(request: crate::dto::AuditRequest) -> Result<crate::dto::AuditReportDto, String> {
+    use nesting::audit::{audit, AuditPart, AuditSheet};
+
+    validate_nest_config(&request.config)?;
+    let (margin, spacing) = (request.config.margin, request.config.spacing);
+
+    // Each part resolved once, into the pair the audit needs. A part id can
+    // appear on several sheets (different copies of the same shape), so doing
+    // this per placement would redo the Clipper offset for every copy.
+    let mut resolved: HashMap<usize, (LayeredPolygon, LayeredPolygon)> = HashMap::new();
+    for (id, dto) in request.parts_by_id {
+        let poly: LayeredPolygon = dto.into();
+        let padded_points = prepare_part(&poly.points, spacing).ok_or_else(|| format!("spacing leaves part {id} with no usable outline"))?;
+        let padded = LayeredPolygon { points: padded_points, real_boundary: None, ..poly.clone() };
+        resolved.insert(id, (poly, padded));
+    }
+
+    let mut sheets = Vec::with_capacity(request.placements.len());
+    for placement in &request.placements {
+        let dto = request.sheets.get(placement.sheet_index).ok_or_else(|| format!("placement references sheet {} which wasn't supplied", placement.sheet_index))?;
+        let outline: LayeredPolygon = dto.clone().into();
+        let usable_points = prepare_sheet(&outline.points, margin, spacing).ok_or("margin/spacing leaves the sheet with no usable area")?;
+        let usable = LayeredPolygon { points: usable_points, real_boundary: None, ..outline.clone() };
+
+        // A placement naming an id we weren't given is skipped rather than
+        // failing the whole audit: the alternative is that one stale id makes
+        // the check unavailable exactly when someone wants reassurance.
+        let parts = placement
+            .parts
+            .iter()
+            .filter_map(|p| {
+                resolved.get(&p.id).map(|(outline, padded)| {
+                    let rotated = rotate_layered_polygon(outline, p.rotation);
+                    let rotated_padded = rotate_layered_polygon(padded, p.rotation);
+                    AuditPart::placed(p.id, &rotated, &rotated_padded, p.x, p.y)
+                })
+            })
+            .collect();
+
+        sheets.push(AuditSheet { outline, usable, parts });
+    }
+
+    Ok((&audit(&sheets)).into())
+}
+
+/// Turns an audit result into the block the PDF prints.
+///
+/// An audit that failed to *run* prints as an explicit "could not be checked"
+/// rather than being omitted: a missing section reads as "nothing to report",
+/// which is exactly the wrong thing to infer.
+///
+/// The issue list is capped - a badly broken nest can produce hundreds, and a
+/// summary page that becomes a fault listing stops being a summary.
+fn report_audit(result: Result<crate::dto::AuditReportDto, String>) -> Option<geometry::pdf_export::ReportAudit> {
+    const MAX_LISTED: usize = 12;
+    let report = match result {
+        Ok(report) => report,
+        Err(e) => {
+            return Some(geometry::pdf_export::ReportAudit {
+                passed: false,
+                headline: format!("NOT CHECKED - the manufacturability check could not run ({e})"),
+                issues: Vec::new(),
+            })
+        }
+    };
+
+    let headline = if !report.passed {
+        format!("FAILED - {} fatal issue(s), {} warning(s). DO NOT CUT.", report.fatal_count, report.warning_count)
+    } else if report.warning_count > 0 {
+        format!("PASSED with {} warning(s) - cuttable, but not exactly as configured.", report.warning_count)
+    } else {
+        "PASSED - no overlaps, every piece on its sheet, all clearances met.".to_string()
+    };
+
+    let issues = report
+        .issues
+        .iter()
+        .take(MAX_LISTED)
+        .map(|i| {
+            let kind = match i.kind.as_str() {
+                "overlap" => "OVERLAP",
+                "outside_sheet" => "OFF THE SHEET",
+                "below_spacing" => "TOO CLOSE",
+                "outside_margin" => "INSIDE MARGIN",
+                other => other,
+            };
+            let ids = i.part_ids.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(" + ");
+            format!("{kind} - sheet {}, {ids}", i.sheet_index + 1)
+        })
+        .chain((report.issues.len() > MAX_LISTED).then(|| format!("...and {} more", report.issues.len() - MAX_LISTED)))
+        .collect();
+
+    Some(geometry::pdf_export::ReportAudit { passed: report.passed, headline, issues })
+}
+
 /// Writes the PDF job report: a summary page plus one to-scale page per
 /// sheet. Reuses `build_export_layouts` verbatim, so the report draws
 /// exactly what a DXF/SVG export of the same result would contain.
@@ -641,6 +839,19 @@ pub fn validate_placement(request: ValidatePlacementRequest) -> Result<ValidateP
 pub fn export_report(path: &str, request: ReportRequest) -> Result<(), String> {
     let mut export = request.export;
     export.include_unplaced = false;
+
+    // Run the audit here, from the same inputs, rather than accepting a
+    // verdict from the caller: a passed-in result could describe an
+    // arrangement edited since it was computed, and a report that certifies
+    // the wrong nest is worse than one that certifies nothing. Same reasoning
+    // the pdf module already applies to its derived numbers - "the printed
+    // numbers can never disagree with the printed picture".
+    let audit = audit_nest(crate::dto::AuditRequest {
+        sheets: export.sheets.clone(),
+        placements: export.placements.clone(),
+        parts_by_id: export.parts_by_id.clone(),
+        config: request.config.clone(),
+    });
 
     let layouts = build_export_layouts(export)?;
     let config = &request.config;
@@ -656,6 +867,7 @@ pub fn export_report(path: &str, request: ReportRequest) -> Result<(), String> {
             ("Curve tolerance".to_string(), format!("{} mm", config.curve_tolerance)),
             ("Seed".to_string(), config.seed.to_string()),
         ],
+        audit: report_audit(audit),
     };
 
     let bytes = geometry::pdf_export::export_report(&layouts, &meta);
@@ -1270,6 +1482,117 @@ mod tests {
             cleanup_threshold_percent: None,
             mirror: false,
         }
+    }
+
+    /// The engine's own output, with a real margin and spacing, must audit
+    /// completely clean - no warnings either. A nest the engine itself
+    /// produced and considers valid cannot be something the audit complains
+    /// about, or the audit is measuring itself rather than the nest.
+    #[test]
+    fn a_real_nest_with_margin_and_spacing_produces_no_warnings_at_all() {
+        let sheets = vec![square_dto(400.0)];
+        let cfg = NestConfigDto { margin: 5.0, spacing: 5.0, ..config(2) };
+        let response = run_nest(RunNestRequest { sheets: sheets.clone(), parts: vec![part(square_dto(50.0), 12)], config: cfg.clone() }).expect("should nest");
+        assert_eq!(response.unplaced_count, 0, "fixture must place, or this proves nothing");
+
+        let report = audit_nest(crate::dto::AuditRequest {
+            sheets,
+            placements: response.placements.clone(),
+            parts_by_id: response.parts_by_id.clone(),
+            config: cfg,
+        })
+        .expect("audit should run");
+
+        assert_eq!(report.fatal_count, 0, "engine output must not be fatal: {:?}", report.issues);
+        assert_eq!(report.warning_count, 0, "engine output must not warn either: {:?}", report.issues);
+    }
+
+    /// The configuration a user actually runs: TightFit on real irregular
+    /// geometry. TightFit deliberately maximises *contact* between padded
+    /// outlines, which is exactly the condition an exact
+    /// "do these share any area at all" test is most likely to misread.
+    #[test]
+    fn a_tight_fit_nest_on_real_geometry_produces_no_spurious_findings() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/two.dxf");
+        let shapes = import_dxf(path, 0.3).expect("fixture should parse");
+        let shape = shapes.into_iter().next().expect("fixture has parts");
+
+        let sheets = vec![rect_dto(2440.0, 1220.0)];
+        let cfg = NestConfigDto { margin: 5.0, spacing: 5.0, placement_type: PlacementTypeDto::TightFit, rotations: 4, ..config(2) };
+        let response = run_nest(RunNestRequest { sheets: sheets.clone(), parts: vec![part(shape, 8)], config: cfg.clone() }).expect("should nest");
+
+        let report = audit_nest(crate::dto::AuditRequest {
+            sheets,
+            placements: response.placements.clone(),
+            parts_by_id: response.parts_by_id.clone(),
+            config: cfg,
+        })
+        .expect("audit should run");
+
+        assert_eq!(report.fatal_count, 0, "engine output must not be fatal: {:?}", report.issues);
+        assert_eq!(report.warning_count, 0, "engine output must not warn either: {:?}", report.issues);
+    }
+
+    /// The audit's reason for existing, end to end through the real engine:
+    /// a nest the engine produced must pass, and the same nest with one part
+    /// dragged on top of another must fail. A drag is exactly how a user
+    /// creates the second state, and nothing else in the app re-checks it.
+    #[test]
+    fn the_audit_passes_a_real_nest_and_catches_a_part_dragged_onto_another() {
+        let sheets = vec![square_dto(100.0)];
+        let cfg = config(2);
+        let response = run_nest(RunNestRequest { sheets: sheets.clone(), parts: vec![part(square_dto(10.0), 3)], config: cfg.clone() }).expect("should nest");
+        assert_eq!(response.unplaced_count, 0, "the fixture must actually place, or this proves nothing");
+
+        let request = |placements: Vec<SheetPlacementDto>| crate::dto::AuditRequest {
+            sheets: sheets.clone(),
+            placements,
+            parts_by_id: response.parts_by_id.clone(),
+            config: cfg.clone(),
+        };
+
+        let clean = audit_nest(request(response.placements.clone())).expect("audit should run");
+        assert!(clean.passed, "the engine's own output must audit clean: {:?}", clean.issues);
+        assert_eq!(clean.fatal_count, 0);
+
+        // Drag the second part exactly on top of the first.
+        let mut broken = response.placements.clone();
+        let (target_x, target_y) = (broken[0].parts[0].x, broken[0].parts[0].y);
+        let moved_id = broken[0].parts[1].id;
+        broken[0].parts[1].x = target_x;
+        broken[0].parts[1].y = target_y;
+
+        let report = audit_nest(request(broken)).expect("audit should run");
+        assert!(!report.passed, "two parts at the same position must fail the audit");
+        assert!(
+            report.issues.iter().any(|i| i.kind == "overlap" && i.part_ids.contains(&moved_id)),
+            "the overlap must name the part that moved: {:?}",
+            report.issues
+        );
+    }
+
+    /// Clearance shortfalls are advisory, not fatal - reporting them in the
+    /// same voice as destroyed parts is how an audit gets ignored. Nest with
+    /// spacing, then slide two parts to within less than that.
+    #[test]
+    fn the_audit_separates_a_clearance_shortfall_from_a_real_overlap() {
+        let sheets = vec![square_dto(100.0)];
+        let cfg = NestConfigDto { spacing: 6.0, ..config(2) };
+        let response = run_nest(RunNestRequest { sheets: sheets.clone(), parts: vec![part(square_dto(10.0), 2)], config: cfg.clone() }).expect("should nest");
+        assert_eq!(response.unplaced_count, 0);
+
+        // Butt the two parts up 1mm apart - clear of each other, but well
+        // inside the 6mm that was configured.
+        let mut placements = response.placements.clone();
+        let first = placements[0].parts[0];
+        placements[0].parts[1].x = first.x + 11.0;
+        placements[0].parts[1].y = first.y;
+        placements[0].parts[1].rotation = first.rotation;
+
+        let report = audit_nest(crate::dto::AuditRequest { sheets, placements, parts_by_id: response.parts_by_id, config: cfg }).expect("audit should run");
+        assert!(report.passed, "a clearance shortfall must not fail the audit: {:?}", report.issues);
+        assert!(report.warning_count > 0, "...but it must still be reported: {:?}", report.issues);
+        assert!(report.issues.iter().all(|i| i.kind != "overlap"), "parts 1mm apart do not overlap: {:?}", report.issues);
     }
 
     #[test]
@@ -2062,13 +2385,18 @@ mod tests {
         let _ = std::fs::remove_file(&out_path);
     }
 
+    /// End-to-end through the real importer, on the same fixture
+    /// `geometry`'s own `dxf_fixtures.rs` validates: layer identity and the
+    /// hole tree have to survive the DTO boundary too, not just the geometry
+    /// crate's internal types.
     #[test]
-    fn import_dxf_reads_the_real_flat_fixture() {
-        // reuses the same fixture geometry.rs's own dxf_fixtures.rs tests
-        // validate against
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/FLAT.dxf");
+    fn import_dxf_reads_a_real_fixture_with_its_holes_and_layers_intact() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/two.dxf");
         let polygons = import_dxf(path, 0.3).expect("fixture should parse");
-        assert!(!polygons.is_empty());
+        assert_eq!(polygons.len(), 4, "expected 4 outer parts, got {}", polygons.len());
+        let holes: usize = polygons.iter().map(|p| p.children.len()).sum();
+        assert_eq!(holes, 12, "the drilled circles must arrive as children, not as parts");
+        assert!(polygons.iter().flat_map(|p| &p.children).any(|c| c.layer == "VISIBLE"), "layer identity must survive import");
     }
 
     /// Regression test for a real low-density job clustering in an

@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<!-- Regenerated from hat-monotile.dxf by crates/geometry/examples/gen_hat_svg.rs.
+<!-- Regenerated from one.dxf by crates/geometry/examples/gen_hat_svg.rs.
      Coordinates are full-precision on purpose: the previous 8-decimal version
      was a measurably different shape at the engine's 1e-9 tolerance. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="38.9711431702998mm" height="33.75mm" viewBox="0 0 38.9711431702998 33.75">

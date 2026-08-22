@@ -3,7 +3,7 @@
 //! monotile, at 2/20/252 parts on a 500x500mm sheet
 //! (`tests/fixtures/supernesting {2,20,252}part(s) 500x500.dxf`). Each
 //! reference file embeds a `SheetMat`-layer 500x500 sheet outline plus N
-//! already-placed copies of the same hat shape as `tests/fixtures/hat-monotile.dxf`
+//! already-placed copies of the same hat shape as `tests/fixtures/one.dxf`
 //! (confirmed by edge-length signature: 12.99/7.5mm edges, sqrt(3):1 ratio,
 //! matching the hat's kite construction) - `build_polygon_tree`'s containment
 //! nesting puts every part as a child of the sheet root for free, since none
@@ -48,11 +48,11 @@ fn edge_angle(points: &[Point]) -> f64 {
 }
 
 fn main() {
-    let hat_path = repo_root().join("tests/fixtures/hat-monotile.dxf");
+    let hat_path = repo_root().join("tests/fixtures/one.dxf");
     let hat_drawing = Drawing::load_file(&hat_path).unwrap_or_else(|e| panic!("couldn't parse {}: {e}", hat_path.display()));
     let hat_flat = entities_to_polygons(hat_drawing.entities(), CURVE_TOLERANCE);
     let hat_tree = build_polygon_tree(hat_flat);
-    assert_eq!(hat_tree.len(), 1, "expected exactly one closed profile in hat-monotile.dxf");
+    assert_eq!(hat_tree.len(), 1, "expected exactly one closed profile in one.dxf");
     let hat = &hat_tree[0];
     let hat_area = polygon_area(&hat.points).abs();
     let hat_signed_area = polygon_area(&hat.points);

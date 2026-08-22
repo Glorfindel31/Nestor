@@ -27,6 +27,7 @@ use crate::dto::{
     BestResultDto, ExportRequest, NestConfigDto, NestRunCompleteDto, NestRunStartDto, PolygonDto, RepackSheetRequest, RepackSheetResponse, ReportRequest, RunNestRequest, RunNestResponse,
     ValidatePlacementRequest, ValidatePlacementResponse,
 };
+use crate::dto::{AuditReportDto, AuditRequest, RemnantDto, RemnantRequest, ShapeStore};
 
 /// Which exporter a save targets. The three share one request shape
 /// (`ExportRequest`); only PDF needs the extra report metadata.
@@ -79,6 +80,17 @@ pub enum Msg {
 
     Repacked(Box<Result<RepackSheetResponse, String>>),
     Validated(Box<Result<ValidatePlacementResponse, String>>),
+    /// The whole-result manufacturability check. Runs after every nest,
+    /// drag and repack, so the badge can never describe a stale arrangement.
+    Audited(Box<Result<AuditReportDto, String>>),
+
+    /// The saved parts library and remnant shelf, as read from disk.
+    StoreLoaded(Box<Result<ShapeStore, String>>),
+    /// A write finished. Carries the store it wrote so the UI adopts exactly
+    /// what is now on disk, rather than assuming its in-memory copy matched.
+    StoreSaved(Box<Result<ShapeStore, String>>),
+    /// Offcuts harvested from the displayed result.
+    RemnantsComputed(Box<Result<Vec<RemnantDto>, String>>),
     Exported { format: ExportFormat, result: Result<(), String> },
 
     /// Startup: whatever `config.json` and `best_result.json` held.
@@ -230,6 +242,28 @@ impl Worker {
 
     pub fn validate(&self, request: ValidatePlacementRequest) {
         self.spawn(move |emit| emit.send(Msg::Validated(Box::new(commands::validate_placement(request)))));
+    }
+
+    pub fn audit(&self, request: AuditRequest) {
+        self.spawn(move |emit| emit.send(Msg::Audited(Box::new(commands::audit_nest(request)))));
+    }
+
+    pub fn load_store(&self) {
+        self.spawn(|emit| emit.send(Msg::StoreLoaded(Box::new(commands::load_shape_store()))));
+    }
+
+    /// Writes the store and reports back what it wrote. The whole store goes
+    /// over rather than a delta: it is a few kilobytes, and a delta protocol
+    /// is a way to get the UI and the file out of step for no measurable gain.
+    pub fn save_store(&self, store: ShapeStore) {
+        self.spawn(move |emit| {
+            let result = commands::save_shape_store(&store).map(|()| store);
+            emit.send(Msg::StoreSaved(Box::new(result)));
+        });
+    }
+
+    pub fn compute_remnants(&self, request: RemnantRequest) {
+        self.spawn(move |emit| emit.send(Msg::RemnantsComputed(Box::new(commands::compute_remnants(request)))));
     }
 
     pub fn export(&self, format: ExportFormat, path: std::path::PathBuf, request: ExportRequest, report: Option<ReportRequest>) {

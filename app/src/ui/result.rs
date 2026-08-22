@@ -40,6 +40,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(8.0);
         ui.label(RichText::new(app.t("drag_hint")).color(theme::DIM).small());
         sheets(app, ui);
+        super::library::offcut_controls(app, ui);
         ui.add_space(8.0);
         export_controls(app, ui);
     });
@@ -49,6 +50,12 @@ fn history_selector(app: &mut App, ui: &mut egui::Ui) {
     if app.history.len() <= 1 {
         return;
     }
+    // Clicking a point on the chart selects that attempt, exactly as the
+    // combo below does - so both routes go through `show_attempt`.
+    if let Some(clicked) = super::history_chart::chart(app, ui) {
+        show_attempt(app, clicked);
+    }
+    ui.add_space(4.0);
     let lang = app.prefs.lang;
     let last = app.history.len() - 1;
     let label_for = |i: usize, h: &crate::dto::NestSnapshotDto| {
@@ -72,15 +79,26 @@ fn history_selector(app: &mut App, ui: &mut egui::Ui) {
                 ui.selectable_value(&mut chosen, i, label_for(i, h));
             }
         });
-        if chosen != app.history_index {
-            app.history_index = chosen;
-            // A fresh Snapshot, so pins from the previously viewed attempt
-            // don't leak onto a different set of placements.
-            app.snapshot = Some(Snapshot::from_history(&app.history[chosen]));
-        }
+        show_attempt(app, chosen);
     })
     .response
     .on_hover_text(app.t("view_attempt_tooltip"));
+}
+
+/// Switches the displayed attempt. Shared by the chart and the combo box so
+/// the two can't drift - in particular so both rebuild the `Snapshot` rather
+/// than only moving the index.
+fn show_attempt(app: &mut App, index: usize) {
+    if index == app.history_index || index >= app.history.len() {
+        return;
+    }
+    app.history_index = index;
+    // A fresh Snapshot, so pins from the previously viewed attempt don't leak
+    // onto a different set of placements.
+    app.snapshot = Some(Snapshot::from_history(&app.history[index]));
+    // A different attempt is a different arrangement - the badge must not
+    // carry the previous one's verdict across.
+    app.request_audit();
 }
 
 fn stats(app: &App, ui: &mut egui::Ui) {
@@ -97,7 +115,72 @@ fn stats(app: &App, ui: &mut egui::Ui) {
         stat("stat_utilisation", format!("{:.1}%", snap.utilisation));
         stat("stat_unplaced", snap.unplaced_count.to_string());
         stat("stat_sheets_used", snap.placements.len().to_string());
+        audit_badge(app, ui);
     });
+}
+
+/// The manufacturability verdict, as one word in the stats row.
+///
+/// Four states, deliberately - "not checked" is not folded into "passed".
+/// The whole value of the badge is that it distinguishes an arrangement
+/// something verified from one nobody did, and defaulting the unknown case
+/// to green would destroy exactly that.
+fn audit_badge(app: &App, ui: &mut egui::Ui) {
+    let lang = app.prefs.lang;
+    let (key, color, detail) = match (&app.audit, app.auditing) {
+        (_, true) => ("audit_checking", theme::DIM, "audit_checking_tooltip"),
+        (None, false) => ("audit_unknown", theme::DIM, "audit_unknown_tooltip"),
+        (Some(r), false) if !r.passed => ("audit_failed", theme::ERROR, "audit_failed_tooltip"),
+        (Some(r), false) if r.warning_count > 0 => ("audit_warned", theme::ACCENT, "audit_warned_tooltip"),
+        (Some(_), false) => ("audit_passed", theme::OK, "audit_passed_tooltip"),
+    };
+    ui.vertical(|ui| {
+        ui.label(RichText::new(super::i18n::t(lang, "stat_audit")).color(theme::DIM).small());
+        let text = match &app.audit {
+            // The counts are the actionable part - "3 ISSUES" sends someone
+            // looking, "FAILED" only makes them wonder.
+            Some(r) if !app.auditing && !r.passed => super::i18n::tv(lang, "audit_failed_count", &[("n", &r.fatal_count.to_string())]),
+            Some(r) if !app.auditing && r.warning_count > 0 => super::i18n::tv(lang, "audit_warned_count", &[("n", &r.warning_count.to_string())]),
+            _ => super::i18n::t(lang, key).to_string(),
+        };
+        ui.label(RichText::new(text).color(color).strong().family(theme::heavy())).on_hover_text(audit_detail(app, super::i18n::t(lang, detail)));
+    });
+    ui.add_space(20.0);
+}
+
+/// Tooltip: the generic explanation, plus the specific offenders when there
+/// are any. Capped, because a badly broken nest can produce hundreds and a
+/// tooltip taller than the window helps nobody.
+fn audit_detail(app: &App, base: &str) -> String {
+    const MAX_LISTED: usize = 8;
+    let Some(report) = &app.audit else { return base.to_string() };
+    if report.issues.is_empty() {
+        return base.to_string();
+    }
+    let lang = app.prefs.lang;
+    let mut out = base.to_string();
+    for issue in report.issues.iter().take(MAX_LISTED) {
+        let ids = issue.part_ids.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(" + ");
+        out.push_str(&format!("
+{} - sheet {}, {}", super::i18n::t(lang, audit_kind_key(&issue.kind)), issue.sheet_index + 1, ids));
+    }
+    if report.issues.len() > MAX_LISTED {
+        out.push_str(&super::i18n::tv(lang, "audit_more", &[("n", &(report.issues.len() - MAX_LISTED).to_string())]));
+    }
+    out
+}
+
+/// Maps the wire-format issue kind onto its translated label. An unknown
+/// string renders as itself rather than being dropped - a report from a newer
+/// engine should still be readable, not silently shortened.
+fn audit_kind_key(kind: &str) -> &str {
+    match kind {
+        "overlap" => "audit_kind_overlap",
+        "outside_sheet" => "audit_kind_outside_sheet",
+        "below_spacing" => "audit_kind_below_spacing",
+        "outside_margin" => "audit_kind_outside_margin",
+        other => other,
+    }
 }
 
 fn unplaced(app: &App, ui: &mut egui::Ui) {
@@ -425,6 +508,9 @@ impl App {
                     }
                     snap.locked.insert(id);
                 }
+                // The drag was checked against this one part; the audit is
+                // what confirms the sheet as a whole is still sound.
+                self.request_audit();
                 let msg = super::i18n::tv(self.prefs.lang, "drag_placed", &[("id", &id.to_string())]);
                 self.run_status.ok(msg);
             }

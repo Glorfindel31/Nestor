@@ -47,6 +47,16 @@ pub fn best_result_file() -> Result<PathBuf, String> {
     Ok(dir_from(dirs::config_dir(), "config", None)?.join("best_result.json"))
 }
 
+/// The saved parts library and remnant shelf, alongside `config_file`.
+///
+/// One file for both, because they are the same thing to the code that reads
+/// them - a named polygon someone wants back later - and splitting them would
+/// mean two versioned formats, two atomic writes and two failure modes for no
+/// difference the user can see.
+pub fn shape_store_file() -> Result<PathBuf, String> {
+    Ok(dir_from(dirs::config_dir(), "config", None)?.join("shapes.json"))
+}
+
 /// `%LOCALAPPDATA%\net.deepnest.rust\logs\rustynesting.log` on Windows (was
 /// `app_log_dir()`); the platform's local-data directory elsewhere.
 pub fn log_file() -> Result<PathBuf, String> {

@@ -24,6 +24,13 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
                 }
                 let any_selected = app.shapes.iter().any(|s| s.selected);
                 if ui
+                    .add_enabled(any_selected && !app.controls_locked(), egui::Button::new(app.t("library_save_selected")))
+                    .on_hover_text(app.t("library_save_selected_tooltip"))
+                    .clicked()
+                {
+                    super::library::save_selected_parts(app);
+                }
+                if ui
                     .add_enabled(any_selected && !app.controls_locked(), egui::Button::new(RichText::new(app.t("btn_remove_selected")).color(theme::ERROR)))
                     .on_hover_text(app.t("btn_remove_selected_tooltip"))
                     .clicked()
@@ -45,8 +52,63 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
             return;
         }
         ui.add_space(6.0);
+        bulk_row(app, ui);
         table(app, ui);
     });
+}
+
+/// Apply one value to every ticked row at once.
+///
+/// The table already had multi-select (it drives REMOVE SELECTED), but every
+/// per-row value still had to be set one row at a time - so a job of eighty
+/// imported parts meant eighty dropdown interactions to say the one thing
+/// that was true of all of them. Grain is the case that forced this: it is a
+/// property of the material, so it is almost always the same answer for the
+/// whole job.
+fn bulk_row(app: &mut App, ui: &mut egui::Ui) {
+    let lang = app.prefs.lang;
+    let selected = app.shapes.iter().filter(|s| s.selected).count();
+    // Disabled rather than hidden when nothing is ticked: a control that
+    // appears only once you have already done the thing it depends on is a
+    // control nobody discovers.
+    let enabled = selected > 0 && !app.controls_locked();
+
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(super::i18n::t(lang, "bulk_label")).color(theme::DIM).small()).on_hover_text(super::i18n::t(lang, "bulk_tooltip"));
+
+        let mut applied = false;
+        ui.add_enabled_ui(enabled, |ui| {
+            shell::choice(ui, "bulk_rot", &mut app.bulk_rot, &RotRule::ALL, |r| super::i18n::t(lang, r.key()).to_string());
+            let rot = app.bulk_rot;
+            if ui.button(super::i18n::t(lang, "th_grain")).clicked() {
+                app.shapes.iter_mut().filter(|s| s.selected).for_each(|s| s.rot = rot);
+                applied = true;
+            }
+
+            shell::choice(ui, "bulk_mirror", &mut app.bulk_mirror, &MirrorRule::ALL, |m| super::i18n::t(lang, m.key()).to_string());
+            let mirror = app.bulk_mirror;
+            if ui.button(super::i18n::t(lang, "th_part_mirror")).clicked() {
+                app.shapes.iter_mut().filter(|s| s.selected).for_each(|s| s.mirror = mirror);
+                applied = true;
+            }
+
+            ui.add(egui::DragValue::new(&mut app.bulk_qty).speed(0.2).range(0..=100_000));
+            let qty = app.bulk_qty;
+            if ui.button(super::i18n::t(lang, "bulk_apply_qty")).clicked() {
+                app.shapes.iter_mut().filter(|s| s.selected).for_each(|s| s.qty = qty);
+                applied = true;
+            }
+        });
+
+        if applied {
+            // Said out loud because the change lands on rows that may be
+            // scrolled out of sight - otherwise pressing the button looks
+            // like it did nothing at all.
+            let msg = super::i18n::tv(lang, "bulk_applied", &[("n", &selected.to_string())]);
+            app.console.log(super::console::Kind::Plain, msg);
+        }
+    });
+    ui.add_space(4.0);
 }
 
 fn table(app: &mut App, ui: &mut egui::Ui) {

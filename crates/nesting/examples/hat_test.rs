@@ -1,6 +1,6 @@
 //! One-off benchmark against a real third-party DXF fixture: the aperiodic
-//! "hat" monotile (github.com/christianp/aperiodic-monotile/hat-monotile.dxf,
-//! copied to `tests/fixtures/hat-monotile.dxf`), N copies on a single
+//! "hat" monotile (github.com/christianp/aperiodic-monotile/one.dxf,
+//! copied to `tests/fixtures/one.dxf`), N copies on a single
 //! 500x500mm sheet, no margin/spacing. The user ran this same job on the
 //! "supernesting" online tool at N=2/20/252 and got 0.62%/6.24%/78.57%
 //! utilisation respectively - this checks whether this project's NFP+GA
@@ -98,11 +98,11 @@ fn main() {
     let part_count: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(252);
     let target_utilisation_pct = target_utilisation_pct(part_count);
 
-    let fixture = repo_root().join("tests/fixtures/hat-monotile.dxf");
+    let fixture = repo_root().join("tests/fixtures/one.dxf");
     let drawing = Drawing::load_file(&fixture).unwrap_or_else(|e| panic!("couldn't parse {}: {e}", fixture.display()));
     let flat = entities_to_polygons(drawing.entities(), CURVE_TOLERANCE);
     let tree = build_polygon_tree(flat);
-    assert_eq!(tree.len(), 1, "expected exactly one closed profile in hat-monotile.dxf, got {}", tree.len());
+    assert_eq!(tree.len(), 1, "expected exactly one closed profile in one.dxf, got {}", tree.len());
     let hat = &tree[0];
 
     let raw_area = polygon_area(&hat.points).abs();

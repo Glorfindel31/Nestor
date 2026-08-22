@@ -2,6 +2,20 @@
 resolver = "2"
 members = ["crates/geometry", "crates/nesting", "app"]
 
+# The placement hot path crosses the geometry -> nesting crate boundary on
+# every candidate, which is what LTO exists to inline across. Costs ~4x the
+# release link time; `cargo test` is unaffected.
+#
+# Deliberately NOT set:
+# - `opt-level = "z"`: this workload is compute-bound, size is not the
+#   constraint.
+# - `panic = "abort"`: `worker.rs` spawns a thread per job and never joins it,
+#   so today a panicking job dies alone and the app survives with the session
+#   intact. Aborting would take the whole window down instead.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
 [workspace.package]
 version = "2.3.1"
 edition = "2021"

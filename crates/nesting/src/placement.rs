@@ -135,7 +135,7 @@ pub const TIGHT_FIT_PROBE_DISTANCE: f64 = 1.0;
 /// the two boxes' contents genuinely cannot produce any overlap once each
 /// is buffered outward by `distance`, so `PlacementType::TightFit` can skip
 /// the real Clipper offset/intersection entirely for that pair.
-fn bounds_within_distance(a: &Bounds, b: &Bounds, distance: f64) -> bool {
+pub fn bounds_within_distance(a: &Bounds, b: &Bounds, distance: f64) -> bool {
     a.x <= b.x + b.width + distance && b.x <= a.x + a.width + distance && a.y <= b.y + b.height + distance && b.y <= a.y + a.height + distance
 }
 
@@ -400,7 +400,7 @@ fn get_hull_or_fallback(points: &[Point]) -> Vec<Point> {
 
 /// Port of `hasMaterialOverlap`: true if `a` and `b` share any non-zero-area
 /// material, after subtracting both polygons' own holes from the overlap.
-fn has_material_overlap(a: &LayeredPolygon, b: &LayeredPolygon) -> bool {
+pub fn has_material_overlap(a: &LayeredPolygon, b: &LayeredPolygon) -> bool {
     let intersection = match intersection_polygons(std::slice::from_ref(&a.points), std::slice::from_ref(&b.points), FillRule::NonZero) {
         Ok(r) if !r.is_empty() => r,
         _ => return false,
@@ -429,7 +429,7 @@ fn has_material_overlap(a: &LayeredPolygon, b: &LayeredPolygon) -> bool {
 
 /// Port of `hasMaterialOutsideSheet`: true if any of `part` falls outside
 /// `sheet`'s outer boundary, or overlaps one of the sheet's own holes.
-fn has_material_outside_sheet(part: &LayeredPolygon, sheet: &LayeredPolygon) -> bool {
+pub fn has_material_outside_sheet(part: &LayeredPolygon, sheet: &LayeredPolygon) -> bool {
     let outside = match difference_polygons(std::slice::from_ref(&part.points), std::slice::from_ref(&sheet.points), FillRule::NonZero) {
         Ok(r) => r,
         Err(_) => return true,

@@ -26,8 +26,8 @@
 //! Sheet is a plain 2440x1220mm rectangle with a 3mm margin and 6.5mm
 //! spacing applied via `geometry::clearance::prepare_sheet`/`prepare_part`
 //! (see that module's doc comment for the margin-vs-spacing derivation).
-//! Parts are every closed profile in *both* `tests/fixtures/FLAT.dxf` and
-//! `tests/fixtures/FLAT-struck.dxf` (two real cut layouts, combined into one
+//! Parts are every closed profile in *both* `tests/fixtures/two.dxf` and
+//! `tests/fixtures/three.dxf` (two real cut layouts, combined into one
 //! part pool - ids continue across the second file rather than restarting
 //! at 0, so they stay unique). Holes aren't re-offset - the padding is a
 //! keep-out zone around the *outside* of a part for inter-part clearance,
@@ -37,7 +37,7 @@
 //! computed minimum (total part area / sheet area, at the ~90% packing
 //! efficiency real runs actually achieve) instead of being a bare guess - a
 //! previous pass used a guessed 40, which turned out to be below the true
-//! minimum for `FLAT.dxf` alone, leaving parts structurally unable to fit
+//! minimum for `two.dxf` alone, leaving parts structurally unable to fit
 //! regardless of GA quality and confounding the "why doesn't more compute
 //! time help" result. Panics with the real numbers instead of silently
 //! under-providing sheets again.
@@ -74,7 +74,7 @@ const CURVE_TOLERANCE: f64 = 0.3;
 /// use a slightly more conservative 90% here so the startup check has a
 /// small margin of its own rather than asserting against the exact figure.
 const ASSUMED_PACKING_EFFICIENCY: f64 = 0.9;
-const FIXTURES: &[&str] = &["FLAT.dxf", "FLAT-struck.dxf"];
+const FIXTURES: &[&str] = &["two.dxf", "three.dxf"];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")

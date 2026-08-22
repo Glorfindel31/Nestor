@@ -1,5 +1,5 @@
-//! Integration test against the real `hat-monotile.svg` fixture - the SVG
-//! counterpart to `hat-monotile.dxf` (see `dxf_fixtures.rs`). Both files
+//! Integration test against the real `one.svg` fixture - the SVG
+//! counterpart to `one.dxf` (see `dxf_fixtures.rs`). Both files
 //! describe the exact same real-world 13-sided "hat" aperiodic monotile, so
 //! importing each and translating to a common origin (its own bounding-box
 //! corner) must produce the identical point sequence - same winding, same
@@ -37,13 +37,13 @@ fn normalize(points: &[Point]) -> Vec<(f64, f64)> {
 
 #[test]
 fn svg_import_matches_dxf_import_for_the_same_real_world_hat_tile() {
-    let drawing = Drawing::load_file(fixture_path("hat-monotile.dxf")).expect("hat-monotile.dxf should parse");
+    let drawing = Drawing::load_file(fixture_path("one.dxf")).expect("one.dxf should parse");
     let dxf_flat = entities_to_polygons(drawing.entities(), 0.1);
-    assert_eq!(dxf_flat.len(), 1, "expected exactly one closed profile in hat-monotile.dxf");
+    assert_eq!(dxf_flat.len(), 1, "expected exactly one closed profile in one.dxf");
 
-    let svg_text = std::fs::read_to_string(fixture_path("hat-monotile.svg")).expect("hat-monotile.svg should read");
-    let svg_flat = parse_svg(&svg_text, 0.1, None).expect("hat-monotile.svg should parse");
-    assert_eq!(svg_flat.len(), 1, "expected exactly one closed profile in hat-monotile.svg");
+    let svg_text = std::fs::read_to_string(fixture_path("one.svg")).expect("one.svg should read");
+    let svg_flat = parse_svg(&svg_text, 0.1, None).expect("one.svg should parse");
+    assert_eq!(svg_flat.len(), 1, "expected exactly one closed profile in one.svg");
 
     let dxf_area = polygon_area(&dxf_flat[0].points).abs();
     let svg_area = polygon_area(&svg_flat[0].points).abs();

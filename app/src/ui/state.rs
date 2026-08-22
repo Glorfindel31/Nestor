@@ -29,6 +29,36 @@ pub struct ShapeRow {
     /// once imported, and the DOMINANT indicator re-reads this on every
     /// frame for every row.
     pub area: f64,
+    /// The library entry this row came from, if any.
+    ///
+    /// Carried so a remnant can be marked consumed once it has actually been
+    /// nested onto - without it the offcut shelf only ever grows, and the
+    /// same physical piece of material gets offered again for every future
+    /// job. Rows that were imported from a file have no store entry and stay
+    /// `None`.
+    pub from_store: Option<usize>,
+}
+
+impl ShapeRow {
+    /// The single constructor. Two nearly-identical inlined literals existed
+    /// before (one for import, one for the library) and adding a field meant
+    /// remembering both; this makes forgetting one a compile error instead of
+    /// a silently half-initialised row.
+    pub fn new(ui_id: usize, file: String, poly: PolygonDto) -> Self {
+        let area = polygon_area(&poly.points);
+        Self {
+            ui_id,
+            file,
+            poly,
+            role: Role::Part,
+            qty: 1,
+            rot: RotRule::Any,
+            mirror: MirrorRule::Job,
+            selected: false,
+            area,
+            from_store: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -59,10 +89,18 @@ pub enum RotRule {
     Half,
     Quarter,
     Fixed,
+    /// 90 degrees only. The mirror image of `Fixed`, and not reachable by any
+    /// combination of the others: a part whose grain runs along its own Y
+    /// axis has to be turned a quarter turn to lie along the material's
+    /// grain, and must then stay there.
+    Fixed90,
+    /// 90 / 270 - the quarter-turn counterpart of `Half`, for a grained part
+    /// that has been drawn across the grain rather than along it.
+    HalfCross,
 }
 
 impl RotRule {
-    pub const ALL: [RotRule; 4] = [RotRule::Any, RotRule::Half, RotRule::Quarter, RotRule::Fixed];
+    pub const ALL: [RotRule; 6] = [RotRule::Any, RotRule::Half, RotRule::Quarter, RotRule::Fixed, RotRule::Fixed90, RotRule::HalfCross];
 
     pub fn key(self) -> &'static str {
         match self {
@@ -70,7 +108,21 @@ impl RotRule {
             RotRule::Half => "rot_0_180",
             RotRule::Quarter => "rot_quarter",
             RotRule::Fixed => "rot_fixed",
+            RotRule::Fixed90 => "rot_fixed_90",
+            RotRule::HalfCross => "rot_90_270",
         }
+    }
+
+    /// Reverse of `angles` - recovers the rule a saved part was stored with.
+    ///
+    /// The store keeps the *angles*, not the enum name, so an entry written
+    /// by an older build still loads when a new variant is added. Anything
+    /// that doesn't match a known rule falls back to `Any`: an unrecognised
+    /// constraint must not silently become a different constraint.
+    #[must_use]
+    pub fn from_angles(angles: Option<&[f64]>) -> Self {
+        let Some(angles) = angles else { return RotRule::Any };
+        RotRule::ALL.into_iter().find(|r| r.angles().as_deref() == Some(angles)).unwrap_or(RotRule::Any)
     }
 
     pub fn angles(self) -> Option<Vec<f64>> {
@@ -79,6 +131,8 @@ impl RotRule {
             RotRule::Half => Some(vec![0.0, 180.0]),
             RotRule::Quarter => Some(vec![0.0, 90.0, 180.0, 270.0]),
             RotRule::Fixed => Some(vec![0.0]),
+            RotRule::Fixed90 => Some(vec![90.0]),
+            RotRule::HalfCross => Some(vec![90.0, 270.0]),
         }
     }
 }
@@ -100,6 +154,16 @@ impl MirrorRule {
             MirrorRule::Job => "mirror_job",
             MirrorRule::Allow => "mirror_allow",
             MirrorRule::Deny => "mirror_deny",
+        }
+    }
+
+    /// Reverse of `as_option`.
+    #[must_use]
+    pub fn from_option(value: Option<bool>) -> Self {
+        match value {
+            None => MirrorRule::Job,
+            Some(true) => MirrorRule::Allow,
+            Some(false) => MirrorRule::Deny,
         }
     }
 
@@ -299,6 +363,38 @@ impl Status {
     pub fn clear(&mut self) {
         self.text.clear();
         self.error = false;
+    }
+}
+
+#[cfg(test)]
+mod rule_round_trip_tests {
+    use super::*;
+
+    /// A saved library part must come back with the grain rule it went in
+    /// with. Without the reverse mapping the library silently hands back an
+    /// unconstrained copy, and a part that may only be cut along the grain
+    /// becomes free to rotate - which is not a UI nicety, it is scrap.
+    #[test]
+    fn every_rotation_rule_survives_a_store_round_trip() {
+        for rule in RotRule::ALL {
+            let stored = rule.angles();
+            assert_eq!(RotRule::from_angles(stored.as_deref()), rule, "{rule:?} did not survive the round trip");
+        }
+    }
+
+    #[test]
+    fn every_mirror_rule_survives_a_store_round_trip() {
+        for rule in MirrorRule::ALL {
+            assert_eq!(MirrorRule::from_option(rule.as_option()), rule, "{rule:?} did not survive the round trip");
+        }
+    }
+
+    /// An angle set written by some future build must not silently become a
+    /// *different* constraint - falling back to unconstrained is the only
+    /// honest answer for a rule this build cannot express.
+    #[test]
+    fn an_unknown_angle_set_falls_back_to_unconstrained() {
+        assert_eq!(RotRule::from_angles(Some(&[17.0, 191.0])), RotRule::Any);
     }
 }
 

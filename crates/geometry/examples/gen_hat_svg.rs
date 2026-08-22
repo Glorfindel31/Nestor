@@ -1,4 +1,4 @@
-//! Regenerates `tests/fixtures/hat-monotile.svg` from `hat-monotile.dxf` at
+//! Regenerates `tests/fixtures/one.svg` from `one.dxf` at
 //! full float precision.
 //!
 //! The original fixture was hand-exported with coordinates rounded to 8
@@ -21,7 +21,7 @@ fn fixture(name: &str) -> std::path::PathBuf {
 }
 
 fn main() {
-    let drawing = Drawing::load_file(fixture("hat-monotile.dxf")).unwrap();
+    let drawing = Drawing::load_file(fixture("one.dxf")).unwrap();
     let points = entities_to_polygons_chained(drawing.entities(), 0.1).remove(0).points;
 
     let min_x = points.iter().map(|p| p.x).fold(f64::MAX, f64::min);
@@ -37,7 +37,7 @@ fn main() {
     let svg = format!(
         concat!(
             "<?xml version=\"1.0\"?>\n",
-            "<!-- Regenerated from hat-monotile.dxf by crates/geometry/examples/gen_hat_svg.rs.\n",
+            "<!-- Regenerated from one.dxf by crates/geometry/examples/gen_hat_svg.rs.\n",
             "     Coordinates are full-precision on purpose: the previous 8-decimal version\n",
             "     was a measurably different shape at the engine's 1e-9 tolerance. -->\n",
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}mm\" height=\"{h}mm\" viewBox=\"0 0 {w} {h}\">\n",
@@ -52,7 +52,7 @@ fn main() {
         rest = d[1..].join(" L")
     );
 
-    let path = fixture("hat-monotile.svg");
+    let path = fixture("one.svg");
     std::fs::write(&path, svg).unwrap();
     println!("wrote {}", path.display());
 }

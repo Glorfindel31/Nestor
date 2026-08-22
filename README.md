@@ -1,12 +1,13 @@
 # RustyNesting
 
-Help me paye for tokens
+Help me pay for tokens
 https://ko-fi.com/glorfindel31
 
-A from-scratch Rust + Tauri rewrite of [Deepnest](https://deepnest.net/), the
-open-source nesting tool for laser/CNC/waterjet cutting. Import DXF parts and
-stock sheets, let a genetic-algorithm engine pack the parts onto the sheets
-with as little wasted material as possible, export the result back to DXF.
+A from-scratch Rust rewrite of [Deepnest](https://deepnest.net/), the
+open-source nesting tool for laser/CNC/waterjet cutting. Import DXF or SVG
+parts and stock sheets, let a genetic-algorithm engine pack the parts onto the
+sheets with as little wasted material as possible, export the result back to
+DXF or SVG.
 
 The original Deepnest is an Electron app that coordinates its parallel
 nesting workers across separate `BrowserWindow` processes over IPC, since
@@ -15,11 +16,15 @@ real shared-memory threading (Rust + [rayon](https://github.com/rayon-rs/rayon))
 eliminating an entire class of process-coordination bugs by construction
 rather than patching around them.
 
+It is a single native binary. No webview, no IPC, no HTML/CSS/JS — the UI is
+Rust ([egui](https://github.com/emilk/egui)/eframe) drawing directly from the
+same data the engine works on.
+
 ## Status
 
 Actively being ported/rewritten. Geometry core, the NFP (no-fit-polygon)
 engine, the placement/GA/concurrency model, sheet consolidation and
-repacking, and a real Tauri UI are all in place and covered by unit tests.
+repacking, and the full native UI are all in place and covered by unit tests.
 See [`docs/PORT_STATUS.md`](docs/PORT_STATUS.md) for the living, detailed
 breakdown of what's ported, what's deliberately not ported, and what's still
 outstanding — check it before assuming something is or isn't done.
@@ -28,6 +33,9 @@ outstanding — check it before assuming something is or isn't done.
 
 - **DXF import/export**, layers preserved end to end (cut/etch/drill stay
   distinguishable through the whole nest → export round trip)
+- **SVG import/export** as a second path, producing the same internal shape
+  tree DXF does — metric only (`mm`/`cm`/`m`/`px`; imperial units are a hard
+  error, not a silent conversion)
 - **Multiple placement strategies** — Tight Fit (contact-based, the
   recommended default for irregular/interlocking shapes), Gravity, Box,
   Convex Hull, and two Gravity/Tight-Fit hybrids — picked per job, not
@@ -42,27 +50,23 @@ outstanding — check it before assuming something is or isn't done.
   clearance are configured separately, each down to `0`
 - **Bilingual UI** (English / Vietnamese), configurable accent color and
   text size, all live-switchable from the app itself
-- Dark, brutalist, no-framework frontend — plain HTML/CSS/JS, no build step
 
 ## Getting started
 
 Requires a recent stable Rust toolchain ([rustup.rs](https://rustup.rs)).
 
 ```sh
-cargo build                    # whole workspace (geometry, nesting, src-tauri)
-cargo run -p deepnest-tauri    # launch the app
+cargo build                    # whole workspace (geometry, nesting, app)
+cargo run -p rustynesting      # launch the app
 ```
 
-There's no frontend bundler or dev server — `frontend/dist/` is plain
-HTML/CSS/JS, embedded into the binary at compile time. **Editing anything
-under `frontend/dist/` requires re-running `cargo build`/`cargo run` to pick
-it up**, since Cargo only reruns `src-tauri/build.rs` (which does the
-embedding) when it sees that instruction — this is already wired via
-`cargo:rerun-if-changed`, but only takes effect on the next build.
+No bundler, no dev server, no `tauri-cli`, no asset embedding step — `cargo`
+is the whole build. `build.rs` only stamps the Windows exe icon.
 
 ```sh
 cargo test -p geometry         # geometry unit tests
 cargo test -p nesting          # nesting unit tests
+cargo test -p rustynesting     # engine entry points + UI
 cargo test --workspace         # everything
 ```
 
@@ -71,25 +75,28 @@ cargo test --workspace         # everything
 ```
 crates/
   geometry/     pure geometry math, zero I/O, zero threading
-                (NFP, Clipper2 boolean ops, DXF import, polygon simplification)
+                (NFP, Clipper2 boolean ops, DXF/SVG import+export,
+                 polygon simplification, clearance)
   nesting/      NfpCache, GA, rayon-based per-generation dispatch,
-                placement engine, consolidation, repacking
-src-tauri/      Tauri v2 shell + IPC commands, DTO/serialization boundary
-frontend/dist/  the UI actually served - index.html/app.js/app.css/i18n.js/
-                prefs.js/render.js, no framework, no bundler
+                placement engine, consolidation
+app/            the binary: engine entry points (commands.rs), the
+                DTO/persistence boundary (dto.rs), the worker thread
+                (worker.rs), and the whole egui UI (ui/)
 docs/           PORT_STATUS.md - the living tracking doc
 ```
 
-`geometry` and `nesting` are plain library crates with no Tauri/UI
-dependency, so the entire engine is unit-testable and reusable outside the
-desktop shell. 
+`geometry` and `nesting` are plain library crates with no UI dependency, so
+the entire engine is unit-testable and reusable outside the desktop app.
+
+The one architectural rule in `app/`: nothing under `ui/` calls
+`commands::*` directly. Every backend call goes through `worker.rs` onto a
+background thread, because the UI update loop runs on the thread pumping the
+window's event loop — a synchronous import or nest run on it freezes the
+window solid for its whole duration.
 
 ## Reference
 
-- [`RUST-REWRITE-PLAN.md`](RUST-REWRITE-PLAN.md) — the original master plan
-  for this rewrite: scope, phases, and the decisions already made (Rust +
-  Tauri, no GPU, Clipper2 for boolean ops, rayon for concurrency)
-- [`docs/PORT_STATUS.md`](docs/PORT_STATUS.md) — phase-by-phase status
+- [`docs/PORT_STATUS.md`](docs/PORT_STATUS.md) — phase-by-phase status for
   this repo; also doubles as detailed architecture documentation for humans
 
 ## License

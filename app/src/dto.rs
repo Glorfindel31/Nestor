@@ -614,6 +614,71 @@ pub struct ValidatePlacementResponse {
     pub valid: bool,
 }
 
+/// What `commands::audit_nest` needs to check a whole result rather than one
+/// dragged part.
+///
+/// Deliberately the same input shape as `ExportRequest`: the audit answers
+/// "is what I am about to export cuttable?", so anything it could check that
+/// export doesn't see would be checking a different nest than the one that
+/// gets written. `sheets` are the true, unpadded shapes - the audit applies
+/// `margin`/`spacing` itself, from `config`, exactly as `run_nest` did.
+#[derive(Deserialize, Clone, Debug)]
+pub struct AuditRequest {
+    pub sheets: Vec<PolygonDto>,
+    pub placements: Vec<SheetPlacementDto>,
+    pub parts_by_id: HashMap<usize, PolygonDto>,
+    pub config: NestConfigDto,
+}
+
+/// One problem found, flattened for display. `kind` is a stable string rather
+/// than the engine enum so the UI (and any future report format) doesn't have
+/// to be recompiled in step with `nesting::audit`.
+#[derive(Serialize, Clone, Debug)]
+pub struct AuditIssueDto {
+    pub kind: String,
+    /// Whether this means "do not cut this", as opposed to advisory.
+    pub fatal: bool,
+    pub sheet_index: usize,
+    pub part_ids: Vec<usize>,
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct AuditReportDto {
+    /// False if anything fatal was found. Warnings alone still pass - see
+    /// `nesting::audit`'s module doc for why that separation matters.
+    pub passed: bool,
+    pub fatal_count: usize,
+    pub warning_count: usize,
+    pub issues: Vec<AuditIssueDto>,
+}
+
+impl From<&nesting::audit::AuditReport> for AuditReportDto {
+    fn from(report: &nesting::audit::AuditReport) -> Self {
+        use nesting::audit::IssueKind;
+        AuditReportDto {
+            passed: report.passed(),
+            fatal_count: report.fatal_count(),
+            warning_count: report.warning_count(),
+            issues: report
+                .issues
+                .iter()
+                .map(|i| AuditIssueDto {
+                    kind: match i.kind {
+                        IssueKind::Overlap => "overlap",
+                        IssueKind::OutsideSheet => "outside_sheet",
+                        IssueKind::BelowSpacing => "below_spacing",
+                        IssueKind::OutsideMargin => "outside_margin",
+                    }
+                    .to_string(),
+                    fatal: i.kind.is_fatal(),
+                    sheet_index: i.sheet_index,
+                    part_ids: i.part_ids.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// What `export_dxf_command`/`export_svg_command` need to write a nest
 /// result back out to either format - shared by both (same input shape,
 /// only the on-disk format written differs) - exactly what the frontend
@@ -719,4 +784,145 @@ pub struct NestRunCompleteDto {
     pub improved: bool,
 }
 
+/// A shape the user saved to reuse later: either a part they cut regularly,
+/// or an offcut sitting on a shelf.
+///
+/// One type for both, distinguished by `kind`, because everything that
+/// handles them - store, list, pick, delete - treats them identically. The
+/// difference is entirely in what the user does with it: a part goes into a
+/// job as something to cut, a remnant as something to cut it *from*.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StoredKind {
+    Part,
+    Remnant,
+}
 
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct StoredShape {
+    /// Unique within the store and never reused - a picker holding an id
+    /// across a delete must fail to find it rather than silently resolve to
+    /// whatever took its place.
+    pub id: usize,
+    pub kind: StoredKind,
+    /// What the user sees. Generated for a remnant (source job plus usable
+    /// size); theirs to set for a part.
+    pub name: String,
+    pub polygon: PolygonDto,
+    /// Quantity to pre-fill when a saved part is added to a job. Meaningless
+    /// for a remnant, which is by definition a single physical object.
+    #[serde(default = "one")]
+    pub default_qty: usize,
+    /// The grain rule the part was saved with, as *angles* rather than as the
+    /// UI's enum name. Storing the angles means an entry written by an older
+    /// build still loads after a new rule variant is added, and it is the
+    /// same wire form `PartDto::allowed_rotations` already uses.
+    #[serde(default)]
+    pub allowed_rotations: Option<Vec<f64>>,
+    /// The per-part mirror override, matching `PartDto::mirror`.
+    #[serde(default)]
+    pub mirror: Option<bool>,
+    /// When it was saved, for the FIFO ordering a remnant shelf wants.
+    #[serde(default)]
+    pub created: String,
+    /// Set once a remnant has been nested onto, so it stops being offered
+    /// without being deleted - the record of what it became outlives the row.
+    #[serde(default)]
+    pub consumed: bool,
+}
+
+/// The on-disk parts library and remnant shelf.
+///
+/// `version` from the first release, deliberately: this file outlives
+/// releases and users will hand-edit it. The format is additive - every
+/// optional field carries `#[serde(default)]` and nothing is ever removed -
+/// because losing a saved library is the one failure here nobody forgives.
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct ShapeStore {
+    pub version: u32,
+    #[serde(default)]
+    pub shapes: Vec<StoredShape>,
+    /// Highest id ever issued. Persisted rather than derived from `shapes`,
+    /// so deleting the newest entry doesn't make the next save reuse its id.
+    #[serde(default)]
+    pub next_id: usize,
+}
+
+impl Default for ShapeStore {
+    fn default() -> Self {
+        Self { version: 1, shapes: Vec::new(), next_id: 1 }
+    }
+}
+
+impl ShapeStore {
+    /// Adds a shape, assigning it the next id. Returns that id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add(
+        &mut self,
+        kind: StoredKind,
+        name: String,
+        polygon: PolygonDto,
+        default_qty: usize,
+        allowed_rotations: Option<Vec<f64>>,
+        mirror: Option<bool>,
+        created: String,
+    ) -> usize {
+        let id = self.next_id.max(1);
+        self.next_id = id + 1;
+        self.shapes.push(StoredShape { id, kind, name, polygon, default_qty, allowed_rotations, mirror, created, consumed: false });
+        id
+    }
+
+    /// Everything of one kind that is still available, oldest first.
+    ///
+    /// FIFO rather than newest-first, specifically for remnants: an offcut
+    /// shelf worked newest-first accumulates old stock that never gets used
+    /// and is eventually thrown away - the exact waste the feature exists to
+    /// prevent.
+    #[must_use]
+    pub fn available(&self, kind: StoredKind) -> Vec<&StoredShape> {
+        let mut out: Vec<&StoredShape> = self.shapes.iter().filter(|s| s.kind == kind && !s.consumed).collect();
+        out.sort_by(|a, b| a.created.cmp(&b.created));
+        out
+    }
+
+    /// Marks a remnant used up. Returns false if the id isn't in the store.
+    pub fn consume(&mut self, id: usize) -> bool {
+        match self.shapes.iter_mut().find(|s| s.id == id) {
+            Some(s) => {
+                s.consumed = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn remove(&mut self, id: usize) -> bool {
+        let before = self.shapes.len();
+        self.shapes.retain(|s| s.id != id);
+        self.shapes.len() != before
+    }
+}
+
+/// What `commands::compute_remnants` needs: the result to harvest offcuts
+/// from. Same shape as `AuditRequest` for the same reason - offcuts are
+/// computed from exactly what would be exported.
+#[derive(Deserialize, Clone, Debug)]
+pub struct RemnantRequest {
+    pub sheets: Vec<PolygonDto>,
+    pub placements: Vec<SheetPlacementDto>,
+    pub parts_by_id: HashMap<usize, PolygonDto>,
+    pub config: NestConfigDto,
+}
+
+/// One computed offcut on its way to the UI.
+#[derive(Serialize, Clone, Debug)]
+pub struct RemnantDto {
+    /// Which sheet of the result it came off.
+    pub sheet_index: usize,
+    pub polygon: PolygonDto,
+    pub area: f64,
+    /// Largest rectangle that fits inside it - the size to write on the label.
+    pub usable_width: f64,
+    pub usable_height: f64,
+}

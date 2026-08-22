@@ -13,6 +13,7 @@ pub mod obstacle_nfp;
 pub mod pdf_export;
 pub mod point;
 pub mod polygon;
+pub mod remnant;
 pub mod simplify;
 pub mod simplify_polygon;
 pub mod svg_export;

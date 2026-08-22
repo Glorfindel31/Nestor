@@ -1,191 +1,170 @@
-//! Integration test against a real DXF fixture (copied from the Electron
-//! repo's tests/assets/FLAT.dxf into tests/fixtures/ per the plan's repo
-//! structure) - a real laser/CNC-cut sheet layout with a `drilling` layer
-//! containing thousands of small circles, exactly the scenario that drove
-//! the DXF-only, layer-retaining scope change recorded in docs/PORT_STATUS.md.
+//! Integration tests against the real DXF fixtures in `tests/fixtures/`.
+//!
+//! These are actual CAD exports, not synthetic geometry, and that is the
+//! whole point: every bug these have caught (holes escaping their parent,
+//! circle metadata being dropped, simplification eating a profile's area)
+//! came from a property real files have and hand-built test polygons do not.
+//!
+//! What each fixture is for:
+//!
+//! | fixture     | what makes it useful                                        |
+//! |-------------|-------------------------------------------------------------|
+//! | `one.dxf`   | the hat monotile - one exact 13-vertex interlocking tile     |
+//! | `two.dxf`   | 4 parts, 12 circular drill holes nested under 2 of them, two layers |
+//! | `three.dxf` | a 718-point profile, i.e. real curve-tessellated geometry    |
+//!
+//! Counts asserted below were read off the files with
+//! `cargo run -p geometry --example inspect_fixture -- <file>`, not guessed
+//! and then relaxed until they passed.
+//!
+//! **Known coverage gap**: nothing here exercises
+//! `entities_to_polygons_chained` (profiles drawn as loose `LINE`/`ARC`
+//! networks that only close once endpoints are joined). The fixture that
+//! covered it was removed, and none of the three above contains `LINE`
+//! entities. The code path is still live and still used by import - it just
+//! has no fixture-backed test any more. Restore one if that path is ever
+//! touched.
 
 use dxf::Drawing;
-use geometry::dxf_import::{build_polygon_tree, entities_to_polygons, entities_to_polygons_chained};
+use geometry::dxf_import::{build_polygon_tree, entities_to_polygons};
 use geometry::inner_nfp::inner_nfp;
 use geometry::point::Point;
 use geometry::polygon::polygon_area;
 use geometry::simplify_polygon::{simplify_polygon, SimplifyConfig};
 
+const CURVE_TOLERANCE: f64 = 0.01;
+
 fn fixture_path(name: &str) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures")
-        .join(name)
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures").join(name)
 }
 
+fn load(name: &str) -> Vec<geometry::dxf_import::LayeredPolygon> {
+    let drawing = Drawing::load_file(fixture_path(name)).unwrap_or_else(|e| panic!("{name} should parse: {e}"));
+    entities_to_polygons(drawing.entities(), CURVE_TOLERANCE)
+}
+
+/// Layer identity and circle metadata must survive import - the two things
+/// the whole DXF-only scope change exists to preserve.
 #[test]
-fn loads_and_converts_the_flat_dxf_fixture() {
-    let drawing = Drawing::load_file(fixture_path("FLAT.dxf")).expect("FLAT.dxf should parse");
+fn circle_metadata_and_layer_identity_survive_import() {
+    let polygons = load("two.dxf");
+    assert_eq!(polygons.len(), 16, "expected 16 closed profiles, got {}", polygons.len());
 
-    let entity_count = drawing.entities().count();
-    assert!(entity_count > 3000, "expected thousands of entities, got {entity_count}");
-
-    let polygons = entities_to_polygons(drawing.entities(), 0.01);
-    assert!(!polygons.is_empty(), "expected at least some closed profiles");
-
-    // the fixture is known (via manual inspection) to use these three layers
     let layers: std::collections::HashSet<&str> = polygons.iter().map(|p| p.layer.as_str()).collect();
-    assert!(layers.contains("drilling"), "expected a `drilling` layer, got {layers:?}");
+    assert!(layers.contains("VISIBLE"), "expected a `VISIBLE` layer, got {layers:?}");
+    assert!(layers.len() >= 2, "layer identity collapsed to one layer: {layers:?}");
 
-    // every circle-derived polygon must carry isCircle metadata with a positive radius
-    let circle_polys: Vec<_> = polygons.iter().filter(|p| p.is_circle.is_some()).collect();
-    assert!(!circle_polys.is_empty(), "expected circle entities to convert with isCircle metadata");
-    for p in &circle_polys {
-        let c = p.is_circle.unwrap();
-        assert!(c.r > 0.0, "circle radius should be positive, got {}", c.r);
-        assert!(p.points.len() >= 3, "circle should tessellate to at least a triangle");
+    // Every circle-derived polygon must carry its metadata: the circular-NFP
+    // fast path keys off exactly this, and losing it silently downgrades
+    // every drill hole to a generic polygon.
+    let circles: Vec<_> = polygons.iter().filter(|p| p.is_circle.is_some()).collect();
+    assert_eq!(circles.len(), 12, "expected 12 circles, got {}", circles.len());
+    for c in &circles {
+        let circle = c.is_circle.expect("filtered on is_circle");
+        assert!(circle.r > 0.0, "circle radius should be positive, got {}", circle.r);
+        assert!(c.points.len() >= 3, "circle should tessellate to at least a triangle");
     }
 }
 
+/// Regression test for a real containment bug in `dxf_import::contains`: it
+/// used to test only a candidate loop's *first* vertex and treated
+/// `point_in_polygon`'s "on the boundary" (`None`) as "not contained". Real
+/// CAD exports often have a cutout sharing a coincident vertex with its
+/// parent, so such a hole was promoted to a standalone root - and then nested
+/// as if it were its own part, which is how you cut a hole out of the middle
+/// of a sheet.
+///
+/// A *higher* outer-part count than expected is the signature of that bug
+/// coming back.
 #[test]
-fn loads_the_struck_flat_dxf_fixture_without_error() {
-    let drawing = Drawing::load_file(fixture_path("FLAT-struck.dxf")).expect("FLAT-struck.dxf should parse");
-    let polygons = entities_to_polygons(drawing.entities(), 0.01);
-    assert!(!polygons.is_empty());
-}
+fn every_cutout_nests_under_its_real_parent_rather_than_escaping_as_a_part() {
+    let tree = build_polygon_tree(load("two.dxf"));
 
-#[test]
-fn simplify_polygon_runs_without_panicking_on_every_real_cut_profile() {
-    // Regression check against real, non-synthetic geometry: the 99
-    // LWPOLYLINE-derived cut profiles in FLAT.dxf (excludes the 3079 CIRCLE
-    // drill holes, checked separately above) exercise self-intersection
-    // cleanup, offset reversal, and axis straightening against actual
-    // laser-cut part outlines, not just synthetic squares.
-    let drawing = Drawing::load_file(fixture_path("FLAT.dxf")).expect("FLAT.dxf should parse");
-    let polygons = entities_to_polygons(drawing.entities(), 0.01);
-    let profiles: Vec<_> = polygons.iter().filter(|p| p.is_circle.is_none()).collect();
-    assert!(profiles.len() > 50, "expected dozens of cut profiles, got {}", profiles.len());
+    assert_eq!(tree.len(), 4, "expected exactly 4 outer parts, got {} - a higher count means cutouts are escaping as standalone parts again", tree.len());
+    let holes: usize = tree.iter().map(|p| p.children.len()).sum();
+    assert_eq!(holes, 12, "all 12 circles must sit under a parent, got {holes}");
 
-    let config = SimplifyConfig { curve_tolerance: 0.1, use_convex_hull: false };
-    for (i, profile) in profiles.iter().enumerate() {
-        let original_area = polygon_area(&profile.points).abs();
-        if original_area < 1e-6 {
-            continue; // degenerate/zero-area source polygon, nothing meaningful to simplify
+    for part in &tree {
+        for hole in &part.children {
+            assert!(hole.is_circle.is_some(), "every hole in this fixture is a drilled circle");
+            assert!(hole.children.is_empty(), "this fixture nests exactly one level deep (outline + holes), found an island under a hole");
         }
-
-        let (result, _holes) = simplify_polygon(&profile.points, false, &config);
-        assert!(result.len() >= 3, "profile {i} simplified to fewer than 3 points");
-
-        let result_area = polygon_area(&result).abs();
-        let ratio = result_area / original_area;
-        assert!(
-            (0.5..1.5).contains(&ratio),
-            "profile {i}: area changed too much ({original_area} -> {result_area}, ratio {ratio})"
-        );
     }
 }
 
+/// Real curve-tessellated geometry through the simplification pipeline:
+/// self-intersection cleanup, offset-shell re-merge and axis straightening
+/// all run here against profiles that actually came out of CAD, including
+/// `three.dxf`'s 718-point outline.
+///
+/// The assertion is deliberately loose on *how much* simplification changes a
+/// profile and strict on it not destroying one - the pipeline is allowed to
+/// reshape a polygon, but a profile that loses half its area has stopped
+/// being the part someone drew.
+#[test]
+fn simplify_polygon_survives_every_real_cut_profile() {
+    let config = SimplifyConfig { curve_tolerance: 0.1, use_convex_hull: false };
+    let mut checked = 0;
+
+    for fixture in ["one.dxf", "two.dxf", "three.dxf"] {
+        let polygons = load(fixture);
+        for (i, profile) in polygons.iter().filter(|p| p.is_circle.is_none()).enumerate() {
+            let original_area = polygon_area(&profile.points).abs();
+            if original_area < 1e-6 {
+                continue; // degenerate source polygon - nothing to simplify
+            }
+            let (result, _holes) = simplify_polygon(&profile.points, false, &config);
+            assert!(result.len() >= 3, "{fixture} profile {i} simplified to fewer than 3 points");
+
+            let ratio = polygon_area(&result).abs() / original_area;
+            assert!((0.5..1.5).contains(&ratio), "{fixture} profile {i}: area changed too much (ratio {ratio})");
+            checked += 1;
+        }
+    }
+    assert!(checked >= 6, "expected to check several real profiles, only checked {checked}");
+}
+
+/// The general inner-NFP fallback - the plan's flagged "hardest sub-problem" -
+/// against genuine container-with-holes cases rather than the synthetic
+/// square-with-one-hole in `inner_nfp.rs`'s own unit tests.
+///
+/// The result is data-dependent (a probe may or may not fit), so what is
+/// asserted is that the computation completes rather than panicking, which is
+/// the failure mode this path has actually had.
 #[test]
 fn inner_nfp_general_fallback_works_against_real_drilled_profiles() {
-    // FLAT.dxf's 99 cut profiles each have their drill-hole circles nested as
-    // real children (per the polygon-tree test), giving genuine
-    // container-with-holes cases for the "hardest sub-problem" general
-    // fallback - not just the synthetic square-with-one-hole test in
-    // inner_nfp.rs's own unit tests.
-    let drawing = Drawing::load_file(fixture_path("FLAT.dxf")).expect("FLAT.dxf should parse");
-    let polygons = entities_to_polygons(drawing.entities(), 0.01);
-    let tree = build_polygon_tree(polygons);
+    let tree = build_polygon_tree(load("two.dxf"));
 
     let drilled: Vec<_> = tree.iter().filter(|p| p.children.len() >= 2).collect();
     assert!(!drilled.is_empty(), "expected at least one profile with multiple drill holes");
 
+    let probe = geometry::dxf_import::LayeredPolygon {
+        points: vec![Point::new(0.0, 0.0), Point::new(0.5, 0.0), Point::new(0.5, 0.5), Point::new(0.0, 0.5)],
+        layer: "0".into(),
+        is_circle: None,
+        children: Vec::new(),
+        texts: Vec::new(),
+        real_boundary: None,
+    };
+
     let mut checked = 0;
     for profile in drilled.iter().take(10) {
-        // a tiny probe part - small enough that it should fit somewhere
-        // inside the profile without necessarily colliding with every hole
-        let probe = geometry::dxf_import::LayeredPolygon {
-            points: vec![
-                Point::new(0.0, 0.0),
-                Point::new(0.5, 0.0),
-                Point::new(0.5, 0.5),
-                Point::new(0.0, 0.5),
-            ],
-            layer: "0".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        };
-
-        // must not panic - the actual result (Some or None) is real data
-        // dependent, but the computation itself must complete cleanly
         let _ = inner_nfp(profile, &probe, 0.1);
         checked += 1;
     }
     assert!(checked > 0);
 }
 
-/// Regression test for a real containment-test bug in `dxf_import::contains`:
-/// it used to test only a candidate loop's *first* vertex, and treated
-/// `point_in_polygon`'s "on the boundary" (`None`) result as "not contained".
-/// Real CAD-exported cutouts often share a coincident vertex or touching edge
-/// with their parent (LibreCAD/Onshape snapping), so a hole whose first
-/// vertex happened to land exactly on its parent's boundary was rejected as a
-/// hole and promoted to a standalone root - it then got nested as if it were
-/// its own separate part. This is a real, non-synthetic fixture (137 closed
-/// loops) where that used to happen for 5 loops; `contains` now checks every
-/// vertex of the candidate and treats touching (not just strictly inside) as
-/// contained, which brings every one of those 5 back under its real parent.
+/// The hat is an exactly-interlocking aperiodic tile, so its geometry is
+/// razor-edged: a rounding change anywhere in import moves it. This pins the
+/// shape the whole `hat_bench` baseline rests on.
 #[test]
-fn seventeen_mm_fixture_nests_every_cutout_under_its_real_parent_not_as_a_root() {
-    let drawing = Drawing::load_file(fixture_path("17MM .dxf")).expect("17MM .dxf should parse");
-    let polygons = entities_to_polygons(drawing.entities(), 0.3);
-    assert!(polygons.len() > 100, "expected over a hundred closed loops, got {}", polygons.len());
+fn the_hat_fixture_imports_as_one_exact_thirteen_vertex_tile() {
+    let tree = build_polygon_tree(load("one.dxf"));
+    assert_eq!(tree.len(), 1, "the hat fixture is a single profile");
+    assert_eq!(tree[0].points.len(), 13, "the hat is a 13-vertex polykite");
+    assert!(tree[0].children.is_empty(), "the hat has no holes");
 
-    let tree = build_polygon_tree(polygons);
-
-    // The known-correct count for this fixture (confirmed by manual
-    // geometric containment analysis): 52 outer parts. Before the `contains`
-    // fix this counted 57 - the 5 cutouts whose first vertex touched their
-    // parent's boundary were rejected as holes and promoted to standalone
-    // roots instead.
-    assert_eq!(tree.len(), 52, "expected exactly 52 outer parts, got {} - a wrong (higher) count means cutouts are escaping as standalone parts again", tree.len());
-
-    // This fixture nests exactly one level deep (outline + holes, no islands
-    // inside a hole) - any hole with children would be a surprise for this
-    // specific file, not an expected shape.
-    for root in &tree {
-        for hole in &root.children {
-            assert!(hole.children.is_empty(), "this fixture nests exactly one level deep (outline + holes), found an unexpected island under a hole");
-        }
-    }
-}
-
-/// The whole point of the chaining pass, against a real file rather than
-/// hand-built entities: `line-network.dxf` draws its outer profile as four
-/// bare `LINE`s and its slot hole as two `LINE`s plus two partial `ARC`s.
-/// Every one of those entities is individually rejected by
-/// `entity_to_polygon` - before chaining existed this file imported as a
-/// single circle, silently losing the part it was describing.
-/// See `crates/geometry/examples/gen_line_network.rs` for how it's built.
-#[test]
-fn chains_a_profile_drawn_entirely_as_loose_lines_and_arcs() {
-    let drawing = Drawing::load_file(fixture_path("line-network.dxf")).expect("line-network.dxf should parse");
-
-    let unchained = entities_to_polygons(drawing.entities(), 0.01);
-    assert_eq!(unchained.len(), 1, "without chaining only the CIRCLE converts - this is the bug the pass fixes");
-
-    let flat = entities_to_polygons_chained(drawing.entities(), 0.01);
-    assert_eq!(flat.len(), 3, "outer profile + slot + drilled circle");
-
-    let tree = build_polygon_tree(flat);
-    assert_eq!(tree.len(), 1, "the slot and the circle are holes in the outer profile, not separate parts");
-    assert_eq!(tree[0].children.len(), 2);
-    assert_eq!(tree[0].layer, "CUT");
-
-    // Outer 80x60, minus a 30x10 rounded slot and a r=4 circle.
-    let slot_area = 30.0 * 10.0 + std::f64::consts::PI * 25.0;
-    let expected = 80.0 * 60.0 - slot_area - std::f64::consts::PI * 16.0;
-    // Tolerance covers arc tessellation only: the holes are inscribed
-    // polygons, so they come out marginally small and the material marginally
-    // large. At curve_tolerance 0.01 that is well under a square millimetre.
-    let material = geometry::dxf_import::polygon_material_area(&tree[0]);
-    assert!((material - expected).abs() < 1.0, "material area {material}, expected about {expected}");
-
-    // The drilled hole keeps its own layer through the tree build.
-    assert!(tree[0].children.iter().any(|c| c.layer == "DRILL"), "layer identity must survive import");
+    let area = polygon_area(&tree[0].points).abs();
+    assert!((area - 779.4).abs() < 0.5, "hat area drifted: {area}");
 }

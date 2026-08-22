@@ -58,6 +58,26 @@ pub struct ReportMeta {
     /// settings are worth showing rather than this module knowing about
     /// `NestConfigDto`.
     pub settings: Vec<(String, String)>,
+    /// The manufacturability verdict, if one was run. `None` prints nothing
+    /// at all rather than an implied pass - a report that says "PASSED"
+    /// about a nest nobody checked is worse than one that stays silent.
+    #[allow(clippy::struct_field_names)]
+    pub audit: Option<ReportAudit>,
+}
+
+/// The audit verdict as the report prints it.
+///
+/// Deliberately pre-rendered strings rather than the `nesting::audit` types:
+/// `geometry` must not depend on `nesting`, and the report only ever prints
+/// this - it never reasons about an issue's kind. `passed` stays a bool
+/// because the heading is the one part that is not free text.
+#[derive(Clone, Debug)]
+pub struct ReportAudit {
+    pub passed: bool,
+    /// One-line verdict, e.g. "PASSED - no overlaps, all pieces on the sheet".
+    pub headline: String,
+    /// Individual findings, already formatted. Truncated by the caller.
+    pub issues: Vec<String>,
 }
 
 /// Renders the report and returns the PDF bytes.
@@ -135,6 +155,21 @@ fn summary_page(meta: &ReportMeta, stats: &[SheetStats]) -> String {
         y -= 4.0;
         text(&mut out, &format!("NOT PLACED: {} piece(s) did not fit.", ordered - placed), MARGIN, y, 11.0);
         y -= 16.0;
+    }
+
+    // High on the page, immediately under the headline numbers: this is the
+    // line someone signs against, so it must not be something you have to
+    // scroll to a second page to find.
+    if let Some(audit) = &meta.audit {
+        y -= 10.0;
+        text(&mut out, "MANUFACTURABILITY CHECK", MARGIN, y, 13.0);
+        y -= 18.0;
+        text(&mut out, &audit.headline, MARGIN, y, 11.0);
+        y -= 16.0;
+        for issue in &audit.issues {
+            text(&mut out, &format!("  {issue}"), MARGIN, y, 10.0);
+            y -= 13.0;
+        }
     }
 
     y -= 14.0;
@@ -325,7 +360,35 @@ mod tests {
             title: "Test job".into(),
             parts: vec![ReportPart { name: "widget".into(), quantity: 4 }],
             settings: vec![("Spacing".into(), "2 mm".into())],
+            audit: None,
         }
+    }
+
+    /// The verdict has to reach the page. A report that silently drops it is
+    /// exactly as useless as no audit at all, and nothing else here would
+    /// notice - the PDF still renders perfectly well without it.
+    #[test]
+    fn the_audit_verdict_is_printed_on_the_summary_page() {
+        let mut meta = meta();
+        meta.audit = Some(ReportAudit {
+            passed: false,
+            headline: "FAILED - 2 fatal issue(s), 0 warning(s). DO NOT CUT.".into(),
+            issues: vec!["OVERLAP - sheet 1, #3 + #7".into()],
+        });
+        let text = String::from_utf8(export_report(&[layout(2)], &meta)).expect("ASCII only");
+        assert!(text.contains("MANUFACTURABILITY CHECK"), "the section heading must appear");
+        assert!(text.contains("DO NOT CUT"), "the verdict must appear");
+        assert!(text.contains("OVERLAP - sheet 1"), "the individual finding must appear");
+    }
+
+    /// No audit must print nothing at all - never an implied pass. A report
+    /// claiming a nest is fine when nobody checked it is the one output here
+    /// that could get someone to cut a bad sheet.
+    #[test]
+    fn no_audit_prints_no_verdict_rather_than_an_implied_pass() {
+        let text = String::from_utf8(export_report(&[layout(2)], &meta())).expect("ASCII only");
+        assert!(!text.contains("MANUFACTURABILITY CHECK"), "an unchecked nest must not get a verdict section");
+        assert!(!text.contains("PASSED"), "an unchecked nest must never read as passed");
     }
 
     #[test]

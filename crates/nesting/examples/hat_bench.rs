@@ -68,10 +68,10 @@ fn repo_root() -> PathBuf {
 }
 
 fn load_hat() -> LayeredPolygon {
-    let fixture = repo_root().join("tests/fixtures/hat-monotile.dxf");
+    let fixture = repo_root().join("tests/fixtures/one.dxf");
     let drawing = Drawing::load_file(&fixture).unwrap_or_else(|e| panic!("couldn't parse {}: {e}", fixture.display()));
     let tree = build_polygon_tree(entities_to_polygons(drawing.entities(), CURVE_TOLERANCE));
-    assert_eq!(tree.len(), 1, "expected exactly one closed profile in hat-monotile.dxf, got {}", tree.len());
+    assert_eq!(tree.len(), 1, "expected exactly one closed profile in one.dxf, got {}", tree.len());
     tree.into_iter().next().unwrap()
 }
 

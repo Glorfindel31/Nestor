@@ -16,8 +16,10 @@
 mod canvas;
 mod config;
 mod console;
+mod history_chart;
 mod i18n;
 mod import;
+mod library;
 mod keys;
 mod prefs;
 mod result;
@@ -101,6 +103,12 @@ pub struct App {
     next_ui_id: usize,
     shapes_collapsed: bool,
     select_all: bool,
+    /// What the bulk-apply row is currently set to. Held on `App` rather than
+    /// read back out of the table, because these are the *pending* values -
+    /// nothing is written to any row until the matching APPLY is pressed.
+    bulk_rot: state::RotRule,
+    bulk_mirror: state::MirrorRule,
+    bulk_qty: usize,
     confirm_remove: bool,
 
     // ---- 03 CONFIGURE ----
@@ -130,6 +138,21 @@ pub struct App {
 
     // ---- 04 RESULT ----
     snapshot: Option<Snapshot>,
+    /// Result of the last manufacturability check, and whether one is in
+    /// flight. `None` means "not checked yet" - which the badge shows as its
+    /// own state rather than as a pass, because an unchecked nest and a
+    /// clean one are exactly the distinction the audit exists to make.
+    audit: Option<crate::dto::AuditReportDto>,
+    auditing: bool,
+    /// The saved parts library and remnant shelf. Loaded once at startup; a
+    /// load failure leaves this at its default *and* logs loudly, rather than
+    /// letting an unreadable file look like an empty library.
+    store: crate::dto::ShapeStore,
+    store_open: bool,
+    /// Offcuts harvested from the displayed result, waiting to be saved.
+    /// Cleared whenever the result changes, for the same reason the audit is.
+    remnants: Vec<crate::dto::RemnantDto>,
+    harvesting: bool,
     history: Vec<NestSnapshotDto>,
     history_index: usize,
     /// The authoritative id -> shape map from the last run. Used for
@@ -138,6 +161,13 @@ pub struct App {
     /// assignment, and would silently drift the moment either side changed).
     parts_by_id: HashMap<usize, PolygonDto>,
     part_rules: HashMap<usize, PartRuleDto>,
+    /// Which library entry each *expanded* sheet came from, index-aligned with
+    /// the `sheets` of the run in flight. Built at the same time and in the
+    /// same order as that list, so a placement's `sheet_index` resolves
+    /// straight back to the offcut it consumed - deriving it afterwards would
+    /// mean re-implementing `build_request`'s quantity expansion and drifting
+    /// the moment either side changed.
+    sheet_origin: Vec<Option<usize>>,
     /// Sheets and config the displayed result was produced with. `config` is
     /// `None` for a result recovered from a session that predates it being
     /// saved - repack and drag are disabled in that case rather than failing
@@ -195,6 +225,9 @@ impl App {
             next_ui_id: 1,
             shapes_collapsed: false,
             select_all: false,
+            bulk_rot: state::RotRule::Any,
+            bulk_mirror: state::MirrorRule::Job,
+            bulk_qty: 1,
             confirm_remove: false,
             cfg: Default::default(),
             settings_open: false,
@@ -206,10 +239,17 @@ impl App {
             run_status: Default::default(),
             current_generations: 1,
             snapshot: None,
+            audit: None,
+            auditing: false,
+            store: Default::default(),
+            store_open: false,
+            remnants: Vec::new(),
+            harvesting: false,
             history: Vec::new(),
             history_index: 0,
             parts_by_id: Default::default(),
             part_rules: Default::default(),
+            sheet_origin: Vec::new(),
             result_sheets: Vec::new(),
             result_config: None,
             export_format: ExportFormat::Dxf,
@@ -224,6 +264,7 @@ impl App {
             recover_prompt: None,
         };
         app.console.log(console::Kind::Run, "Nestor started");
+        app.worker.load_store();
         app
     }
 
@@ -343,6 +384,56 @@ impl App {
                 }
             }
             Msg::Validated(result) => self.finish_drag(*result),
+            Msg::StoreLoaded(result) | Msg::StoreSaved(result) => match *result {
+                Ok(store) => {
+                    self.console.log(console::Kind::Plain, format!("library: {} saved shape(s)", store.shapes.len()));
+                    self.store = store;
+                }
+                Err(e) => {
+                    // Deliberately loud. An unreadable store must never be
+                    // mistaken for an empty one - that is how someone loses a
+                    // library they spent months building without noticing.
+                    self.console.error(format!("library: {e}"));
+                    self.run_status.err(self.t("library_error"));
+                }
+            },
+
+            Msg::RemnantsComputed(result) => {
+                self.harvesting = false;
+                match *result {
+                    Ok(remnants) => {
+                        self.console.log(console::Kind::Plain, format!("offcuts: found {}", remnants.len()));
+                        self.remnants = remnants;
+                    }
+                    Err(e) => {
+                        self.console.error(format!("offcut scan failed: {e}"));
+                        self.remnants.clear();
+                    }
+                }
+            }
+
+            Msg::Audited(result) => {
+                self.auditing = false;
+                match *result {
+                    Ok(report) => {
+                        if !report.passed {
+                            // Loud in the console as well as on the badge: a
+                            // fatal issue is the one thing here that must not
+                            // be missed by someone not looking at the panel.
+                            self.console.error(format!("audit: {} fatal issue(s), {} warning(s)", report.fatal_count, report.warning_count));
+                        } else if report.warning_count > 0 {
+                            self.console.log(console::Kind::Plain, format!("audit: passed with {} warning(s)", report.warning_count));
+                        } else {
+                            self.console.log(console::Kind::Plain, "audit: passed".to_string());
+                        }
+                        self.audit = Some(report);
+                    }
+                    Err(e) => {
+                        self.console.error(format!("audit failed: {e}"));
+                        self.audit = None;
+                    }
+                }
+            }
             Msg::Exported { format, result } => match result {
                 Ok(()) => {
                     self.export_status.ok(self.t("export_status_done"));
@@ -371,18 +462,7 @@ impl App {
     }
 
     fn push_shape(&mut self, file: String, poly: PolygonDto) {
-        let area = state::polygon_area(&poly.points);
-        self.shapes.push(ShapeRow {
-            ui_id: self.next_ui_id,
-            file,
-            poly,
-            role: state::Role::Part,
-            qty: 1,
-            rot: state::RotRule::Any,
-            mirror: state::MirrorRule::Job,
-            selected: false,
-            area,
-        });
+        self.shapes.push(ShapeRow::new(self.next_ui_id, file, poly));
         self.next_ui_id += 1;
     }
 
@@ -418,6 +498,69 @@ impl App {
         // matches the parts list.
         self.undo_stack.clear();
         self.snapshot = Some(Snapshot::from_history(&self.history[self.history_index]));
+        self.consume_used_remnants();
+        self.request_audit();
+    }
+
+    /// Marks every library remnant that this run actually nested onto as
+    /// consumed, and writes the store.
+    ///
+    /// Without this the offcut shelf only ever grows: the same physical piece
+    /// of material stays on the list and gets offered again for every future
+    /// job, which makes the whole shelf untrustworthy - the one thing a
+    /// materials list cannot afford to be.
+    ///
+    /// Only sheets that received at least one part count. A remnant that was
+    /// offered to the nest and left empty is still sitting on the shelf.
+    fn consume_used_remnants(&mut self) {
+        let Some(snapshot) = &self.snapshot else { return };
+        let used: std::collections::HashSet<usize> = snapshot
+            .placements
+            .iter()
+            .filter(|p| !p.parts.is_empty())
+            .filter_map(|p| self.sheet_origin.get(p.sheet_index).copied().flatten())
+            .collect();
+        if used.is_empty() {
+            return;
+        }
+        let consumed = used.iter().filter(|id| self.store.consume(**id)).count();
+        if consumed == 0 {
+            return;
+        }
+        self.console.log(console::Kind::Plain, format!("library: {consumed} offcut(s) consumed by this nest"));
+        let store = self.store.clone();
+        self.worker.save_store(store);
+    }
+
+    /// Re-checks the displayed result for manufacturability.
+    ///
+    /// Called after every change to what is on screen - a finished run, a
+    /// committed drag, a repack, or switching to a different attempt - because
+    /// a badge that can outlive the arrangement it describes is worse than no
+    /// badge: it says "checked" about something nobody checked.
+    ///
+    /// Clears the previous verdict first, so the gap between the edit and the
+    /// answer reads as "unknown" rather than as the stale pass.
+    fn request_audit(&mut self) {
+        self.audit = None;
+        // Offcuts describe one specific arrangement. Keeping them across a
+        // change would offer the user a remnant that no longer exists.
+        self.remnants.clear();
+        let Some(snapshot) = &self.snapshot else { return };
+        // Only with the config the result was actually produced under: margin
+        // and spacing decide the answer, and defaults would check clearances
+        // this nest was never asked to honour.
+        let Some(config) = self.result_config.clone() else { return };
+        if self.result_sheets.is_empty() {
+            return;
+        }
+        self.auditing = true;
+        self.worker.audit(crate::dto::AuditRequest {
+            sheets: self.result_sheets.clone(),
+            placements: snapshot.placements.clone(),
+            parts_by_id: self.parts_by_id.clone(),
+            config,
+        });
     }
 
     fn apply_repack(&mut self, index: usize, response: crate::dto::RepackSheetResponse) -> bool {
@@ -430,6 +573,9 @@ impl App {
         self.push_undo();
         let snap = self.snapshot.as_mut().expect("checked directly above");
         snap.placements[index] = response.placement;
+        // A repack rearranges a whole sheet, so its verdict is the one most
+        // worth re-earning.
+        self.request_audit();
         response.improved
     }
 
@@ -451,14 +597,18 @@ impl App {
         match self.undo_stack.pop() {
             Some(previous) => {
                 self.snapshot = Some(previous);
+                self.request_audit();
                 self.run_status.ok(self.t("undo_done"));
             }
             None => self.run_status.ok(self.t("undo_nothing")),
         }
     }
 
-    fn build_request(&self) -> Result<RunNestRequest, String> {
+    /// Also returns, alongside the request, which library entry each expanded
+    /// sheet came from - see `App::sheet_origin`.
+    fn build_request(&self) -> Result<(RunNestRequest, Vec<Option<usize>>), String> {
         let mut sheets = Vec::new();
+        let mut sheet_origin: Vec<Option<usize>> = Vec::new();
         let mut parts = Vec::new();
         for row in &self.shapes {
             // Quantity 0 means "excluded" for BOTH roles. The web UI used to
@@ -469,7 +619,10 @@ impl App {
                 continue;
             }
             match row.role {
-                state::Role::Sheet => sheets.extend(std::iter::repeat_n(row.poly.clone(), row.qty)),
+                state::Role::Sheet => {
+                    sheets.extend(std::iter::repeat_n(row.poly.clone(), row.qty));
+                    sheet_origin.extend(std::iter::repeat_n(row.from_store, row.qty));
+                }
                 state::Role::Part => parts.push(crate::dto::PartDto {
                     polygon: row.poly.clone(),
                     quantity: row.qty,
@@ -488,11 +641,11 @@ impl App {
         if let Some(field) = self.cfg.first_nan_field() {
             return Err(self.tv("run_invalid_config_field", &[("field", self.t(field))]));
         }
-        Ok(RunNestRequest { sheets, parts, config: self.cfg.to_dto() })
+        Ok((RunNestRequest { sheets, parts, config: self.cfg.to_dto() }, sheet_origin))
     }
 
     fn start_run(&mut self) {
-        let request = match self.build_request() {
+        let (request, sheet_origin) = match self.build_request() {
             Ok(r) => r,
             Err(e) => {
                 self.run_status.err(e);
@@ -500,6 +653,7 @@ impl App {
             }
         };
         self.worker.save_config(request.config.clone());
+        self.sheet_origin = sheet_origin;
         self.result_sheets = request.sheets.clone();
         self.result_config = Some(request.config.clone());
         match self.worker.nest(request) {
@@ -554,6 +708,7 @@ impl App {
             unplaced_ids: best.unplaced_ids,
             locked: Default::default(),
         });
+        self.request_audit();
         self.console.log(console::Kind::Best, "recovered the best result from a previous session");
     }
 }
@@ -579,6 +734,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 import::panel(self, ui);
+                library::panel(self, ui);
                 shapes::panel(self, ui);
                 result::panel(self, ui);
                 // Clearance for the floating RUN control, which is anchored

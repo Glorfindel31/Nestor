@@ -2,7 +2,7 @@
 //! config, identical part_count/sheet, the *only* difference is the
 //! geometry source - DXF import (`entities_to_polygons`) vs SVG import
 //! (`geometry::svg_import::parse_svg`) of the same real-world hat tile
-//! (`tests/fixtures/hat-monotile.dxf` vs `hat-monotile.svg`).
+//! (`tests/fixtures/one.dxf` vs `one.svg`).
 //!
 //! **Resolved.** Both sources now reach 78.57% at `part_count=252` on
 //! generation 1. Keeping the trail, because the wrong hypothesis held for a
@@ -18,7 +18,7 @@
 //! genuinely razor-edged (see `hat_test.rs` on `rotations=6` and `8+`), and
 //! wrong.
 //!
-//! The actual cause: **`hat-monotile.svg` was a lower-precision copy of the
+//! The actual cause: **`one.svg` was a lower-precision copy of the
 //! same design.** Its coordinates were rounded to 8 decimals, which leaves
 //! its *edge lengths* wrong by up to 8.4e-9 - over eight times
 //! `polygon::TOL`. For an exactly-interlocking monotile, that is not a
@@ -65,20 +65,20 @@ fn repo_root() -> PathBuf {
 }
 
 fn load_dxf_hat() -> LayeredPolygon {
-    let fixture = repo_root().join("tests/fixtures/hat-monotile.dxf");
+    let fixture = repo_root().join("tests/fixtures/one.dxf");
     let drawing = Drawing::load_file(&fixture).unwrap_or_else(|e| panic!("couldn't parse {}: {e}", fixture.display()));
     let flat = entities_to_polygons(drawing.entities(), CURVE_TOLERANCE);
     let tree = build_polygon_tree(flat);
-    assert_eq!(tree.len(), 1, "expected exactly one closed profile in hat-monotile.dxf, got {}", tree.len());
+    assert_eq!(tree.len(), 1, "expected exactly one closed profile in one.dxf, got {}", tree.len());
     tree.into_iter().next().unwrap()
 }
 
 fn load_svg_hat() -> LayeredPolygon {
-    let fixture = repo_root().join("tests/fixtures/hat-monotile.svg");
+    let fixture = repo_root().join("tests/fixtures/one.svg");
     let text = std::fs::read_to_string(&fixture).unwrap_or_else(|e| panic!("couldn't read {}: {e}", fixture.display()));
     let flat = geometry::svg_import::parse_svg(&text, CURVE_TOLERANCE, None).unwrap_or_else(|e| panic!("couldn't parse {}: {e}", fixture.display()));
     let tree = build_polygon_tree(flat);
-    assert_eq!(tree.len(), 1, "expected exactly one closed profile in hat-monotile.svg, got {}", tree.len());
+    assert_eq!(tree.len(), 1, "expected exactly one closed profile in one.svg, got {}", tree.len());
     tree.into_iter().next().unwrap()
 }
 
