@@ -106,8 +106,7 @@ fn main() {
         rotations: 2,
         dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD,
         curve_tolerance: CURVE_TOLERANCE,
-        part_rules: Default::default(),
-    };
+        part_rules: Default::default(), banded_pass: true };
     let ga_config = GaConfig { population_size: 20, mutation_rate: 10.0, rotations: 2, mirror: false, part_rules: Default::default() };
     let mut ga = GeneticAlgorithm::new((0..part_count).collect(), ga_config, Vec::new(), SEED);
 

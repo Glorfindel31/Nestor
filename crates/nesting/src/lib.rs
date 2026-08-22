@@ -2,6 +2,7 @@
 //! progress events. See RUST-REWRITE-PLAN.md Phase 3-5.
 
 pub mod audit;
+pub mod banded;
 pub mod benchmark_log;
 pub mod cache;
 pub mod cache_key;

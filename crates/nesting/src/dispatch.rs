@@ -272,7 +272,9 @@ mod tests {
             placement_type: PlacementType::Gravity,
             rotations: 1,
             dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD,
-            curve_tolerance: 0.3, part_rules: Default::default()
+            curve_tolerance: 0.3,
+            part_rules: Default::default(),
+            banded_pass: true,
         }
     }
 

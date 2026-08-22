@@ -215,8 +215,7 @@ fn run(scenario: &Scenario, generations: usize, rotations: u32) {
         rotations,
         curve_tolerance: CURVE_TOLERANCE,
         dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD,
-        part_rules: Default::default(),
-    };
+        part_rules: Default::default(), banded_pass: true };
     let ga_config = GaConfig { population_size: POPULATION, mutation_rate: 10.0, rotations, mirror: false, part_rules: Default::default() };
     // `NEST_INTERLEAVE=1` round-robins the seed order across part types
     // instead of listing every copy of type 1, then every copy of type 2, and

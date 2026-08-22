@@ -412,6 +412,16 @@ impl NestConfigDto {
             // Filled in by the caller from `expand_parts` - this struct has
             // no access to the parts list, only to the job-wide settings.
             part_rules: Default::default(),
+            // **Off.** The band packer (`nesting::banded`) is correct in its
+            // own unit tests and demonstrably finds the two-band layouts the
+            // greedy pass structurally cannot - but its pair placement is not
+            // yet right on real geometry: `commands::tests::
+            // a_tight_fit_nest_on_real_geometry_produces_no_spurious_findings`
+            // catches its output overlapping and running off the sheet, which
+            // is the NFP reference-point convention in `banded::build_unit`
+            // still being wrong. Shipping it on would trade a 76.5% sheet for
+            // an invalid one. Flip this once that test passes with it enabled.
+            banded_pass: false,
         }
     }
 

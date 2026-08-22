@@ -199,6 +199,10 @@ pub struct PlacementConfig {
     /// part follows the global `rotations` grid and mirror switch, exactly
     /// as before this field existed - see `PartRule`.
     pub part_rules: PartRules,
+    /// Also try a band/shelf layout per sheet and keep it when it beats the
+    /// greedy pass - see `crate::banded`. Costs one extra bounding-box pass
+    /// per sheet, which is cheap next to the NFP work already done.
+    pub banded_pass: bool,
 }
 
 /// Per-part constraints on how a part may be oriented. Absent (no entry in
@@ -1347,6 +1351,17 @@ pub fn placement_is_valid(sheet: &LayeredPolygon, part: &LayeredPolygon, at: Pla
     })
 }
 
+/// The sheet's own bounding box - what the band packer fills.
+///
+/// A band layout is rectangle arithmetic, so a non-rectangular sheet (a
+/// remnant, say) is treated as its bounding box and the resulting placements
+/// are simply worse, not wrong: the caller compares them against the greedy
+/// pass and keeps whichever won, and on a non-rectangular sheet that will be
+/// the greedy one.
+fn sheet_usable_bounds(sheet: &LayeredPolygon) -> Bounds {
+    get_polygon_bounds(&sheet.points).unwrap_or(Bounds { x: 0.0, y: 0.0, width: 0.0, height: 0.0 })
+}
+
 #[must_use]
 pub fn place_parts(
     sheets: &[LayeredPolygon],
@@ -1412,6 +1427,11 @@ pub fn place_parts(
         // silently dropping untried duplicate-id siblings (quantity > 1 of
         // the same part is normal usage; nothing requires ids to be unique).
         let mut placed_indices: Vec<usize> = Vec::new();
+        // The part list as it stands before the greedy pass mutates rotations
+        // in place - `banded::pack_sheet` needs the same starting state to be
+        // a fair comparison, and the greedy loop rewrites `parts[i]` as it
+        // rotates trial candidates.
+        let parts_before_sheet: Vec<NestPart> = if config.banded_pass { parts.clone() } else { Vec::new() };
         let mut placed_parts_out: Vec<PlacedPart> = Vec::new();
         let mut minwidth: Option<f64> = None;
         let mut minarea: Option<f64> = None;
@@ -1848,11 +1868,61 @@ pub fn place_parts(
         // sheet) charged once per *additional* sheet opened - opening one
         // more sheet can never pay for itself via a better leftover score
         // on this one.
-        let sheet_placed_area: f64 = placed.iter().map(|p| polygon_material_area(&p.polygon)).sum();
+        let mut sheet_placed_area: f64 = placed.iter().map(|p| polygon_material_area(&p.polygon)).sum();
         let leftover = (sheet_usable_area - sheet_placed_area).max(0.0);
         fitness += leftover / sheet_area;
 
         total_placed_area += sheet_placed_area;
+
+        // Second opinion: a band/shelf layout of the same sheet from the same
+        // remaining parts. The greedy pass above is contact-driven and cannot
+        // represent "fill a band in one orientation, then switch the rest of
+        // the sheet to the other" - a structure worth 88% where greedy
+        // plateaus at 76% on rectangle-ish parts (see `crate::banded`). It is
+        // equally true that band packing is hopeless on interlocking shapes,
+        // which is why this is a comparison and not a replacement: whichever
+        // pass put more true material on this sheet wins it.
+        // Skipped when any part in play is *dominant* - a part large enough
+        // to close its sheet on its own (`dominant_part_area_threshold`). That
+        // rule is deliberate, documented behaviour the greedy pass implements
+        // with an early break, and the band packer knows nothing about it: it
+        // would happily fill the rest of the sheet and silently repeal a
+        // decision the user configured.
+        let has_dominant = parts_before_sheet.iter().any(|p| polygon_area(&p.polygon.points).abs() >= config.dominant_part_area_threshold * sheet_area);
+        if config.banded_pass && !has_dominant {
+            if let Some(banded) = crate::banded::pack_sheet(sheet_usable_bounds(sheet), &parts_before_sheet, config.curve_tolerance) {
+                // Scored on the *same* measure the greedy pass reports -
+                // `polygon_material_area`, holes subtracted - not on the band
+                // packer's own padded-outline figure. Comparing those two
+                // directly let the band pass win sheets it had actually lost,
+                // because a padded outline is simply bigger.
+                let banded_material: f64 = banded
+                    .consumed
+                    .iter()
+                    .filter_map(|&i| parts_before_sheet.get(i))
+                    .map(|p| polygon_material_area(&p.polygon))
+                    .sum();
+                if banded_material > sheet_placed_area {
+                    placed_parts_out = banded.placed;
+                    placed_indices = banded.consumed;
+                    total_placed_area += banded_material - sheet_placed_area;
+                    fitness -= (banded_material - sheet_placed_area) / sheet_area;
+                    sheet_placed_area = banded_material;
+                    placed = placed_parts_out
+                        .iter()
+                        .filter_map(|p| {
+                            parts_before_sheet.iter().find(|q| q.id == p.id).map(|q| PlacedObstacle {
+                                polygon: rotate_layered_polygon(&q.polygon, p.rotation),
+                                id: q.id,
+                                source_id: q.source_id,
+                                rotation: p.rotation,
+                                placement: p.placement,
+                            })
+                        })
+                        .collect();
+                }
+            }
+        }
 
         // Remove exactly the placed slots, by position - see the
         // `placed_indices` doc comment above for why this can't be `.id`-keyed.
@@ -1949,6 +2019,7 @@ mod tests {
             dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD,
             curve_tolerance: 0.3,
             part_rules: Default::default(),
+            banded_pass: true,
         }
     }
 

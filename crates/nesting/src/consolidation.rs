@@ -88,6 +88,13 @@ pub fn refine_consolidation(
     deadline: Instant,
     cache: &NfpCache,
 ) -> RefineResult {
+    // Band packing is off for this pass: it re-packs a sheet from scratch,
+    // and this function's whole contract is to *move existing placements*
+    // around. Letting it re-lay a sheet here would mean the caller's parts
+    // came back in positions it never asked to have changed - and, in
+    // `repack_sheet`, would ignore pinned parts outright.
+    let config = &PlacementConfig { banded_pass: false, ..config.clone() };
+
     // Cache-key identity: shared by every quantity-copy of the same
     // original part (see `placement::NestPart::source_id`'s doc comment).
     // Falls back to the instance id itself when `shape_ids` doesn't know
@@ -317,7 +324,9 @@ mod tests {
             placement_type: PlacementType::Gravity,
             rotations: 1,
             dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD,
-            curve_tolerance: 0.3, part_rules: Default::default()
+            curve_tolerance: 0.3,
+            part_rules: Default::default(),
+            banded_pass: true,
         }
     }
 

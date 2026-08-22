@@ -67,6 +67,13 @@ pub fn repack_sheet(
     locked: &[usize],
     should_cancel: &(impl Fn() -> bool + Sync),
 ) -> Option<SheetPlacement> {
+    // Band packing is off for this pass: it re-packs a sheet from scratch,
+    // and this function's whole contract is to *move existing placements*
+    // around. Letting it re-lay a sheet here would mean the caller's parts
+    // came back in positions it never asked to have changed - and, in
+    // `repack_sheet`, would ignore pinned parts outright.
+    let placement_config = &PlacementConfig { banded_pass: false, ..placement_config.clone() };
+
     if current.parts.is_empty() {
         return None;
     }
@@ -249,7 +256,9 @@ mod tests {
             placement_type: PlacementType::Gravity,
             rotations: 1,
             dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD,
-            curve_tolerance: 0.3, part_rules: Default::default()
+            curve_tolerance: 0.3,
+            part_rules: Default::default(),
+            banded_pass: true,
         }
     }
 

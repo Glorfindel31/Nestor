@@ -105,7 +105,7 @@ fn run_job(label: &str, hat: LayeredPolygon, part_count: usize, run_seconds: u64
     let rotations = 2u32;
     let population_size = 20usize;
     let mutation_rate = 10.0f64;
-    let placement_config = PlacementConfig { placement_type: PlacementType::TightFit, rotations, dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD, curve_tolerance: CURVE_TOLERANCE, part_rules: Default::default() };
+    let placement_config = PlacementConfig { placement_type: PlacementType::TightFit, rotations, dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD, curve_tolerance: CURVE_TOLERANCE, part_rules: Default::default(), banded_pass: true };
     let ga_config = GaConfig { population_size, mutation_rate, rotations, mirror: false, part_rules: Default::default() };
     let mut ga = GeneticAlgorithm::new(adam, ga_config, Vec::new(), 0);
 
