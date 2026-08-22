@@ -2641,6 +2641,20 @@ mod tests {
         assert_eq!(polygons[0].children.len(), 20);
     }
 
+    /// The app's own import path, not just `geometry`'s: a drawing whose
+    /// profiles are loose `LINE`/`ARC` segments has to arrive as real parts.
+    /// `entities_to_polygons_chained` is what makes that work and had no
+    /// fixture at all until `chained.dxf` - see
+    /// `crates/geometry/tests/chained_fixtures.rs` for why that matters more
+    /// now that an open `SPLINE` is handed to the same chainer.
+    #[test]
+    fn import_dxf_chains_loose_line_and_arc_segments_into_parts() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/chained.dxf");
+        let polygons = import_dxf(path, 0.3).expect("fixture should parse");
+        assert_eq!(polygons.len(), 2, "expected the rectangle and the D, got {}", polygons.len());
+        assert!(polygons.iter().all(|p| p.layer == "CUT"), "layer identity must survive chaining");
+    }
+
     #[test]
     fn import_dxf_reports_a_missing_file_as_an_error_not_a_panic() {
         assert!(import_dxf("does-not-exist.dxf", 0.3).is_err());
