@@ -9,7 +9,6 @@ pub mod cache_key;
 pub mod consolidation;
 pub mod dispatch;
 pub mod ga;
-pub mod pattern;
 pub mod placement;
 pub mod profile;
 pub mod repack;
