@@ -126,6 +126,8 @@ pub struct App {
     bulk_rot: state::RotRule,
     bulk_mirror: state::MirrorRule,
     bulk_qty: usize,
+    /// Substring the shapes table is filtered by. Empty shows everything.
+    shape_filter: String,
     confirm_remove: bool,
 
     // ---- 03 CONFIGURE ----
@@ -253,6 +255,7 @@ impl App {
             bulk_rot: state::RotRule::Any,
             bulk_mirror: state::MirrorRule::Job,
             bulk_qty: 1,
+            shape_filter: String::new(),
             confirm_remove: false,
             cfg: Default::default(),
             settings_open: false,

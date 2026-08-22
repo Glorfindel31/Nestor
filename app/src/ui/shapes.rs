@@ -52,6 +52,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
             return;
         }
         ui.add_space(6.0);
+        find_row(app, ui);
         bulk_row(app, ui);
         table(app, ui);
     });
@@ -111,6 +112,71 @@ fn bulk_row(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(4.0);
 }
 
+/// Filter and sort, for a job with more rows than fit on screen.
+///
+/// **Sorting reorders `app.shapes` itself** rather than keeping a display
+/// order beside it. There is nothing to preserve: `dto::expand_parts` sorts
+/// the parts by decreasing area for the nest regardless, so table order is
+/// presentation only - and a second ordering to keep in sync with the rows,
+/// the selection and the bulk apply is a standing bug waiting to happen.
+///
+/// **Filtering deselects what it hides**, so "selected" always means "ticked
+/// and on screen". Without that, SELECT ALL under a filter arms rows the user
+/// cannot see, and REMOVE SELECTED then deletes them.
+fn find_row(app: &mut App, ui: &mut egui::Ui) {
+    let lang = app.prefs.lang;
+    let locked = app.controls_locked();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(super::i18n::t(lang, "filter_label")).color(theme::DIM).small());
+        let before = app.shape_filter.clone();
+        ui.add(egui::TextEdit::singleline(&mut app.shape_filter).desired_width(160.0).hint_text(super::i18n::t(lang, "filter_hint")))
+            .on_hover_text(super::i18n::t(lang, "filter_tooltip"));
+        if app.shape_filter != before {
+            let needle = app.shape_filter.to_lowercase();
+            app.shapes.iter_mut().filter(|r| !matches_filter(r, &needle)).for_each(|r| r.selected = false);
+            app.select_all = false;
+        }
+        if !app.shape_filter.is_empty() {
+            let shown = app.shapes.iter().filter(|r| matches_filter(r, &app.shape_filter.to_lowercase())).count();
+            ui.label(
+                RichText::new(super::i18n::tv(lang, "filter_count", &[("shown", &shown.to_string()), ("total", &app.shapes.len().to_string())]))
+                    .color(theme::DIM)
+                    .small(),
+            );
+        }
+
+        ui.add_enabled_ui(!locked, |ui| {
+            ui.label(RichText::new(super::i18n::t(lang, "sort_label")).color(theme::DIM).small());
+            if ui.button(super::i18n::t(lang, "sort_name")).on_hover_text(super::i18n::t(lang, "sort_tooltip")).clicked() {
+                app.shapes.sort_by(|a, b| a.file.to_lowercase().cmp(&b.file.to_lowercase()));
+            }
+            if ui.button(super::i18n::t(lang, "sort_size")).on_hover_text(super::i18n::t(lang, "sort_tooltip")).clicked() {
+                // Biggest first: the parts that decide whether a job fits are
+                // the ones worth looking at, and they are the ones the engine
+                // seeds with too.
+                app.shapes.sort_by(|a, b| b.area.total_cmp(&a.area));
+            }
+            if ui.button(super::i18n::t(lang, "sort_qty")).on_hover_text(super::i18n::t(lang, "sort_tooltip")).clicked() {
+                app.shapes.sort_by(|a, b| b.qty.cmp(&a.qty));
+            }
+            if ui.button(super::i18n::t(lang, "sort_role")).on_hover_text(super::i18n::t(lang, "sort_tooltip")).clicked() {
+                // Sheets first - they are what everything else is placed on,
+                // and there are usually one or two of them among a hundred
+                // parts.
+                app.shapes.sort_by_key(|r| r.role != Role::Sheet);
+            }
+        });
+    });
+    ui.add_space(4.0);
+}
+
+/// Case-insensitive substring of the source name. `needle` is expected
+/// already lowercased by the caller - it is compared against every row on
+/// every frame.
+fn matches_filter(row: &super::state::ShapeRow, needle: &str) -> bool {
+    needle.is_empty() || row.file.to_lowercase().contains(needle)
+}
+
 /// Every row is as tall as its preview, so this is the height everything else
 /// in the row aligns against.
 const THUMBNAIL: f32 = 88.0;
@@ -132,6 +198,7 @@ fn table(app: &mut App, ui: &mut egui::Ui) {
     // table rather than per row, since the reference sheet is job-wide.
     let sheet_area = app.largest_sheet_area();
     let threshold = app.cfg.dominant_threshold;
+    let needle = app.shape_filter.to_lowercase();
 
     // Takes whatever height is going, rather than a fixed 560px that left a
     // band of empty panel below a long list on a tall window - and still
@@ -152,7 +219,8 @@ fn table(app: &mut App, ui: &mut egui::Ui) {
             let mut select_all = app.select_all;
             if cell(ui, |ui| ui.checkbox(&mut select_all, "").on_hover_text(super::i18n::t(lang, "select_all_tooltip"))).changed() {
                 app.select_all = select_all;
-                app.shapes.iter_mut().for_each(|s| s.selected = select_all);
+                // Visible rows only - see `find_row`.
+                app.shapes.iter_mut().filter(|r| matches_filter(r, &needle)).for_each(|s| s.selected = select_all);
             }
             for key in ["th_index", "th_name", "th_bbox", "th_preview", "th_role", "th_qty"] {
                 cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, key)).color(theme::DIM).small()));
@@ -162,7 +230,7 @@ fn table(app: &mut App, ui: &mut egui::Ui) {
             cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, "th_dominant")).color(theme::DIM).small()).on_hover_text(super::i18n::t(lang, "th_dominant_tooltip")));
             ui.end_row();
 
-            for (index, row) in app.shapes.iter_mut().enumerate() {
+            for (index, row) in app.shapes.iter_mut().enumerate().filter(|(_, r)| matches_filter(r, &needle)) {
                 cell(ui, |ui| ui.add_enabled_ui(!locked, |ui| ui.checkbox(&mut row.selected, "")));
                 cell(ui, |ui| ui.label(RichText::new((index + 1).to_string()).color(theme::DIM)));
                 cell(ui, |ui| ui.label(format!("{}-{}", row.file, index + 1)));
