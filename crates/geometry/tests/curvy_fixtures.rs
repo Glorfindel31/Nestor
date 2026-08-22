@@ -154,3 +154,23 @@ fn a_unitless_svg_is_scaled_by_a_fallback_that_can_be_wrong() {
         dxf.height / svg.height
     );
 }
+
+/// The other half of the fallback: it has to be *reported*, not just
+/// documented in a test. A part that imports cleanly at 3/4 size is only
+/// catchable by the person who drew it, so the app says so out loud - and
+/// this is what proves the flag it says it on actually fires.
+#[test]
+fn a_guessed_size_is_flagged_as_guessed() {
+    let svg = std::fs::read_to_string(fixture("curvy.svg")).expect("curvy.svg should read");
+    assert!(geometry::svg_import::size_is_guessed(&svg), "curvy.svg has a viewBox and no width/height - its size is a guess");
+
+    // A file that does say how big it is must not be flagged, or the warning
+    // becomes noise on every import and stops being read.
+    let sized = svg.replacen("<svg", "<svg width=\"100mm\" height=\"100mm\"", 1);
+    assert!(sized.contains("width="), "the fixture rewrite must have taken");
+    assert!(!geometry::svg_import::size_is_guessed(&sized), "an SVG with a real width/height is not a guess");
+
+    // Nor must anything that is not a parseable SVG at all: it is about to
+    // fail for a better reason.
+    assert!(!geometry::svg_import::size_is_guessed("not xml"));
+}

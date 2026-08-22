@@ -64,7 +64,10 @@ impl ExportFormat {
 pub enum Msg {
     /// One file finished importing. Sent per file, not per batch, so a
     /// 30-file drop shows progress instead of going quiet.
-    Imported { file: String, shapes: Vec<PolygonDto> },
+    /// `size_guessed` means nothing in the file said how big the drawing is
+    /// and 96dpi was assumed - see `geometry::svg_import::size_is_guessed`.
+    /// Always `false` for DXF, which carries real-world units by definition.
+    Imported { file: String, shapes: Vec<PolygonDto>, size_guessed: bool },
     ImportFailed { file: String, error: String },
     ImportBatchDone { ok: usize, failed: usize },
 
@@ -154,12 +157,12 @@ impl Worker {
                 let result = if is_svg {
                     commands::import_svg(&p, tolerance, svg_unit.as_deref())
                 } else {
-                    commands::import_dxf(&p, tolerance)
+                    commands::import_dxf(&p, tolerance).map(|shapes| (shapes, false))
                 };
                 match result {
-                    Ok(shapes) => {
+                    Ok((shapes, size_guessed)) => {
                         ok += 1;
-                        emit.send(Msg::Imported { file: name, shapes });
+                        emit.send(Msg::Imported { file: name, shapes, size_guessed });
                     }
                     Err(error) => {
                         failed += 1;

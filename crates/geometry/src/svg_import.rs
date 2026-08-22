@@ -147,6 +147,30 @@ fn parse_viewbox(s: &str) -> Result<(f64, f64, f64, f64), String> {
 /// physically-sized document). Otherwise falls back to treating raw
 /// coordinates as CSS px 1:1 - correct per the SVG spec's own default when no
 /// `viewBox` establishes a different user-unit scale.
+/// Whether this document's real-world size had to be *guessed*: it carries a
+/// `viewBox` but no usable `width`/`height`, so nothing in the file says how
+/// big the drawing actually is and `resolve_scale` falls back to 96dpi CSS
+/// pixels.
+///
+/// **This is the one import failure that produces a perfectly clean result at
+/// the wrong size.** `curvy.svg` is the standing example: its units are
+/// PostScript points, so the fallback lands every part at exactly 3/4 of its
+/// true size and nothing about the geometry looks wrong. No parser can tell -
+/// only the person who drew it can - so the only honest handling is to say so
+/// out loud. Asserted both ways in `crates/geometry/tests/curvy_fixtures.rs`.
+///
+/// Returns `false` on anything it cannot parse: this is a warning, and a
+/// warning that fires on a file that is about to fail anyway is noise.
+#[must_use]
+pub fn size_is_guessed(svg_text: &str) -> bool {
+    let Ok(doc) = roxmltree::Document::parse(svg_text) else { return false };
+    let root = doc.root_element();
+    if root.tag_name().name() != "svg" {
+        return false;
+    }
+    matches!(resolve_scale(&root), Ok((sx, _)) if sx == MM_PER_PX) && root.attribute("viewBox").is_some()
+}
+
 fn resolve_scale(root: &Node) -> Result<(f64, f64), String> {
     let width = root.attribute("width").map(parse_length).transpose()?;
     let height = root.attribute("height").map(parse_length).transpose()?;

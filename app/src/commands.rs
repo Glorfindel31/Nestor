@@ -245,11 +245,16 @@ pub fn import_dxf(path: &str, curve_tolerance: f64) -> Result<Vec<PolygonDto>, S
 /// `viewBox`/`width`/`height` auto-detection. No `TEXT`/`MTEXT`-equivalent
 /// attachment (SVG import doesn't support text elements yet, see that
 /// module's doc for scope).
-pub fn import_svg(path: &str, curve_tolerance: f64, unit_override: Option<&str>) -> Result<Vec<PolygonDto>, String> {
+/// Returns the shapes, and whether their real-world size had to be guessed -
+/// see `geometry::svg_import::size_is_guessed`. Only ever true when the
+/// caller left the unit to auto-detection: an explicit `unit_override` is the
+/// user answering that question themselves.
+pub fn import_svg(path: &str, curve_tolerance: f64, unit_override: Option<&str>) -> Result<(Vec<PolygonDto>, bool), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("couldn't read {path}: {e}"))?;
     let flat = geometry::svg_import::parse_svg(&text, curve_tolerance, unit_override)?;
+    let guessed = unit_override.is_none() && geometry::svg_import::size_is_guessed(&text);
     let tree = geometry::dxf_import::build_polygon_tree(flat);
-    Ok(tree.iter().map(PolygonDto::from).collect())
+    Ok((tree.iter().map(PolygonDto::from).collect(), guessed))
 }
 
 /// Builds the `Vec<SheetLayout>` both `export_dxf`/`export_svg` write out -

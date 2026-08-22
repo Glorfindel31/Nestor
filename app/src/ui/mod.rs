@@ -324,8 +324,17 @@ impl App {
 
     fn handle(&mut self, msg: Msg) {
         match msg {
-            Msg::Imported { file, shapes } => {
+            Msg::Imported { file, shapes, size_guessed } => {
                 self.console.log(console::Kind::Plain, format!("imported {} shape(s) from {file}", shapes.len()));
+                if size_guessed {
+                    // Loud on purpose: this is the one import that succeeds
+                    // perfectly at the wrong size, and nothing downstream -
+                    // not the preview, not the audit, not the export - can
+                    // tell. Only the person who drew it can.
+                    let warning = self.tv("import_size_guessed", &[("file", &file)]);
+                    self.console.error(warning.clone());
+                    self.import_status.err(warning);
+                }
                 self.imported_this_batch += shapes.len();
                 for poly in shapes {
                     self.push_shape(file.clone(), poly);
