@@ -35,7 +35,7 @@
 
 use std::collections::HashMap;
 
-use geometry::dxf_import::{rotate_layered_polygon, LayeredPolygon};
+use geometry::dxf_import::rotate_layered_polygon;
 use geometry::obstacle_nfp::obstacle_nfp;
 use geometry::polygon::{get_polygon_bounds, polygon_area, Bounds};
 
@@ -468,6 +468,7 @@ fn fill_band(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geometry::dxf_import::LayeredPolygon;
 
     fn pack_sheet_t(b: Bounds, parts: &[NestPart]) -> Option<BandedSheet> {
         pack_sheet(b, parts, 0.3)
