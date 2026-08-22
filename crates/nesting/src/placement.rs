@@ -649,14 +649,28 @@ struct Candidate {
 }
 
 /// Port of `findBestCandidate`: replays the bar-climbing comparison the
-/// scoring loop used, skipping already-`excluded` candidates. Must stay a
-/// byte-for-byte match of the original comparison (including the
-/// placement-type-independent x tiebreak) for deferred-validation retries to
-/// reproduce what an interleaved validate-as-you-go loop would have picked.
+/// scoring loop used, skipping already-`excluded` candidates. Must stay in
+/// step with the scoring loop's own comparison for deferred-validation
+/// retries to reproduce what an interleaved validate-as-you-go loop would
+/// have picked.
+///
+/// **The y tiebreak is not in the original, and it fixes a real loss.** The
+/// original breaks a tie on x alone and then keeps whichever candidate the
+/// NFP happened to list first. Eight 40x40 squares on a 100x100 sheet, no
+/// rotation: `Gravity` and `Box` placed three and reported the rest
+/// unplaced, because the third went to (40, 40) rather than the equally
+/// scored (40, 0), and the leftover slot at (40, 0) then touches placed
+/// material on two sides - so its legal region is a *line*, and a
+/// measure-zero region does not survive a polygon difference. Nothing is
+/// wrong with the geometry; the position simply stops existing. Preferring
+/// the lower of two equally compact, equally left candidates is both the
+/// rule a gravity packer already implies and the one that does not strand
+/// the last slot.
 fn find_best_candidate(candidates: &[Candidate], excluded: &HashSet<usize>) -> Option<usize> {
     let mut minarea: Option<f64> = None;
     let mut minwidth: Option<f64> = None;
     let mut minx: Option<f64> = None;
+    let mut miny: Option<f64> = None;
     let mut best: Option<usize> = None;
 
     for (idx, cand) in candidates.iter().enumerate() {
@@ -665,6 +679,7 @@ fn find_best_candidate(candidates: &[Candidate], excluded: &HashSet<usize>) -> O
         }
         let area = cand.score.area();
         let x = cand.shiftvector.x;
+        let y = cand.shiftvector.y;
 
         // No `.unwrap()`: the original relied on `minarea.is_none()` being
         // the *first* `||` operand and Rust short-circuiting past the
@@ -686,7 +701,12 @@ fn find_best_candidate(candidates: &[Candidate], excluded: &HashSet<usize>) -> O
                     }
                     _ => area < current_minarea,
                 };
-                width_wins || minx.is_some_and(|current_minx| almost_equal(current_minarea, area, None) && x < current_minx)
+                let ties_on_area = almost_equal(current_minarea, area, None);
+                width_wins
+                    || minx.is_some_and(|current_minx| ties_on_area && x < current_minx)
+                    || (ties_on_area
+                        && minx.is_some_and(|current_minx| almost_equal(x, current_minx, None))
+                        && miny.is_some_and(|current_miny| y < current_miny))
             }
         };
 
@@ -694,6 +714,7 @@ fn find_best_candidate(candidates: &[Candidate], excluded: &HashSet<usize>) -> O
             minarea = Some(area);
             minwidth = cand.score.width();
             minx = Some(x);
+            miny = Some(y);
             best = Some(idx);
         }
     }
@@ -2082,6 +2103,22 @@ mod tests {
         assert!(separated(x0, y0, s0, x1, y1, s1), "parts overlap: ({x0},{y0},{s0}) vs ({x1},{y1},{s1})");
     }
 
+    /// Reproduction for `PLAN.md` 4's "Gravity and Box fail to place parts
+    /// that plainly fit": eight 40x40 squares, one 100x100 sheet, no
+    /// rotation. Four fit, in the obvious 2x2.
+    #[test]
+    fn every_placement_type_fills_a_sheet_that_takes_exactly_four_squares() {
+        for placement_type in [PlacementType::Gravity, PlacementType::Box, PlacementType::ConvexHull, PlacementType::TightFit, PlacementType::GravityTightFit] {
+            let sheet = square(0.0, 0.0, 100.0);
+            let parts: Vec<NestPart> = (0..8).map(|id| NestPart { id, source_id: 0, polygon: square(0.0, 0.0, 40.0), rotation: 0.0 }).collect();
+            let mut config = config(placement_type);
+            config.banded_pass = false;
+            let result = place_parts(&[sheet], parts, &config, &NfpCache::new(), &|| false, &|_, _| {}, &|_, _, _| {}).unwrap();
+            let on_first = result.placements.first().map_or(0, |p| p.parts.len());
+            assert_eq!(on_first, 4, "{placement_type:?} put {on_first} of 4 squares on the sheet");
+        }
+    }
+
     /// Guards the actual point of wiring `NfpCache` into `place_parts`: a
     /// passed-in cache must come out with real entries, not sit unused -
     /// this is the difference between "the parameter compiles" and "the
@@ -2270,22 +2307,30 @@ mod tests {
     }
 
     /// `TightFit` must prefer positions with real local contact over ones
-    /// with little or none, unlike `Gravity`/`Box`/`ConvexHull` (which only
-    /// score the aggregate bounding shape of everything placed so far, not
-    /// adjacency). Two obstacles form an L-shaped corner at (60,10) on an
-    /// otherwise-empty 200x200 sheet. `Gravity` settles for a single-wall
-    /// touch at (60,30) - that shrinks its tracked bounding measure just as
-    /// well as the fuller L-corner does, so it never actually compares local
-    /// contact at all. `TightFit` must land on a real high-contact position
-    /// instead - either the L-corner itself or one of the sheet's own
-    /// corners (both near the same contact-area ceiling; confirmed by
-    /// direct measurement, not assumed) - and must not match Gravity's
-    /// single-wall answer. `GravityTightFit` gets its own, more precise
-    /// assertion: (60,30) and (60,10) are exactly tied by Gravity's cheap
-    /// metric (neither grows the existing combined bounding box), so the
-    /// hybrid's tie-break must land on the fuller L-corner specifically,
-    /// not just "some high-contact spot" the way plain `TightFit`'s
-    /// assertion allows.
+    /// with little or none. Two obstacles form an L-shaped corner at (60,10)
+    /// on an otherwise-empty 200x200 sheet; `TightFit` must land on a real
+    /// high-contact position - either the L-corner itself or one of the
+    /// sheet's own corners (both near the same contact-area ceiling;
+    /// confirmed by direct measurement, not assumed).
+    ///
+    /// **This fixture no longer separates `Gravity` from `TightFit`, and
+    /// that is a fix, not a regression.** (60,30) and (60,10) are *exactly
+    /// tied* by Gravity's cheap metric - neither grows the existing combined
+    /// bounding box - so which one it returns was never a judgement about
+    /// contact, only about how the tie fell. It used to fall on the
+    /// single-wall touch at (60,30) because the original tie-break compares
+    /// x alone and both candidates sit at x=60. With `find_best_candidate`'s
+    /// y tie-break (see its doc comment for the stranded-slot bug that
+    /// bought) it falls on the L-corner instead. Gravity still does not
+    /// score adjacency at all; it just now defaults toward the origin when
+    /// its own measure cannot choose. The real Gravity-vs-TightFit
+    /// disagreement is asserted by
+    /// `gravity_corrective_places_the_second_part_like_gravity_not_tight_fit`,
+    /// on a scenario where the two are not tied.
+    ///
+    /// `GravityTightFit` keeps its own, more precise assertion: it must land
+    /// on the fuller L-corner *by measuring contact*, not just "some
+    /// high-contact spot" the way plain `TightFit`'s assertion allows.
     #[test]
     fn tight_fit_prefers_high_contact_positions_gravity_ignores() {
         let sheet = square(0.0, 0.0, 200.0);
@@ -2300,7 +2345,7 @@ mod tests {
 
         let gravity_outcome = try_place_part_on_sheet(&part, 2, 0.0, &sheet_nfp, &sheet, &placed, &config(PlacementType::Gravity), &NfpCache::new(), &|_| {});
         let PlaceOnSheetOutcome::Placed(gravity) = gravity_outcome else { panic!("gravity should place: {gravity_outcome:?}") };
-        assert_eq!((gravity.position.x, gravity.position.y), (60.0, 30.0), "test's own assumption about Gravity's answer changed");
+        assert_eq!((gravity.position.x, gravity.position.y), (60.0, 10.0), "test's own assumption about Gravity's answer changed");
 
         let tight_outcome = try_place_part_on_sheet(&part, 2, 0.0, &sheet_nfp, &sheet, &placed, &config(PlacementType::TightFit), &NfpCache::new(), &|_| {});
         let PlaceOnSheetOutcome::Placed(tight) = tight_outcome else { panic!("tight fit should place: {tight_outcome:?}") };
@@ -2312,20 +2357,14 @@ mod tests {
             tight.position.x,
             tight.position.y
         );
-        assert_ne!(
-            (tight.position.x, tight.position.y),
-            (gravity.position.x, gravity.position.y),
-            "TightFit should not settle for Gravity's single-wall touch when a fuller-contact corner is reachable"
-        );
-
         // GravityTightFit: Gravity's own bounding measure doesn't grow
         // whether the part sits at (60,30) (touching just the left wall) or
         // (60,10) (touching both walls) - both stay within the same
         // already-existing combined bounding box - so the two are tied by
-        // Gravity's cheap metric, and the tie-break should pick the fuller
-        // L-corner contact instead of Gravity's own plain x-position
-        // tiebreak (which has no preference between x=60 candidates at
-        // different y at all, since x doesn't differ).
+        // Gravity's cheap metric, and the tie-break must pick the fuller
+        // L-corner by *measuring contact*. That it now agrees with plain
+        // Gravity's positional tie-break on this fixture is a coincidence of
+        // the geometry, not the mechanism under test.
         let hybrid_outcome = try_place_part_on_sheet(&part, 2, 0.0, &sheet_nfp, &sheet, &placed, &config(PlacementType::GravityTightFit), &NfpCache::new(), &|_| {});
         let PlaceOnSheetOutcome::Placed(hybrid) = hybrid_outcome else { panic!("hybrid should place: {hybrid_outcome:?}") };
         assert_eq!(
