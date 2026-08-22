@@ -623,14 +623,14 @@ fn do_export(app: &mut App, format: ExportFormat) {
     app.worker.export(format, path, export, report);
 }
 
-/// Every exported file is named `NEST[hh-mm]_[YYYY-MM-DD]`, local time.
+/// Every exported file is named `NESThh-mm_YYYY-MM-DD`, local time.
 ///
 /// A fixed default meant every export landed on `nest.dxf` and quietly
 /// overwrote the last one, which is exactly wrong for a workflow that produces
 /// several attempts of the same job in a sitting. The user can still rename in
 /// the dialog; this only decides what it opens with.
 fn export_file_name(ext: &str) -> String {
-    format!("{}.{ext}", chrono::Local::now().format("NEST[%H-%M]_[%Y-%m-%d]"))
+    format!("{}.{ext}", chrono::Local::now().format("NEST%H-%M_%Y-%m-%d"))
 }
 
 /// The part list the PDF report prints - source shapes as the user defined
@@ -682,12 +682,8 @@ mod tests {
     #[test]
     fn every_export_is_named_for_the_moment_it_was_made() {
         let name = export_file_name("pdf");
-        assert!(name.starts_with("NEST["), "got {name}");
-        assert!(name.ends_with("].pdf"), "got {name}");
-        // NEST[hh-mm]_[YYYY-MM-DD].pdf
-        assert_eq!(name.len(), "NEST[00-00]_[0000-00-00].pdf".len(), "got {name}");
         let stamp: String = name.chars().map(|c| if c.is_ascii_digit() { '0' } else { c }).collect();
-        assert_eq!(stamp, "NEST[00-00]_[0000-00-00].pdf");
+        assert_eq!(stamp, "NEST00-00_0000-00-00.pdf", "got {name}");
     }
 
     fn poly(w: f64, h: f64) -> PolygonDto {
