@@ -3,9 +3,23 @@ name = "rustynesting"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+# The engine entry points (`commands`, `dto`) are plain UI-free functions, and
+# two binaries need them: the window and the headless `nest` CLI. Cargo will
+# only share code between binaries through a library.
+name = "rustynesting"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rustynesting"
 path = "src/main.rs"
+
+[[bin]]
+# Headless: import, nest, report, optionally export. Its own binary rather
+# than a flag on the GUI one, because that one is built for the `windows`
+# subsystem and has no stdout when run from a terminal.
+name = "nest"
+path = "src/bin/nest.rs"
 
 [build-dependencies]
 winresource = "0.1"

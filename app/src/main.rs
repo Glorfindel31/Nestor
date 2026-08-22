@@ -3,21 +3,14 @@
 // default and it had simply never been added here, so every release build
 // opened a stray terminal alongside the window. `not(debug_assertions)` keeps
 // stdout/stderr visible under `cargo run`, where it's wanted.
+//
+// It is also why the headless CLI is a *separate* binary (`src/bin/nest.rs`)
+// rather than a subcommand of this one: a `windows` subsystem executable run
+// from a terminal has no stdout attached to it at all, so a CLI mode built
+// into this binary would print into the void on the one platform this app
+// ships on.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod commands;
-mod dto;
-mod paths;
-mod ui;
-mod worker;
-
 fn main() -> eframe::Result {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Nestor")
-            .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([900.0, 600.0]),
-        ..Default::default()
-    };
-    eframe::run_native("rustynesting", options, Box::new(|cc| Ok(Box::new(ui::App::new(cc)))))
+    rustynesting::run_gui()
 }

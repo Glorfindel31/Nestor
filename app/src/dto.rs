@@ -466,7 +466,10 @@ impl NestConfigDto {
             // `banded::pareto_front`, and
             // `nesting/tests/banded_real_geometry.rs` for the overlap and
             // on-sheet invariants that gate it.
-            banded_pass: true,
+            // `NEST_NO_BANDED=1` turns it off, matching the same switch
+            // `sheet_spread` honours - so a suspect result can be bisected
+            // against the greedy path without a rebuild.
+            banded_pass: !std::env::var("NEST_NO_BANDED").is_ok_and(|v| v != "0"),
         }
     }
 
