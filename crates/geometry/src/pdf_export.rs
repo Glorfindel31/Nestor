@@ -264,27 +264,50 @@ struct NestGroup {
 /// place, rounded to 0.1mm - far below any tolerance that matters, and well
 /// above the float noise two independently-computed placements carry.
 fn nest_groups(layouts: &[SheetLayout]) -> Vec<NestGroup> {
-    fn signature(layout: &SheetLayout) -> String {
-        let mut parts: Vec<String> = layout
-            .parts
-            .iter()
-            .map(|p| format!("{:.1}/{:.1}/{:.1}/{:.0}", p.x, p.y, p.rotation, polygon_area(&p.shape.points).abs()))
-            .collect();
-        // Sorted: the same arrangement reached in a different placement order
-        // is the same pattern to whoever has to cut it.
-        parts.sort();
-        let size = get_polygon_bounds(&layout.sheet.points).map_or_else(String::new, |b| format!("{:.1}x{:.1}", b.width, b.height));
-        format!("{size}|{}", parts.join(";"))
+    /// Millimetres. Two placements this close are the same placement - well
+    /// under any tolerance a machine or a person cares about, and well above
+    /// the float noise two independently-computed placements carry.
+    const TOL: f64 = 0.05;
+
+    /// One sheet's arrangement, in a canonical order.
+    ///
+    /// Sorted, because the same arrangement reached in a different placement
+    /// order is the same pattern to whoever has to cut it.
+    fn slots(layout: &SheetLayout) -> Vec<(f64, f64, f64, f64)> {
+        let mut parts: Vec<(f64, f64, f64, f64)> =
+            layout.parts.iter().map(|p| (p.x, p.y, p.rotation, polygon_area(&p.shape.points).abs())).collect();
+        parts.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.total_cmp(&b.2)));
+        parts
+    }
+
+    /// **Compared within a tolerance, never by formatted text.**
+    ///
+    /// Rounding each coordinate to a fixed number of decimals and comparing
+    /// the strings looks equivalent and is not: any part that happens to sit
+    /// on a rounding boundary lands in a different bucket for the sake of a
+    /// difference far below what anyone can measure, and one such part out of
+    /// hundreds splits the whole sheet into its own group. Caught on a real
+    /// 253-piece result whose two sheets were identical down to the drawn
+    /// PDF operators and still reported as two distinct layouts.
+    fn same(a: &[(f64, f64, f64, f64)], b: &[(f64, f64, f64, f64)]) -> bool {
+        a.len() == b.len()
+            && a.iter().zip(b).all(|(p, q)| {
+                (p.0 - q.0).abs() < TOL && (p.1 - q.1).abs() < TOL && (p.2 - q.2).abs() < TOL && (p.3 - q.3).abs() < 1.0
+            })
     }
 
     let mut groups: Vec<NestGroup> = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
+    let mut seen: Vec<(Vec<(f64, f64, f64, f64)>, f64, f64)> = Vec::new();
     for (index, layout) in layouts.iter().enumerate() {
-        let sig = signature(layout);
-        if let Some(at) = seen.iter().position(|s| *s == sig) {
+        let size = get_polygon_bounds(&layout.sheet.points).map_or((0.0, 0.0), |b| (b.width, b.height));
+        let here = slots(layout);
+        let at = seen
+            .iter()
+            .position(|(other, w, h)| (w - size.0).abs() < TOL && (h - size.1).abs() < TOL && same(other, &here));
+        if let Some(at) = at {
             groups[at].duplicate += 1;
         } else {
-            seen.push(sig);
+            seen.push((here, size.0, size.1));
             groups.push(NestGroup { first: index, duplicate: 1 });
         }
     }
@@ -785,6 +808,36 @@ mod tests {
         assert_eq!(groups[0].duplicate, 2, "the repeated layout is counted, not relisted");
         assert_eq!(groups[1].duplicate, 1);
         assert_eq!(groups[1].first, 2, "a group points at the first sheet that had its layout");
+    }
+
+    /// **Regression: a hair's difference must not split a group.** The first
+    /// version formatted each coordinate to one decimal and compared the
+    /// strings, so a single part sitting on a rounding boundary put the whole
+    /// sheet in its own row. Caught on a real 253-piece result whose two
+    /// sheets were identical down to the drawn PDF operators and still
+    /// reported as two distinct layouts - which understates exactly the thing
+    /// the Duplicate column exists to show.
+    #[test]
+    fn placements_a_hair_apart_are_the_same_layout() {
+        // Two sheets whose first part sits either side of a formatting
+        // boundary: 0.0499 rounds to "0.0" and 0.0501 to "0.1", so the old
+        // string comparison called these different layouts over two ten
+        // thousandths of a millimetre.
+        let mut a = layout(3);
+        let mut b = layout(3);
+        a.parts[0].x += 0.0499;
+        b.parts[0].x += 0.0501;
+        let groups = nest_groups(&[a, b]);
+        assert_eq!(groups.len(), 1, "sub-micron differences are not different layouts");
+        assert_eq!(groups[0].duplicate, 2);
+    }
+
+    /// ...but a genuinely different arrangement still gets its own row.
+    #[test]
+    fn a_really_moved_part_is_a_different_layout() {
+        let mut moved = layout(3);
+        moved.parts[0].x += 5.0;
+        assert_eq!(nest_groups(&[layout(3), moved]).len(), 2);
     }
 
     /// Same pieces in the same places, reached in a different placement order,
