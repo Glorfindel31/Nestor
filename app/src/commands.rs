@@ -367,8 +367,8 @@ pub fn repack_sheet(request: RepackSheetRequest) -> Result<RepackSheetResponse, 
         return Err("sheet has no parts to repack".into());
     }
     validate_nest_config(&request.config)?;
-    let margin = request.config.margin;
-    let spacing = request.config.spacing;
+    let margin = request.config.effective_margin();
+    let spacing = request.config.effective_spacing();
 
     let true_sheet: LayeredPolygon = request.sheet.into();
     let sheet_points = prepare_sheet(&true_sheet.points, margin, spacing).ok_or("margin/spacing leaves the sheet with no usable area")?;
@@ -561,6 +561,9 @@ fn validate_nest_config(config: &NestConfigDto) -> Result<(), String> {
     if config.spacing < 0.0 {
         return Err("spacing must be >= 0".into());
     }
+    if config.kerf < 0.0 {
+        return Err("kerf must be >= 0".into());
+    }
     // Bounds match what `index.html`'s own inputs already constrain
     // client-side (`min`/`max` on `cfg-mutation`/`import-tolerance`/`cfg-dominant`).
     if !(0.0..=100.0).contains(&config.mutation_rate) {
@@ -589,8 +592,8 @@ fn validate_nest_config(config: &NestConfigDto) -> Result<(), String> {
 /// Rust.
 pub fn validate_placement(request: ValidatePlacementRequest) -> Result<ValidatePlacementResponse, String> {
     validate_nest_config(&request.config)?;
-    let margin = request.config.margin;
-    let spacing = request.config.spacing;
+    let margin = request.config.effective_margin();
+    let spacing = request.config.effective_spacing();
 
     let true_sheet: LayeredPolygon = request.sheet.into();
     let sheet_points = prepare_sheet(&true_sheet.points, margin, spacing).ok_or("margin/spacing leaves the sheet with no usable area")?;
@@ -673,7 +676,7 @@ pub fn save_shape_store(store: &crate::dto::ShapeStore) -> Result<(), String> {
 /// this whole feature exists to stop.
 pub fn compute_remnants(request: crate::dto::RemnantRequest) -> Result<Vec<crate::dto::RemnantDto>, String> {
     validate_nest_config(&request.config)?;
-    let spacing = request.config.spacing;
+    let spacing = request.config.effective_spacing();
 
     let parts: HashMap<usize, LayeredPolygon> = request.parts_by_id.into_iter().map(|(id, dto)| (id, dto.into())).collect();
 
@@ -747,7 +750,7 @@ pub fn audit_nest(request: crate::dto::AuditRequest) -> Result<crate::dto::Audit
     use nesting::audit::{audit, AuditPart, AuditSheet};
 
     validate_nest_config(&request.config)?;
-    let (margin, spacing) = (request.config.margin, request.config.spacing);
+    let (margin, spacing) = (request.config.effective_margin(), request.config.effective_spacing());
 
     // Each part resolved once, into the pair the audit needs. A part id can
     // appear on several sheets (different copies of the same shape), so doing
@@ -880,6 +883,7 @@ pub fn export_report(path: &str, request: ReportRequest) -> Result<(), String> {
         settings: vec![
             ("Margin".to_string(), format!("{} mm", config.margin)),
             ("Spacing".to_string(), format!("{} mm", config.spacing)),
+            ("Kerf".to_string(), format!("{} mm", config.kerf)),
             ("Runs".to_string(), config.runs.to_string()),
             ("Starting rotations".to_string(), config.rotations.to_string()),
             ("Mirroring".to_string(), if config.mirror { "allowed" } else { "off" }.to_string()),
@@ -913,8 +917,8 @@ fn prepare_nest_inputs(request: RunNestRequest) -> Result<PreparedNestInputs, St
             return Err("cleanup_threshold_percent must be between 0 and 100".into());
         }
     }
-    let margin = request.config.margin;
-    let spacing = request.config.spacing;
+    let margin = request.config.effective_margin();
+    let spacing = request.config.effective_spacing();
 
     // Padding is applied here, internally, purely to shape the placement
     // decisions the engine makes - see geometry::clearance's module doc for
@@ -1494,6 +1498,7 @@ mod tests {
             curve_tolerance: 0.3,
             generations,
             margin: 0.0,
+            kerf: 0.0,
             spacing: 0.0,
             max_threads: 0,
             seed: 0,
@@ -1796,6 +1801,27 @@ mod tests {
         let response = run_nest(request).expect("should still run, just not fit both");
 
         assert_eq!(response.unplaced_count, 1, "spacing=50 between two 40-wide parts on a 100-wide sheet must leave one unplaced");
+    }
+
+    /// Kerf must reach the engine, not just the config file. Two 40mm parts
+    /// on an 85mm sheet fit side by side at `spacing = 0`; with a 6mm kerf
+    /// the two cuts eat 12mm out of the gap between them, so they no longer
+    /// do. Asserts both directions, because a kerf that is silently ignored
+    /// and a kerf that is silently double-counted look identical from one
+    /// half of this.
+    #[test]
+    fn run_nest_widens_the_gap_between_parts_by_the_kerf() {
+        let sheet = rect_dto(85.0, 60.0);
+        let run = |kerf: f64| {
+            let mut cfg = config(1);
+            cfg.margin = 0.0;
+            cfg.spacing = 0.0;
+            cfg.kerf = kerf;
+            let request = RunNestRequest { sheets: vec![sheet.clone()], parts: vec![part(square_dto(40.0), 2)], config: cfg };
+            run_nest(request).expect("should run").unplaced_count
+        };
+        assert_eq!(run(0.0), 0, "two 40mm parts fit an 85mm sheet with no kerf and no spacing");
+        assert_eq!(run(6.0), 1, "a 6mm kerf costs 12mm of the gap, which an 85mm sheet does not have");
     }
 
     #[test]

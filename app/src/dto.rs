@@ -334,8 +334,34 @@ pub struct NestConfigDto {
     pub margin: f64,
     /// Minimum clearance between two parts' true outlines. Applied via
     /// `geometry::clearance::prepare_part`. Defaults to 0.0.
+    ///
+    /// This is what the user asks for; what the engine is *given* is
+    /// `effective_spacing()`, which adds the kerf the cut itself will eat.
     #[serde(default)]
     pub spacing: f64,
+    /// Cut width - how much material the tool destroys, centred on the path
+    /// it follows. A machine property, not a nesting choice, which is why it
+    /// is its own field: 0.15mm on a fibre laser, 1.5mm on plasma, ~0 on a
+    /// waterjet finish pass. Defaults to 0.0, which is exactly the old
+    /// behaviour.
+    ///
+    /// **Why it cannot just be folded into `spacing` by hand.** `spacing` is
+    /// the web the user wants *left standing* between two finished parts, and
+    /// the two cuts either side of that web each eat `kerf` of it - the path
+    /// runs `kerf / 2` outside the outline and removes `kerf` of width, so
+    /// the channel spans the outline outward by a full `kerf`. Two outlines
+    /// `spacing` apart therefore leave `spacing - 2 * kerf` of material, and
+    /// at plasma kerfs that is most of a 3mm web gone. Against the sheet edge
+    /// only one cut is involved, and only its outer half leaves the part, so
+    /// the margin owes `kerf / 2`.
+    ///
+    /// **This is the nesting half only.** Whether the exported geometry
+    /// should be the drawn outline (and the CAM applies cutter compensation)
+    /// or a path already offset outward by `kerf / 2` is a property of the
+    /// user's machine and post-processor, and we do not know it - see
+    /// `PLAN.md` 2.2. Export is unchanged: it still writes the drawn outline.
+    #[serde(default)]
+    pub kerf: f64,
     /// Caps how many CPU threads a single `run_nest` call's rayon-parallel
     /// generation evaluation may use (`dispatch::run_generation`'s
     /// `par_iter()`). `0` (the default) means "no cap" - rayon's own global
@@ -390,6 +416,7 @@ pub struct NestConfigDto {
     pub mirror: bool,
 }
 
+
 fn default_runs() -> usize {
     1
 }
@@ -403,6 +430,20 @@ fn default_curve_tolerance() -> f64 {
 }
 
 impl NestConfigDto {
+    /// The clearance the engine is actually given between two parts:
+    /// `spacing` plus the `kerf` each of the two cuts eats out of that web.
+    #[must_use]
+    pub fn effective_spacing(&self) -> f64 {
+        self.spacing + 2.0 * self.kerf
+    }
+
+    /// The clearance the engine is actually given to the sheet edge: `margin`
+    /// plus the half of the edge cut's kerf that falls outside the part.
+    #[must_use]
+    pub fn effective_margin(&self) -> f64 {
+        self.margin + self.kerf / 2.0
+    }
+
     pub fn placement_config(&self) -> PlacementConfig {
         PlacementConfig {
             placement_type: self.placement_type.into(),

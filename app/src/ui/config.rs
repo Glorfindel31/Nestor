@@ -28,6 +28,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     ui.add_enabled_ui(!app.controls_locked(), |ui| {
         shell::number_row(ui, t("margin_label"), t("margin_tooltip"), &mut app.cfg.margin, 0.1, 0.0..=1000.0);
         shell::number_row(ui, t("spacing_label"), t("spacing_tooltip"), &mut app.cfg.spacing, 0.1, 0.0..=1000.0);
+        shell::number_row(ui, t("kerf_label"), t("kerf_tooltip"), &mut app.cfg.kerf, 0.05, 0.0..=100.0);
         shell::number_row(ui, t("runs_label"), t("runs_tooltip"), &mut app.cfg.runs, 0.1, 1..=100);
 
         ui.horizontal(|ui| {

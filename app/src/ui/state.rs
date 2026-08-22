@@ -235,6 +235,9 @@ impl Bounds {
 pub struct ConfigForm {
     pub margin: f64,
     pub spacing: f64,
+    /// Cut width. See `NestConfigDto::kerf` for why this is not just part of
+    /// `spacing`.
+    pub kerf: f64,
     pub runs: usize,
     /// Blank = the cleanup pass is off. Kept as text, not `Option<f64>`, so
     /// clearing the field doesn't fight the user by snapping to a value.
@@ -265,6 +268,7 @@ impl Default for ConfigForm {
         Self {
             margin: 0.0,
             spacing: 0.0,
+            kerf: 0.0,
             runs: 6,
             cleanup_threshold: String::new(),
             mirror: false,
@@ -293,6 +297,7 @@ impl ConfigForm {
             generations: self.generations,
             margin: self.margin,
             spacing: self.spacing,
+            kerf: self.kerf,
             max_threads: self.max_threads,
             seed: self.seed,
             runs: self.runs,
@@ -311,6 +316,7 @@ impl ConfigForm {
         self.generations = d.generations;
         self.margin = d.margin;
         self.spacing = d.spacing;
+        self.kerf = d.kerf;
         self.max_threads = d.max_threads;
         self.seed = d.seed;
         self.runs = d.runs;
@@ -326,9 +332,10 @@ impl ConfigForm {
     /// field. Without it an empty numeric input becomes a `NaN` that the
     /// engine rejects with a far less actionable message.
     pub fn first_nan_field(&self) -> Option<&'static str> {
-        let checks: [(&'static str, f64); 8] = [
+        let checks: [(&'static str, f64); 9] = [
             ("cfg_margin", self.margin),
             ("cfg_spacing", self.spacing),
+            ("cfg_kerf", self.kerf),
             ("cfg_mutation", self.mutation_rate),
             ("cfg_dominant", self.dominant_threshold),
             ("tolerance_label", self.curve_tolerance),
