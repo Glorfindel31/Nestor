@@ -111,6 +111,19 @@ fn bulk_row(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(4.0);
 }
 
+/// Every row is as tall as its preview, so this is the height everything else
+/// in the row aligns against.
+const THUMBNAIL: f32 = 88.0;
+
+/// Lays one grid cell out vertically centred.
+///
+/// Without it a row is as tall as its 88px thumbnail while its checkbox and
+/// labels sit pinned to the top, so the tick box appears to belong to the row
+/// above the text beside it. Centring reads as one row instead of two.
+fn cell<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), add).inner
+}
+
 fn table(app: &mut App, ui: &mut egui::Ui) {
     let locked = app.controls_locked();
     let lang = app.prefs.lang;
@@ -120,50 +133,68 @@ fn table(app: &mut App, ui: &mut egui::Ui) {
     let sheet_area = app.largest_sheet_area();
     let threshold = app.cfg.dominant_threshold;
 
-    egui::ScrollArea::vertical().max_height(560.0).auto_shrink([false, true]).show(ui, |ui| {
-        egui::Grid::new("shapes").striped(true).num_columns(10).spacing([8.0, 4.0]).show(ui, |ui| {
+    // Takes whatever height is going, rather than a fixed 560px that left a
+    // band of empty panel below a long list on a tall window - and still
+    // scrolls when the list outgrows the space. The floor stops the table
+    // collapsing to nothing on a short window.
+    const MIN_TABLE_HEIGHT: f32 = 200.0;
+    let available = ui.available_height().max(MIN_TABLE_HEIGHT);
+
+    egui::ScrollArea::vertical().max_height(available).auto_shrink([false, true]).show(ui, |ui| {
+        // `min_row_height` is what makes vertical centring mean anything here: a
+        // grid row is otherwise only as tall as its own content, so centring a
+        // checkbox in it centres it against its own height and nothing moves.
+        // Every data row is as tall as its thumbnail, so that is the height to
+        // align against. It also makes the header row that tall, which is a
+        // little airy - a fair trade for the alignment, and the alternative
+        // (relying on egui's previous-frame row sizing) was not verified.
+        egui::Grid::new("shapes").striped(true).num_columns(10).spacing([8.0, 4.0]).min_row_height(THUMBNAIL).show(ui, |ui| {
             let mut select_all = app.select_all;
-            if ui.checkbox(&mut select_all, "").on_hover_text(super::i18n::t(lang, "select_all_tooltip")).changed() {
+            if cell(ui, |ui| ui.checkbox(&mut select_all, "").on_hover_text(super::i18n::t(lang, "select_all_tooltip"))).changed() {
                 app.select_all = select_all;
                 app.shapes.iter_mut().for_each(|s| s.selected = select_all);
             }
             for key in ["th_index", "th_name", "th_bbox", "th_preview", "th_role", "th_qty"] {
-                ui.label(RichText::new(super::i18n::t(lang, key)).color(theme::DIM).small());
+                cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, key)).color(theme::DIM).small()));
             }
-            ui.label(RichText::new(super::i18n::t(lang, "th_grain")).color(theme::DIM).small()).on_hover_text(super::i18n::t(lang, "th_grain_tooltip"));
-            ui.label(RichText::new(super::i18n::t(lang, "th_part_mirror")).color(theme::DIM).small()).on_hover_text(super::i18n::t(lang, "th_part_mirror_tooltip"));
-            ui.label(RichText::new(super::i18n::t(lang, "th_dominant")).color(theme::DIM).small()).on_hover_text(super::i18n::t(lang, "th_dominant_tooltip"));
+            cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, "th_grain")).color(theme::DIM).small()).on_hover_text(super::i18n::t(lang, "th_grain_tooltip")));
+            cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, "th_part_mirror")).color(theme::DIM).small()).on_hover_text(super::i18n::t(lang, "th_part_mirror_tooltip")));
+            cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, "th_dominant")).color(theme::DIM).small()).on_hover_text(super::i18n::t(lang, "th_dominant_tooltip")));
             ui.end_row();
 
             for (index, row) in app.shapes.iter_mut().enumerate() {
-                ui.add_enabled_ui(!locked, |ui| {
-                    ui.checkbox(&mut row.selected, "");
-                });
-                ui.label(RichText::new((index + 1).to_string()).color(theme::DIM));
-                ui.label(format!("{}-{}", row.file, index + 1));
+                cell(ui, |ui| ui.add_enabled_ui(!locked, |ui| ui.checkbox(&mut row.selected, "")));
+                cell(ui, |ui| ui.label(RichText::new((index + 1).to_string()).color(theme::DIM)));
+                cell(ui, |ui| ui.label(format!("{}-{}", row.file, index + 1)));
                 let b = bounds_of(&row.poly.points);
-                ui.label(RichText::new(format!("{:.1} x {:.1}", b.w(), b.h())).color(theme::DIM));
-                canvas::thumbnail(ui, &row.poly, 88.0, None);
+                cell(ui, |ui| ui.label(RichText::new(format!("{:.1} x {:.1}", b.w(), b.h())).color(theme::DIM)));
+                canvas::thumbnail(ui, &row.poly, THUMBNAIL, None);
 
-                ui.add_enabled_ui(!locked, |ui| {
-                    shell::choice(ui, &format!("role{}", row.ui_id), &mut row.role, &Role::ALL, |r| super::i18n::t(lang, r.key()).to_string());
+                cell(ui, |ui| {
+                    ui.add_enabled_ui(!locked, |ui| {
+                        shell::choice(ui, &format!("role{}", row.ui_id), &mut row.role, &Role::ALL, |r| super::i18n::t(lang, r.key()).to_string());
+                    })
                 });
-                ui.add_enabled_ui(!locked, |ui| {
-                    ui.add(egui::DragValue::new(&mut row.qty).speed(0.2).range(0..=100_000));
+                cell(ui, |ui| ui.add_enabled_ui(!locked, |ui| ui.add(egui::DragValue::new(&mut row.qty).speed(0.2).range(0..=100_000))));
+                cell(ui, |ui| {
+                    ui.add_enabled_ui(!locked && row.role == Role::Part, |ui| {
+                        shell::choice(ui, &format!("rot{}", row.ui_id), &mut row.rot, &RotRule::ALL, |r| super::i18n::t(lang, r.key()).to_string());
+                    })
                 });
-                ui.add_enabled_ui(!locked && row.role == Role::Part, |ui| {
-                    shell::choice(ui, &format!("rot{}", row.ui_id), &mut row.rot, &RotRule::ALL, |r| super::i18n::t(lang, r.key()).to_string());
-                });
-                ui.add_enabled_ui(!locked && row.role == Role::Part, |ui| {
-                    shell::choice(ui, &format!("mir{}", row.ui_id), &mut row.mirror, &MirrorRule::ALL, |m| super::i18n::t(lang, m.key()).to_string());
+                cell(ui, |ui| {
+                    ui.add_enabled_ui(!locked && row.role == Role::Part, |ui| {
+                        shell::choice(ui, &format!("mir{}", row.ui_id), &mut row.mirror, &MirrorRule::ALL, |m| super::i18n::t(lang, m.key()).to_string());
+                    })
                 });
 
                 let dominant = row.role == Role::Part && sheet_area > 0.0 && row.area >= threshold * sheet_area;
-                if dominant {
-                    ui.label(RichText::new(super::i18n::t(lang, "dominant_closes_sheet")).color(accent).small());
-                } else {
-                    ui.label("");
-                }
+                cell(ui, |ui| {
+                    if dominant {
+                        ui.label(RichText::new(super::i18n::t(lang, "dominant_closes_sheet")).color(accent).small())
+                    } else {
+                        ui.label("")
+                    }
+                });
                 ui.end_row();
             }
         });
