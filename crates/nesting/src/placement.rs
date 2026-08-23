@@ -2019,12 +2019,50 @@ pub fn place_parts(
                     })
                     .collect();
 
+                // **The band layout is checked against the sheet before it is
+                // allowed to compete.** `banded` works in bounding boxes and
+                // hands its result back as ordinary placements for the caller
+                // to validate "exactly like any other" - which nothing was
+                // actually doing. It can emit a member that hangs off the
+                // sheet (seen with `--placement box` on the 880x720 part: an
+                // 880-wide part translated to x=1480 on a 1505 sheet), and
+                // before the fill below existed such sheets simply lost the
+                // comparison and the bad placement was never seen. Winning
+                // more often is what surfaced it.
+                //
+                // Rejecting the whole candidate rather than dropping the
+                // offending member: the members of a unit are placed as a rigid
+                // group, so half a pair is not a layout the packer ever
+                // proposed. The greedy sheet then wins by default, which is the
+                // correct fallback - it is a fully validated layout.
+                //
+                // **This is a guard, not the fix, and it has no unit test
+                // because the fault has not been reduced to one.** The bug is
+                // in `banded` itself and it is real: `--placement box` on
+                // `nestTest04.dxf` x50 + `nestTest03.dxf` x250 (1500x1500,
+                // spacing 5) fails the export audit without this, and passes
+                // with it. But `pack_sheet` called directly does not reproduce
+                // it - not across available-counts, not with parts carrying a
+                // base rotation, not at the same quantities - and neither does
+                // a single `place_parts` call. It only appears through the GA,
+                // so whatever unit choice is wrong depends on a sheet state
+                // that only mutated gene orders reach. Worth isolating; until
+                // then this at least stops an invalid sheet being shipped.
+                let all_on_sheet = cand_placed
+                    .iter()
+                    .all(|o| !has_material_outside_sheet(&geometry::dxf_import::shift_layered_polygon(&o.polygon, o.placement.x, o.placement.y), sheet));
+                if !all_on_sheet {
+                    cand_placed.clear();
+                    cand_indices.clear();
+                    cand_parts_out.clear();
+                }
                 // The same single pass in gene order the greedy loop above
                 // makes, over the parts the bands did not consume, so a part
                 // still only lands where a real NFP placement puts it. Nothing
                 // is committed to `parts` until the candidate wins.
                 let consumed: HashSet<usize> = cand_indices.iter().copied().collect();
                 let mut topped_up_area = 0.0;
+                let rejected = cand_parts_out.is_empty();
                 let mut rotated_parts: Vec<(usize, LayeredPolygon, f64)> = Vec::new();
                 // A *fresh* accumulator: the sheet's own was built against the
                 // greedy `placed` set, and `NfpAccumulator`'s contract is that
@@ -2034,6 +2072,9 @@ pub fn place_parts(
                 // the neighborhood depends on.
                 let mut neighborhood = tight_fit_neighborhood(sheet, &cand_placed, config.placement_type);
                 for i in 0..parts.len() {
+                    if rejected {
+                        break;
+                    }
                     if consumed.contains(&i) {
                         continue;
                     }
@@ -2087,7 +2128,7 @@ pub fn place_parts(
                     }
                 }
 
-                let candidate_material = banded_material + topped_up_area;
+                let candidate_material = if cand_parts_out.is_empty() { 0.0 } else { banded_material + topped_up_area };
                 if candidate_material > sheet_placed_area {
                     total_placed_area += candidate_material - sheet_placed_area;
                     fitness -= (candidate_material - sheet_placed_area) / sheet_area;
