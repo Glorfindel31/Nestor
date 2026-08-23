@@ -22,3 +22,8 @@
 # Claude Code project-local tooling config - not part of the shipped project
 /.claude/
 CLAUDE.md
+# impeccable plugin tooling - not part of the shipped project
+/.github/agents/
+/.github/hooks/
+/.github/skills/
+/PRODUCT.md
