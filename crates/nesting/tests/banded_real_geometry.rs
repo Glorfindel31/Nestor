@@ -69,7 +69,7 @@ fn band_packed_real_parts_do_not_overlap_each_other() {
     let parts = real_parts(12);
     let sheet = usable_sheet();
     let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
-    let Some(result) = pack_sheet(bounds, &parts, CURVE_TOLERANCE) else {
+    let Some(result) = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None) else {
         panic!("the band packer placed nothing on a 2440x1220 sheet");
     };
     assert!(!result.placed.is_empty());
@@ -95,7 +95,7 @@ fn band_packed_real_parts_stay_on_the_sheet() {
     let parts = real_parts(12);
     let sheet = usable_sheet();
     let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
-    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE).expect("should place something");
+    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None).expect("should place something");
 
     for (placed, meta) in materialise(&parts, &result).iter().zip(result.placed.iter()) {
         assert!(
@@ -133,7 +133,7 @@ fn band_packing_beats_the_greedy_ceiling_on_pairable_parts() {
     let parts = real_parts(12);
     let sheet = usable_sheet();
     let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
-    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE).expect("should place something");
+    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None).expect("should place something");
 
     let sheet_area = polygon_area(&sheet.points).abs();
     let utilisation = result.area / sheet_area * 100.0;
@@ -165,7 +165,7 @@ fn a_row_advances_by_the_lattice_step_not_the_box_width() {
     assert!(!parts.is_empty(), "two.dxf should have a second profile");
     let sheet = usable_sheet();
     let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
-    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE).expect("should place something");
+    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None).expect("should place something");
 
     let utilisation = result.area / polygon_area(&sheet.points).abs() * 100.0;
     assert!(result.placed.len() >= 16, "expected 16 parts on the sheet, got {} at {utilisation:.1}%", result.placed.len());
@@ -211,7 +211,7 @@ fn report_how_much_padding_costs_the_pairing() {
             NestPart { id: 1, source_id: 0, polygon: poly, rotation: 0.0 },
         ];
         let bounds = get_polygon_bounds(&rect(5000.0, 5000.0)).expect("has points");
-        if let Some(r) = pack_sheet(bounds, &parts, CURVE_TOLERANCE) {
+        if let Some(r) = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None) {
             println!("{label}: packed {} parts, area {:.0}", r.placed.len(), r.area);
         }
     }
@@ -250,7 +250,7 @@ fn report_whether_the_bare_shape_pairs() {
             NestPart { id: 1, source_id: 0, polygon: poly, rotation: 0.0 },
         ];
         let big = get_polygon_bounds(&rect(6000.0, 6000.0)).expect("has points");
-        if let Some(r) = pack_sheet(big, &parts, CURVE_TOLERANCE) {
+        if let Some(r) = pack_sheet(big, &parts, CURVE_TOLERANCE, None) {
             println!("   bare pair -> {} parts placed", r.placed.len());
         }
     }
@@ -306,7 +306,7 @@ fn placements_are_reported_at_an_absolute_rotation() {
 
     let sheet = usable_sheet();
     let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
-    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE).expect("should place something");
+    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None).expect("should place something");
     assert!(!result.placed.is_empty());
 
     let placed: Vec<LayeredPolygon> = result
@@ -359,7 +359,7 @@ fn a_concave_part_pairs_on_its_outline_not_its_hull() {
     let points = prepare_sheet(&rect(1500.0, 1500.0), 0.0, JOB_SPACING).expect("sheet should offset");
     let sheet = LayeredPolygon { points, layer: "sheet".into(), is_circle: None, children: Vec::new(), texts: Vec::new(), real_boundary: None };
     let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
-    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE).expect("should place something");
+    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None).expect("should place something");
 
     // The bounding-box ceiling is 48 - see the doc comment. Anything at or
     // below it means the interlock was thrown away, whatever the cause.
@@ -375,4 +375,139 @@ fn a_concave_part_pairs_on_its_outline_not_its_hull() {
             assert!(!has_material_overlap(&placed[i], &placed[j]), "parts {} and {} overlap", result.placed[i].id, result.placed[j].id);
         }
     }
+}
+
+/// **What a banded sheet *reports* has to be as legal as what it placed.**
+///
+/// `place_parts` carries a part's rotation from sheet to sheet, so by the time
+/// a later sheet is packed `NestPart::polygon` is already turned by
+/// `NestPart::rotation`. A `PlacedPart::rotation`, though, is absolute - the
+/// angle from the part's original outline - which is what `banded` reports and
+/// what every consumer reconstructs geometry with.
+///
+/// Accepting a banded sheet rebuilt its obstacle list by turning the
+/// already-turned polygon by that absolute angle, landing it at
+/// `base + absolute` and counting the base twice. Nothing read that list
+/// afterwards, so it stayed invisible until the sheet top-up did - and then
+/// placed parts into space the real geometry was already occupying, which only
+/// the export-time audit noticed.
+///
+/// Feeding parts in pre-rotated is what makes this deterministic: with every
+/// base rotation at zero, doubling it changes nothing.
+#[test]
+fn a_banded_sheet_reports_placements_that_do_not_overlap() {
+    const JOB_SPACING: f64 = 5.0;
+    let mut originals: Vec<LayeredPolygon> = Vec::new();
+    for name in ["nestTest03.dxf", "nestTest01.dxf"] {
+        let drawing = Drawing::load_file(fixture(name)).expect("fixture should parse");
+        for shape in build_polygon_tree(entities_to_polygons(drawing.entities(), CURVE_TOLERANCE)) {
+            let padded = prepare_part(&shape.points, JOB_SPACING).expect("should offset");
+            originals.push(LayeredPolygon { points: padded, real_boundary: None, ..shape });
+        }
+    }
+
+    let mut parts = Vec::new();
+    for (source_id, polygon) in originals.iter().enumerate() {
+        for copy in 0..40 {
+            // Half the copies arrive already turned, which is the state a
+            // second or third sheet always sees in a real run.
+            parts.push(NestPart { id: parts.len(), source_id, polygon: polygon.clone(), rotation: if copy % 2 == 0 { 0.0 } else { 90.0 } });
+        }
+    }
+
+    let points = prepare_sheet(&rect(1500.0, 1500.0), 0.0, JOB_SPACING).expect("sheet should offset");
+    let sheet = LayeredPolygon { points, layer: "sheet".into(), is_circle: None, children: Vec::new(), texts: Vec::new(), real_boundary: None };
+    let sheets = vec![sheet.clone(); 8];
+    let config = nesting::placement::PlacementConfig {
+        placement_type: nesting::placement::PlacementType::TightFit,
+        rotations: 4,
+        dominant_part_area_threshold: nesting::placement::DEFAULT_DOMINANT_PART_AREA_THRESHOLD,
+        curve_tolerance: CURVE_TOLERANCE,
+        part_rules: Default::default(),
+        banded_pass: true,
+    };
+    let cache = nesting::cache::NfpCache::default();
+    let result = nesting::placement::place_parts(&sheets, parts.clone(), &config, &cache, &|| false, &|_, _| {}, &|_, _, _| {}).expect("should place");
+
+    for sheet_placement in &result.placements {
+        // Exactly how a consumer rebuilds it: the *original* outline, turned by
+        // the reported absolute angle, moved to the reported position.
+        let placed: Vec<LayeredPolygon> = sheet_placement
+            .parts
+            .iter()
+            .map(|p| {
+                let original = &originals[parts.iter().find(|q| q.id == p.id).expect("placed id exists").source_id];
+                shift_layered_polygon(&rotate_layered_polygon(original, p.rotation), p.placement.x, p.placement.y)
+            })
+            .collect();
+        for i in 0..placed.len() {
+            for j in (i + 1)..placed.len() {
+                assert!(
+                    !has_material_overlap(&placed[i], &placed[j]),
+                    "sheet {}: reported placements of parts {} and {} overlap",
+                    sheet_placement.sheet_index,
+                    sheet_placement.parts[i].id,
+                    sheet_placement.parts[j].id
+                );
+            }
+        }
+    }
+}
+
+/// **The first sheet has to be about the part at the front of the queue.**
+///
+/// `place_parts` fills sheets in gene order, seeded largest-area-first, and its
+/// greedy pass always puts `parts[0]` down first. The band packer has no such
+/// rule - left free it packs whichever shape makes the densest sheet, which on
+/// a job of very unequal parts means spending the small ones early and
+/// stranding the big one at the end, alone, with nothing left to fill around
+/// it.
+///
+/// Here the queue starts with the 880x720 part and the 120x300 rectangle is
+/// what the bands would rather have: free, they take the first sheet with 30 of
+/// the rectangle and the big part does not surface until the third, by which
+/// point it is nearly alone. Anchored, it goes down first and the fill packs the
+/// small parts into the gaps around it. On the full 800-part job that is 33
+/// sheets against 32.
+///
+/// It takes all four shapes to reproduce: with only the big part and one small
+/// one, the greedy pass already wins the first sheet and the bands never get
+/// the chance to strand anything.
+#[test]
+fn the_first_sheet_places_the_shape_at_the_front_of_the_queue() {
+    const JOB_SPACING: f64 = 5.0;
+    let mut shapes: Vec<LayeredPolygon> = Vec::new();
+    // Decreasing area - the seed order `dto::expand_parts` produces, and so the
+    // order `place_parts` works its queue in.
+    for name in ["nestTest04.dxf", "nestTest01.dxf", "nestTest02.dxf", "nestTest03.dxf"] {
+        let drawing = Drawing::load_file(fixture(name)).expect("fixture should parse");
+        let shape = build_polygon_tree(entities_to_polygons(drawing.entities(), CURVE_TOLERANCE)).into_iter().next().expect("one profile");
+        let padded = prepare_part(&shape.points, JOB_SPACING).expect("should offset");
+        shapes.push(LayeredPolygon { points: padded, real_boundary: None, ..shape });
+    }
+
+    let mut parts = Vec::new();
+    for (source_id, polygon) in shapes.iter().enumerate() {
+        for _ in 0..if source_id == 0 { 6 } else { 30 } {
+            parts.push(NestPart { id: parts.len(), source_id, polygon: polygon.clone(), rotation: 0.0 });
+        }
+    }
+
+    let points = prepare_sheet(&rect(1500.0, 1500.0), 0.0, JOB_SPACING).expect("sheet should offset");
+    let sheet = LayeredPolygon { points, layer: "sheet".into(), is_circle: None, children: Vec::new(), texts: Vec::new(), real_boundary: None };
+    let sheets = vec![sheet; 20];
+    let config = nesting::placement::PlacementConfig {
+        placement_type: nesting::placement::PlacementType::TightFit,
+        rotations: 4,
+        dominant_part_area_threshold: nesting::placement::DEFAULT_DOMINANT_PART_AREA_THRESHOLD,
+        curve_tolerance: CURVE_TOLERANCE,
+        part_rules: Default::default(),
+        banded_pass: true,
+    };
+    let cache = nesting::cache::NfpCache::default();
+    let result = nesting::placement::place_parts(&sheets, parts.clone(), &config, &cache, &|| false, &|_, _| {}, &|_, _, _| {}).expect("should place");
+
+    let first = result.placements.first().expect("at least one sheet");
+    let big_on_first = first.parts.iter().filter(|p| parts.iter().find(|q| q.id == p.id).expect("id exists").source_id == 0).count();
+    assert!(big_on_first > 0, "the big part never reached the first sheet - the band packer took it with the small shape instead");
 }

@@ -589,12 +589,24 @@ const NODE_BUDGET: usize = 20_000;
 /// `sheet_bounds` must be the *usable* area (margin/spacing already applied by
 /// the caller) and `parts` the padded polygons, identical to what
 /// `place_parts` works with, so the two passes compare like with like.
+///
+/// `anchor` restricts the catalogue to one shape's units. Left `None` the
+/// packer is free to fill the sheet with whatever packs densest, which is what
+/// it wants for its own sake and *not* always what the nest wants: given parts
+/// of very different sizes it spends the small ones on early sheets and strands
+/// the big one at the end, alone, with nothing left to fill around it. The
+/// caller passes the shape at the front of its queue to say "this sheet is
+/// about that part" - see `placement::place_parts`, which asks for a free
+/// layout first and only re-asks anchored when the free one skips its queue.
 #[must_use]
-pub fn pack_sheet(sheet_bounds: Bounds, parts: &[NestPart], curve_tolerance: f64) -> Option<BandedSheet> {
+pub fn pack_sheet(sheet_bounds: Bounds, parts: &[NestPart], curve_tolerance: f64, anchor: Option<usize>) -> Option<BandedSheet> {
     if parts.is_empty() || sheet_bounds.width <= 0.0 || sheet_bounds.height <= 0.0 {
         return None;
     }
-    let catalogue = build_catalogue(parts, curve_tolerance);
+    let mut catalogue = build_catalogue(parts, curve_tolerance);
+    if let Some(anchor) = anchor {
+        catalogue.retain(|u| u.source_id == anchor);
+    }
     if catalogue.is_empty() {
         return None;
     }
@@ -794,7 +806,7 @@ mod tests {
     use geometry::dxf_import::LayeredPolygon;
 
     fn pack_sheet_t(b: Bounds, parts: &[NestPart]) -> Option<BandedSheet> {
-        pack_sheet(b, parts, 0.3)
+        pack_sheet(b, parts, 0.3, None)
     }
     use geometry::point::Point;
 

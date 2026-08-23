@@ -195,6 +195,12 @@ fn run() -> Result<(), String> {
     let Some(opts) = parse_args()? else { return Ok(()) };
 
     let mut parts: Vec<PartDto> = Vec::new();
+    // Which source each part id came from, so a sheet can be reported by
+    // composition and not just by a count. `expand_parts` hands out ids
+    // sequentially, source by source, so the quantities alone rebuild the
+    // mapping without the engine having to give its `shape_ids` back.
+    let mut labels: Vec<String> = Vec::new();
+    let mut quantities: Vec<usize> = Vec::new();
     for (file, quantity) in &opts.files {
         let quantity = quantity.unwrap_or(opts.qty);
         let is_svg = std::path::Path::new(file).extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
@@ -213,7 +219,16 @@ fn run() -> Result<(), String> {
         if shapes.is_empty() {
             return Err(format!("{file}: no closed profiles found"));
         }
-        parts.extend(shapes.into_iter().map(|polygon| PartDto { polygon, quantity, allowed_rotations: None, mirror: None }));
+        let stem = std::path::Path::new(file).file_stem().map_or_else(|| file.clone(), |s| s.to_string_lossy().into_owned());
+        let shape_count = shapes.len();
+        for (index, polygon) in shapes.into_iter().enumerate() {
+            // One label per *shape*, because that is what a source id counts
+            // (`dto::expand_parts`) - a file holding several profiles becomes
+            // several of them.
+            labels.push(if shape_count > 1 { format!("{stem}#{index}") } else { stem.clone() });
+            quantities.push(quantity);
+            parts.push(PartDto { polygon, quantity, allowed_rotations: None, mirror: None });
+        }
     }
 
     let sheets = vec![rect(opts.sheet.0, opts.sheet.1); opts.sheets];
@@ -259,7 +274,7 @@ fn run() -> Result<(), String> {
         eprintln!("nest: wrote {out}");
     }
 
-    report(&opts, &response, &audit, elapsed);
+    report(&opts, &response, &audit, elapsed, &labels, &quantities);
     Ok(())
 }
 
@@ -310,7 +325,38 @@ fn area_of(points: &[PointDto]) -> f64 {
     (sum / 2.0).abs()
 }
 
-fn report(opts: &Options, response: &rustynesting::dto::RunNestResponse, audit: &rustynesting::dto::AuditReportDto, elapsed: std::time::Duration) {
+/// Which source id each part id belongs to, rebuilt from the per-source
+/// quantities. Mirrors `dto::expand_parts`, including its skip of a
+/// zero-quantity source, which would otherwise shift every id after it.
+fn source_of_id(quantities: &[usize]) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (source, &quantity) in quantities.iter().enumerate() {
+        out.extend(std::iter::repeat_n(source, quantity));
+    }
+    out
+}
+
+/// Parts per source per sheet - the composition a job report's per-sheet table
+/// shows. A count alone cannot tell "four big parts alone at 68%" from "four
+/// big parts with the gaps filled at 82%", and that difference is a sheet.
+fn per_sheet_mix(response: &rustynesting::dto::RunNestResponse, quantities: &[usize]) -> Vec<Vec<usize>> {
+    let source = source_of_id(quantities);
+    response
+        .placements
+        .iter()
+        .map(|placement| {
+            let mut counts = vec![0usize; quantities.len()];
+            for part in &placement.parts {
+                if let Some(&s) = source.get(part.id) {
+                    counts[s] += 1;
+                }
+            }
+            counts
+        })
+        .collect()
+}
+
+fn report(opts: &Options, response: &rustynesting::dto::RunNestResponse, audit: &rustynesting::dto::AuditReportDto, elapsed: std::time::Duration, labels: &[String], quantities: &[usize]) {
     let sheet_area = opts.sheet.0 * opts.sheet.1;
     let sheets = per_sheet(response, sheet_area);
     let best = sheets.iter().copied().fold(0.0_f64, f64::max);
@@ -326,8 +372,14 @@ fn report(opts: &Options, response: &rustynesting::dto::RunNestResponse, audit: 
         // report lists a per-sheet quantity, and without ours the two can
         // only be lined up by inferring counts from ratios of percentages.
         let per_parts = response.placements.iter().map(|p| p.parts.len().to_string()).collect::<Vec<_>>().join(",");
+        let mix = per_sheet_mix(response, quantities)
+            .iter()
+            .map(|counts| format!("[{}]", counts.iter().map(usize::to_string).collect::<Vec<_>>().join(",")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let label_list = labels.iter().map(|l| format!("\"{l}\"")).collect::<Vec<_>>().join(",");
         println!(
-            "{{\"sheets\":{},\"placed\":{placed},\"unplaced\":{},\"utilisation\":{:.4},\"best_sheet\":{best:.4},\"mean_sheet\":{mean:.4},\"fitness\":{:.4},\"audit\":\"{}\",\"seconds\":{:.3},\"per_sheet\":[{per}],\"per_sheet_parts\":[{per_parts}]}}",
+            "{{\"sheets\":{},\"placed\":{placed},\"unplaced\":{},\"utilisation\":{:.4},\"best_sheet\":{best:.4},\"mean_sheet\":{mean:.4},\"fitness\":{:.4},\"audit\":\"{}\",\"seconds\":{:.3},\"per_sheet\":[{per}],\"per_sheet_parts\":[{per_parts}],\"labels\":[{label_list}],\"per_sheet_mix\":[{mix}]}}",
             response.placements.len(),
             response.unplaced_count,
             response.utilisation,
@@ -343,6 +395,20 @@ fn report(opts: &Options, response: &rustynesting::dto::RunNestResponse, audit: 
         println!("best sheet    {best:.2}%");
         println!("mean sheet    {mean:.2}%");
         println!("audit         {}", verdict(audit));
+        if labels.len() > 1 {
+            println!("
+sheet  parts  util    composition");
+            for (i, (counts, util)) in per_sheet_mix(response, quantities).iter().zip(sheets.iter()).enumerate() {
+                let mix = counts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &n)| n > 0)
+                    .map(|(s, n)| format!("{} x{n}", labels[s]))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("{:>5}  {:>5}  {:>5.1}%  {mix}", i + 1, counts.iter().sum::<usize>(), util);
+            }
+        }
         for issue in &audit.issues {
             println!("  {} {} on sheet {}: {:?}", if issue.fatal { "FATAL" } else { "warn " }, issue.kind, issue.sheet_index + 1, issue.part_ids);
         }

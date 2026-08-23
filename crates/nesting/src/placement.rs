@@ -1933,7 +1933,41 @@ pub fn place_parts(
         // decision the user configured.
         let has_dominant = parts_before_sheet.iter().any(|p| polygon_area(&p.polygon.points).abs() >= config.dominant_part_area_threshold * sheet_area);
         if config.banded_pass && !has_dominant {
-            if let Some(banded) = crate::banded::pack_sheet(sheet_usable_bounds(sheet), &parts_before_sheet, config.curve_tolerance) {
+            // **A banded sheet has to be about the shape at the front of the
+            // queue.** `place_parts` fills sheets in gene order and the greedy
+            // pass always puts `parts[0]` down first (the top-left fast path
+            // above). The band packer has no such rule - it packs whichever
+            // shape gives the densest sheet - so on a job of very unequal parts
+            // it spends the small ones on early sheets and strands the big
+            // awkward one at the end, alone, with nothing left to fill around
+            // it.
+            //
+            // Measured on the four `nestTest` parts (250/250/250/50, seed order
+            // decreasing-area, so `parts[0]` is the 880x720 one): free layouts
+            // took sheets 1-5 with the 120x300 rectangle at ~90% and the big
+            // part did not appear until sheet 22, alone at 68.7% on every sheet
+            // after it - 33 sheets. Re-asking anchored puts it on sheets 1-16
+            // with fillers around it at 78.7%, for 32.
+            //
+            // Re-asking, not rejecting: simply discarding a free layout that
+            // skips the queue throws away a good sheet and costs one on
+            // `two.dxf`'s four similar profiles (14 -> 15), where there is no
+            // stranding problem to solve in the first place. Asking again for a
+            // layout *of that shape* keeps the band packer's contribution and
+            // lets the fill below supply the rest.
+            let usable = sheet_usable_bounds(sheet);
+            let anchor_source_id = parts_before_sheet.first().map(|p| p.source_id);
+            let places_anchor = |b: &crate::banded::BandedSheet| {
+                anchor_source_id.is_none_or(|anchor| b.consumed.iter().filter_map(|&i| parts_before_sheet.get(i)).any(|p| p.source_id == anchor))
+            };
+            let banded = crate::banded::pack_sheet(usable, &parts_before_sheet, config.curve_tolerance, None).and_then(|free| {
+                if places_anchor(&free) {
+                    Some(free)
+                } else {
+                    crate::banded::pack_sheet(usable, &parts_before_sheet, config.curve_tolerance, anchor_source_id)
+                }
+            });
+            if let Some(banded) = banded {
                 // Scored on the *same* measure the greedy pass reports -
                 // `polygon_material_area`, holes subtracted - not on the band
                 // packer's own padded-outline figure. Comparing those two
@@ -1945,24 +1979,128 @@ pub fn place_parts(
                     .filter_map(|&i| parts_before_sheet.get(i))
                     .map(|p| polygon_material_area(&p.polygon))
                     .sum();
-                if banded_material > sheet_placed_area {
-                    placed_parts_out = banded.placed;
-                    placed_indices = banded.consumed;
-                    total_placed_area += banded_material - sheet_placed_area;
-                    fitness -= (banded_material - sheet_placed_area) / sheet_area;
-                    sheet_placed_area = banded_material;
-                    placed = placed_parts_out
-                        .iter()
-                        .filter_map(|p| {
-                            parts_before_sheet.iter().find(|q| q.id == p.id).map(|q| PlacedObstacle {
-                                polygon: rotate_layered_polygon(&q.polygon, p.rotation),
-                                id: q.id,
-                                source_id: q.source_id,
-                                rotation: p.rotation,
-                                placement: p.placement,
-                            })
+                // **Build the banded sheet as a candidate, fill it, and only
+                // then compare.** A band layout covers the sheet in rows of one
+                // shape and stops; whatever it cannot use is abandoned, even
+                // where a much smaller part would drop straight into it. Judging
+                // it in that unfinished state is what made it lose sheets it
+                // should have won: on a job of an 880x720 part plus a small one,
+                // the bands put four big parts down (68.7%) and the greedy pass
+                // answered with three big plus eighteen small (77.3%), so the
+                // bands were thrown away - when four big *plus* fillers is
+                // 81.7%, which is what the commercial nester ships. Comparing
+                // before filling asks the wrong question.
+                let mut cand_parts_out = banded.placed;
+                let mut cand_indices = banded.consumed;
+                let mut cand_placed: Vec<PlacedObstacle> = cand_parts_out
+                    .iter()
+                    .filter_map(|p| {
+                        parts_before_sheet.iter().find(|q| q.id == p.id).map(|q| PlacedObstacle {
+                            // `p.rotation` is absolute - the angle from the
+                            // part's *original* outline, which is what `banded`
+                            // reports and what every consumer of a `PlacedPart`
+                            // reads. `q.polygon` is not that original:
+                            // `place_parts` carries a part's rotation across
+                            // sheets, so it already sits at `q.rotation`. Turning
+                            // it by the absolute angle lands it at
+                            // `q.rotation + p.rotation` - the base counted twice
+                            // - and only the difference is the turn still owed.
+                            //
+                            // Latent for as long as nothing read this list after
+                            // a banded sheet was accepted. The fill below is the
+                            // first thing that does, and it promptly placed parts
+                            // into space the real geometry already occupied.
+                            polygon: rotate_layered_polygon(&q.polygon, p.rotation - q.rotation),
+                            id: q.id,
+                            source_id: q.source_id,
+                            rotation: p.rotation,
+                            placement: p.placement,
                         })
-                        .collect();
+                    })
+                    .collect();
+
+                // The same single pass in gene order the greedy loop above
+                // makes, over the parts the bands did not consume, so a part
+                // still only lands where a real NFP placement puts it. Nothing
+                // is committed to `parts` until the candidate wins.
+                let consumed: HashSet<usize> = cand_indices.iter().copied().collect();
+                let mut topped_up_area = 0.0;
+                let mut rotated_parts: Vec<(usize, LayeredPolygon, f64)> = Vec::new();
+                // A *fresh* accumulator: the sheet's own was built against the
+                // greedy `placed` set, and `NfpAccumulator`'s contract is that
+                // its obstacle list only ever grows. From here this one does.
+                let mut topup_accumulator = NfpAccumulator::default();
+                // Rebuilt only when a part lands, since that is the only thing
+                // the neighborhood depends on.
+                let mut neighborhood = tight_fit_neighborhood(sheet, &cand_placed, config.placement_type);
+                for i in 0..parts.len() {
+                    if consumed.contains(&i) {
+                        continue;
+                    }
+                    if should_cancel() {
+                        cancelled_early = true;
+                        break;
+                    }
+                    let (part_id, part_source_id, part_rotation) = (parts[i].id, parts[i].source_id, parts[i].rotation);
+                    let mut trial_polygon = parts[i].polygon.clone();
+                    let mut best: Option<(f64, PlaceOnSheetResult, f64, LayeredPolygon)> = None;
+                    for (angle, delta) in rotation_steps(config, part_id, part_rotation) {
+                        if delta != 0.0 {
+                            trial_polygon = rotate_layered_polygon(&trial_polygon, delta);
+                        }
+                        let Some(sheet_nfp) = cached_inner_nfp(cache, sheet, sheet_src, &trial_polygon, part_source_id, angle, config.curve_tolerance) else {
+                            continue;
+                        };
+                        if sheet_nfp.is_empty() {
+                            continue;
+                        }
+                        let outcome = try_place_part_on_sheet_accumulated(
+                            &trial_polygon,
+                            part_source_id,
+                            angle,
+                            &sheet_nfp,
+                            sheet,
+                            &cand_placed,
+                            config,
+                            cache,
+                            &|_: &[CandidateTrace]| {},
+                            &neighborhood,
+                            &mut topup_accumulator,
+                        );
+                        if let Some(result) = outcome.placed() {
+                            let better = match &best {
+                                None => true,
+                                Some((best_score, ..)) => result.minarea.total_cmp(best_score).is_lt(),
+                            };
+                            if better {
+                                best = Some((result.minarea, result, angle, trial_polygon.clone()));
+                            }
+                        }
+                    }
+                    if let Some((_, result, rotation, polygon)) = best {
+                        topped_up_area += polygon_material_area(&polygon);
+                        cand_indices.push(i);
+                        cand_parts_out.push(PlacedPart { id: part_id, placement: result.position, rotation });
+                        cand_placed.push(PlacedObstacle { polygon: polygon.clone(), id: part_id, source_id: part_source_id, rotation, placement: result.position });
+                        rotated_parts.push((i, polygon, rotation));
+                        neighborhood = tight_fit_neighborhood(sheet, &cand_placed, config.placement_type);
+                    }
+                }
+
+                let candidate_material = banded_material + topped_up_area;
+                if candidate_material > sheet_placed_area {
+                    total_placed_area += candidate_material - sheet_placed_area;
+                    fitness -= (candidate_material - sheet_placed_area) / sheet_area;
+                    sheet_placed_area = candidate_material;
+                    for (i, polygon, rotation) in rotated_parts {
+                        if config.placement_type == PlacementType::GravityCorrective {
+                            rotation_by_source.insert(parts[i].source_id, rotation);
+                        }
+                        parts[i] = NestPart { id: parts[i].id, source_id: parts[i].source_id, polygon, rotation };
+                    }
+                    placed = cand_placed;
+                    placed_indices = cand_indices;
+                    placed_parts_out = cand_parts_out;
                 }
             }
         }
