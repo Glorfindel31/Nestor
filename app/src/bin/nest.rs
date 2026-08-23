@@ -31,7 +31,9 @@ USAGE:
 OPTIONS:
     --sheet WxH        stock size in mm (default 2440x1220)
     --sheets N         how many sheets are available (default 100)
-    --qty N            copies of each part (default 1)
+    --qty N            copies of each part (default 1). Applies to the files
+                       named after it, so quantities can be mixed:
+                           nest --qty 250 a.dxf --qty 50 b.dxf
     --margin MM        clearance to the sheet edge (default 0)
     --spacing MM       clearance between parts (default 0)
     --kerf MM          cut width; adds to both of the above (default 0)
@@ -61,7 +63,9 @@ fn main() -> std::process::ExitCode {
 }
 
 struct Options {
-    files: Vec<String>,
+    /// Each file with the `--qty` in force when it was named, if any, so one
+    /// run can mix quantities (a job of 250 brackets and 50 lids).
+    files: Vec<(String, Option<usize>)>,
     sheet: (f64, f64),
     sheets: usize,
     qty: usize,
@@ -110,6 +114,10 @@ impl Default for Options {
 
 fn parse_args() -> Result<Option<Options>, String> {
     let mut opts = Options::default();
+    // A file named *after* a `--qty` takes that quantity; one named before any
+    // `--qty` inherits whatever the flag finally settles on, so the plain
+    // `nest file.dxf --qty 250` ordering keeps working.
+    let mut qty_seen = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         // Every value-taking flag needs the same "and there is a next
@@ -123,7 +131,10 @@ fn parse_args() -> Result<Option<Options>, String> {
             }
             "--sheet" => opts.sheet = parse_size(&value("--sheet")?)?,
             "--sheets" => opts.sheets = number(&value("--sheets")?, "--sheets")?,
-            "--qty" => opts.qty = number(&value("--qty")?, "--qty")?,
+            "--qty" => {
+                opts.qty = number(&value("--qty")?, "--qty")?;
+                qty_seen = true;
+            }
             "--margin" => opts.config.margin = number(&value("--margin")?, "--margin")?,
             "--spacing" => opts.config.spacing = number(&value("--spacing")?, "--spacing")?,
             "--kerf" => opts.config.kerf = number(&value("--kerf")?, "--kerf")?,
@@ -139,7 +150,7 @@ fn parse_args() -> Result<Option<Options>, String> {
             "--unplaced" => opts.include_unplaced = true,
             "--json" => opts.json = true,
             other if other.starts_with('-') => return Err(format!("unknown option '{other}'\n\n{USAGE}")),
-            file => opts.files.push(file.to_string()),
+            file => opts.files.push((file.to_string(), qty_seen.then_some(opts.qty))),
         }
     }
     if opts.files.is_empty() {
@@ -184,7 +195,8 @@ fn run() -> Result<(), String> {
     let Some(opts) = parse_args()? else { return Ok(()) };
 
     let mut parts: Vec<PartDto> = Vec::new();
-    for file in &opts.files {
+    for (file, quantity) in &opts.files {
+        let quantity = quantity.unwrap_or(opts.qty);
         let is_svg = std::path::Path::new(file).extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
         let shapes = if is_svg {
             let (shapes, size_guessed) = commands::import_svg(file, opts.config.curve_tolerance, opts.svg_unit.as_deref())?;
@@ -201,7 +213,7 @@ fn run() -> Result<(), String> {
         if shapes.is_empty() {
             return Err(format!("{file}: no closed profiles found"));
         }
-        parts.extend(shapes.into_iter().map(|polygon| PartDto { polygon, quantity: opts.qty, allowed_rotations: None, mirror: None }));
+        parts.extend(shapes.into_iter().map(|polygon| PartDto { polygon, quantity, allowed_rotations: None, mirror: None }));
     }
 
     let sheets = vec![rect(opts.sheet.0, opts.sheet.1); opts.sheets];
@@ -269,7 +281,7 @@ fn per_sheet(response: &rustynesting::dto::RunNestResponse, sheet_area: f64) -> 
         .placements
         .iter()
         .map(|placement| {
-            let used: f64 = placement.parts.iter().filter_map(|p| response.parts_by_id.get(&p.id)).map(|poly| area_of(&poly.points)).sum();
+            let used: f64 = placement.parts.iter().filter_map(|p| response.parts_by_id.get(&p.id)).map(material_area_of).sum();
             if sheet_area > 0.0 {
                 used / sheet_area * 100.0
             } else {
@@ -277,6 +289,16 @@ fn per_sheet(response: &rustynesting::dto::RunNestResponse, sheet_area: f64) -> 
             }
         })
         .collect()
+}
+
+/// Outline area minus its holes - the same rule `geometry::polygon_material_area`
+/// uses, and the same one a commercial job report's Util column uses. Counting
+/// a drilled hole as material overstates every sheet holding a holed part, so
+/// the two reports cannot be read side by side.
+fn material_area_of(poly: &rustynesting::dto::PolygonDto) -> f64 {
+    let outer = area_of(&poly.points);
+    let holes: f64 = poly.children.iter().map(|c| area_of(&c.points)).sum();
+    (outer - holes).max(0.0)
 }
 
 fn area_of(points: &[PointDto]) -> f64 {
@@ -300,8 +322,12 @@ fn report(opts: &Options, response: &rustynesting::dto::RunNestResponse, audit: 
         // array, and the point of it is being diffable by a script, so the
         // key order being fixed and obvious matters more than the machinery.
         let per = sheets.iter().map(|u| format!("{u:.4}")).collect::<Vec<_>>().join(",");
+        // Parts per sheet, not just utilisation: a commercial nester's job
+        // report lists a per-sheet quantity, and without ours the two can
+        // only be lined up by inferring counts from ratios of percentages.
+        let per_parts = response.placements.iter().map(|p| p.parts.len().to_string()).collect::<Vec<_>>().join(",");
         println!(
-            "{{\"sheets\":{},\"placed\":{placed},\"unplaced\":{},\"utilisation\":{:.4},\"best_sheet\":{best:.4},\"mean_sheet\":{mean:.4},\"fitness\":{:.4},\"audit\":\"{}\",\"seconds\":{:.3},\"per_sheet\":[{per}]}}",
+            "{{\"sheets\":{},\"placed\":{placed},\"unplaced\":{},\"utilisation\":{:.4},\"best_sheet\":{best:.4},\"mean_sheet\":{mean:.4},\"fitness\":{:.4},\"audit\":\"{}\",\"seconds\":{:.3},\"per_sheet\":[{per}],\"per_sheet_parts\":[{per_parts}]}}",
             response.placements.len(),
             response.unplaced_count,
             response.utilisation,

@@ -326,3 +326,53 @@ fn placements_are_reported_at_an_absolute_rotation() {
         }
     }
 }
+
+/// **A concave part has to be paired on its outline, not on its hull.**
+///
+/// `nestTest03.dxf` is a 150x280 rectangle with a concave bite taken out of one
+/// diagonal, and that bite is the entire reason two copies can interlock: it is
+/// where the next part's corner goes. A convex hull fills it in, so pairing on
+/// the hull cannot see it at all.
+///
+/// The cost is a whole sheet. On the hull the best pair box is 160x525
+/// (density 0.862), only two bands fit in 1505, and the sheet reaches **48**
+/// parts - precisely the bounding-box ceiling, i.e. the concavity bought
+/// nothing whatsoever. On the true outline the pair is 160x485 (0.933), a third
+/// band fits, and the sheet takes **52**; over the 250-part job that is 6
+/// sheets against 5, which is what the commercial nester gets.
+///
+/// Reverting `shell_of`'s point-count branch to always hull fails this at 48.
+#[test]
+fn a_concave_part_pairs_on_its_outline_not_its_hull() {
+    const JOB_SPACING: f64 = 5.0;
+    let drawing = Drawing::load_file(fixture("nestTest03.dxf")).expect("nestTest03.dxf should parse");
+    let tree = build_polygon_tree(entities_to_polygons(drawing.entities(), CURVE_TOLERANCE));
+    let mut parts = Vec::new();
+    for (source_id, shape) in tree.iter().enumerate() {
+        let padded = prepare_part(&shape.points, JOB_SPACING).expect("should offset");
+        let polygon = LayeredPolygon { points: padded, real_boundary: None, ..shape.clone() };
+        for _ in 0..60 {
+            parts.push(NestPart { id: parts.len(), source_id, polygon: polygon.clone(), rotation: 0.0 });
+        }
+    }
+
+    let points = prepare_sheet(&rect(1500.0, 1500.0), 0.0, JOB_SPACING).expect("sheet should offset");
+    let sheet = LayeredPolygon { points, layer: "sheet".into(), is_circle: None, children: Vec::new(), texts: Vec::new(), real_boundary: None };
+    let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
+    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE).expect("should place something");
+
+    // The bounding-box ceiling is 48 - see the doc comment. Anything at or
+    // below it means the interlock was thrown away, whatever the cause.
+    assert!(result.placed.len() >= 52, "expected the outline pairing's 52 parts, got {} (48 means it paired on the hull)", result.placed.len());
+
+    // A denser sheet is only worth having if it is a legal one.
+    let placed = materialise(&parts, &result);
+    for (poly, meta) in placed.iter().zip(result.placed.iter()) {
+        assert!(!has_material_outside_sheet(poly, &sheet), "part {} escapes the sheet", meta.id);
+    }
+    for i in 0..placed.len() {
+        for j in (i + 1)..placed.len() {
+            assert!(!has_material_overlap(&placed[i], &placed[j]), "parts {} and {} overlap", result.placed[i].id, result.placed[j].id);
+        }
+    }
+}

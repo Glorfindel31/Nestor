@@ -178,7 +178,7 @@ fn build_units_uncached(part: &NestPart, base_rotation: f64, available: usize, c
     // an offset from the polygon's first vertex - puts parts wherever that
     // vertex happens to be, which is how an early version of this put every
     // part off the sheet.
-    let a_hull = hull_of(&a);
+    let a_hull = shell_of(&a);
     let mut single =
         Unit { members: vec![(base_rotation, -ab.x, -ab.y)], source_id: part.source_id, width: ab.width, height: ab.height, area: a_area, step: ab.width };
     single.step = row_step(part, &single);
@@ -186,22 +186,29 @@ fn build_units_uncached(part: &NestPart, base_rotation: f64, available: usize, c
         return vec![single];
     }
 
-    // **Pairing searches the convex hulls, not the outlines.** Each candidate
-    // angle costs one `obstacle_nfp`, and that is a Minkowski sum: on
-    // `three.dxf`'s 258-point profile the eight of them take tens of seconds,
-    // per sheet, per individual, per generation - it took a 100s benchmark to
-    // 2728s. The hull is 20-odd points and answers the same question for a
-    // packer that only ever works in bounding boxes. It is conservative, never
-    // optimistic: two hulls that clear each other contain two outlines that
-    // clear each other, so a pair it finds is always legal (and `pair_is_legal`
-    // rechecks against the real outlines regardless). Box sizes below still
-    // come from the true bounds, which a hull leaves unchanged.
+    // **Pairing searches shells, which are the true outlines up to
+    // `shell_of`'s point-count bound and convex hulls above it.** Each
+    // candidate angle costs one `obstacle_nfp`, and that is a Minkowski sum:
+    // on `three.dxf`'s 258-point profile the eight of them take tens of
+    // seconds, per sheet, per individual, per generation - it took a 100s
+    // benchmark to 2728s. Hulling a big outline answers the same question for
+    // a packer that only ever works in bounding boxes, and is conservative
+    // rather than optimistic: two hulls that clear each other contain two
+    // outlines that clear each other, so a pair it finds is always legal (and
+    // `pair_is_legal` rechecks against the real outlines regardless).
+    //
+    // Conservative is not free, though, and that is why the bound exists: for
+    // a *concave* part the material the hull fills in is the entire
+    // interlocking opportunity, so hulling it away caps the packer at the
+    // bounding-box answer. See `shell_of` for the job where that was worth a
+    // whole sheet. Box sizes below always come from the true bounds, which
+    // neither branch changes.
     let mut pairs: Vec<Unit> = Vec::new();
     for extra in PAIR_ANGLES {
         let rotation = base_rotation + extra;
         let b = rotate_layered_polygon(&part.polygon, rotation);
         let Some(bb) = get_polygon_bounds(&b.points) else { continue };
-        let b_hull = hull_of(&b);
+        let b_hull = shell_of(&b);
         let Some(nfp) = obstacle_nfp(&a_hull, &b_hull, curve_tolerance) else { continue };
 
         // An NFP vertex is where B's own reference point goes, so the shift
@@ -309,7 +316,7 @@ fn build_units_uncached(part: &NestPart, base_rotation: f64, available: usize, c
     }
     if std::env::var("NEST_BANDED").is_ok_and(|v| v != "0") {
         for u in &out {
-            eprintln!("    unit src {} base {base_rotation} x{} {:.1}x{:.1} density {:.3}", part.source_id, u.count(), u.width, u.height, u.density());
+            eprintln!("    unit src {} base {base_rotation} x{} {:.1}x{:.1} density {:.3} step {:.1}", part.source_id, u.count(), u.width, u.height, u.density(), u.step);
         }
     }
     out
@@ -347,29 +354,56 @@ fn pareto_front(mut units: Vec<Unit>) -> Vec<Unit> {
     out
 }
 
-/// A coarse convex shell of a polygon's outline, as a hole-free
-/// `LayeredPolygon`: hull, simplified, then grown back by the simplification
-/// tolerance so it still contains the original.
+/// The polygon `obstacle_nfp` should pair on, as a hole-free `LayeredPolygon`:
+/// the outline itself when it is cheap enough, otherwise a coarse convex shell
+/// of it - hull, simplified, then grown back by the simplification tolerance so
+/// it still contains the original.
 ///
-/// The hull alone is not enough. A clearance-padded outline is already close
-/// to convex - `three.dxf`'s 258 points hull to 214 - and `obstacle_nfp` on
-/// two 214-point polygons still takes ~1.7s, eight times per sheet. Simplified
-/// it is a couple of dozen points and the whole catalogue drops from 13s to
-/// well under a second.
+/// Which branch is taken is purely a cost decision; see `EXACT_AT_OR_BELOW` for
+/// the measurement, and why handing a concave part its hull throws away the
+/// only thing that makes it nest.
+///
+/// The hull alone is not enough for the expensive branch. A clearance-padded
+/// outline is already close to convex - `three.dxf`'s 258 points hull to 214 -
+/// and `obstacle_nfp` on two 214-point polygons still takes ~1.7s, eight times
+/// per sheet. Simplified it is a couple of dozen points and the whole catalogue
+/// drops from 13s to well under a second.
 ///
 /// **The re-offset is what keeps it honest.** Douglas-Peucker keeps a subset
 /// of the original vertices, so on a convex outline the result is *inscribed* -
 /// it would let two parts sit up to `SHELL_TOLERANCE` too close. Growing it
 /// back by that much makes the shell a superset again, so a pair the NFP calls
 /// legal really is.
-fn hull_of(poly: &geometry::dxf_import::LayeredPolygon) -> geometry::dxf_import::LayeredPolygon {
+fn shell_of(poly: &geometry::dxf_import::LayeredPolygon) -> geometry::dxf_import::LayeredPolygon {
     /// Millimetres. Parts this packer helps are hundreds of mm across, so a
     /// couple of mm of slack in a pair box is under a percent of it.
     const SHELL_TOLERANCE: f64 = 2.0;
+    /// At or below this many points, pair on the true outline instead of the
+    /// hull - a concave part's whole interlocking opportunity is the material
+    /// the hull fills in, and hulling it away costs real sheets.
+    ///
+    /// Measured, 1500x1500 stock, spacing 5, `nestTest03.dxf` (a rectangle
+    /// with a concave bite; 87 points once padded): the hull pairs it at
+    /// 160x525 / density 0.862 and packs **48** parts on a sheet - exactly the
+    /// bounding-box ceiling, i.e. the bite bought nothing. On the true outline
+    /// the pair is 160x485 / 0.933, three bands fit where two did, and the
+    /// sheet takes **52**. Whole job: 6 sheets -> 5, matching the commercial
+    /// nester, at identical run time.
+    ///
+    /// The bound is cost, not correctness. `obstacle_nfp` is a Minkowski sum,
+    /// so it grows with the point count: at 274 points (`three.dxf`) the exact
+    /// outline takes that job 51s -> 178s for a byte-identical answer, while
+    /// at 110 (`one.dxf`) and 87 it is free. 128 sits in the measured gap.
+    const EXACT_AT_OR_BELOW: usize = 128;
+    if poly.points.len() <= EXACT_AT_OR_BELOW {
+        return geometry::dxf_import::LayeredPolygon { points: poly.points.clone(), children: Vec::new(), texts: Vec::new(), real_boundary: None, ..poly.clone() };
+    }
     /// Below this the hull is already cheap, and simplifying it only spends
     /// the tolerance for nothing - it cost `two.dxf`'s six-point profile a
     /// whole part per sheet.
     const SIMPLIFY_ABOVE: usize = 32;
+    // NEST_PAIR_EXACT=1: pair on the true outline instead of the shell. An
+    // experiment, not a mode - `row_step` bisects assuming convex shells.
     let hull = geometry::hull_polygon::hull(&poly.points).unwrap_or_else(|| poly.points.clone());
     let points = if hull.len() > SIMPLIFY_ABOVE {
         let simplified = geometry::simplify::simplify(&hull, Some(SHELL_TOLERANCE), false);
@@ -383,11 +417,14 @@ fn hull_of(poly: &geometry::dxf_import::LayeredPolygon) -> geometry::dxf_import:
 /// The tightest horizontal distance at which a unit can repeat along a row
 /// without any of its parts touching the copy's.
 ///
-/// Bisected on the shells rather than solved: the shells are convex, so for
-/// any pair of them the overlapping offsets form a single interval and "all
-/// clear" is monotonic in `dx` - which is exactly what makes bisection valid
-/// here. A concave outline could break that, which is one more reason this
-/// runs on shells (see `hull_of`): conservative, never optimistic.
+/// Bisected on the shells rather than solved. For a convex shell the
+/// overlapping offsets form a single interval, so "all clear" is monotonic in
+/// `dx` and bisection finds the true step. A shell that is a concave outline
+/// (see `shell_of`) can break that monotonicity - but not the *safety* of the
+/// result: `hi` starts at a width already checked clear and only ever moves to
+/// another value `clear` returned true for, so whatever comes back is a
+/// verified-clear step. Non-monotonicity can only make it miss a smaller one,
+/// which costs density and never legality.
 ///
 /// Falls back to the full width whenever the shells still clash at it, so a
 /// shape with no useful overhang costs nothing but the bisection.
@@ -402,7 +439,7 @@ fn row_step(part: &NestPart, unit: &Unit) -> f64 {
         .members
         .iter()
         .map(|&(rotation, dx, dy)| {
-            let shell = hull_of(&rotate_layered_polygon(&part.polygon, rotation));
+            let shell = shell_of(&rotate_layered_polygon(&part.polygon, rotation));
             geometry::dxf_import::shift_layered_polygon(&shell, dx, dy)
         })
         .collect();
