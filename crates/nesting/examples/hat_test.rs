@@ -11,8 +11,8 @@
 //! parts). The hat is a 13-sided non-rectangular shape, so the
 //! rectangular-parts-prefer-90-degrees quirk documented for the other
 //! fixtures doesn't apply here - but **`rotations=2` is the actual
-//! standout, not a wider grid**: `compare_supernesting` (a separate example)
-//! measured supernesting's own reference layouts directly and found every
+//! standout, not a wider grid**: supernesting's own reference layouts (since
+//! deleted, they were never committed) were measured directly and every
 //! placed hat, across all three fixtures, uses just one of two rotations
 //! exactly 180 degrees apart (no mirroring). A wider grid (6/12/24) only
 //! helps if something downstream actually *measures* which of those angles
@@ -31,11 +31,10 @@
 //! parts per sheet but throws away exactly the search this tessellation
 //! depends on getting right early - `tightfit` is the one to reach for here.
 //!
-//! `part_count` should match one of the real
-//! `tests/fixtures/supernesting {2,20,252}part(s) 500x500.dxf` reference
-//! layouts (see `compare_supernesting` for how their ground-truth
-//! utilisation numbers were measured directly from those files rather than
-//! assumed) - `target_utilisation_pct` looks up the matching reference
+//! `part_count` should match one of the N=2/20/252 reference layouts whose
+//! ground-truth utilisation was measured directly from supernesting's own
+//! output files rather than assumed (those files are not in this repo) -
+//! `target_utilisation_pct` looks up the matching reference
 //! figure for whichever `part_count` is requested, `0.0` (no target, just
 //! reports) for anything else.
 //!
@@ -65,7 +64,7 @@ const SHEET_SIZE: f64 = 500.0;
 const CURVE_TOLERANCE: f64 = 0.1;
 
 /// Reference utilisation measured directly off supernesting's own reference
-/// layouts (see `compare_supernesting`) for whichever `part_count` this run
+/// layouts for whichever `part_count` this run
 /// was asked for - `0.0` (no target, just reports) for anything else.
 fn target_utilisation_pct(part_count: usize) -> f64 {
     match part_count {
