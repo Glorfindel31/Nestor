@@ -1,5 +1,8 @@
 [package]
 name = "rustynesting"
+# Two binaries live here, so a bare `cargo run -p rustynesting` is ambiguous
+# without this - and the window is what you almost always mean.
+default-run = "rustynesting"
 version.workspace = true
 edition.workspace = true
 
