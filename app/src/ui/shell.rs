@@ -1,6 +1,6 @@
-//! Chrome around the four numbered panels: the header strip and its
-//! settings menu, the bottom CONFIGURE drawer, the floating RUN control, and
-//! the modal dialogs (help, SVG units, and the three confirmations).
+//! Chrome around the numbered panels: the header strip and its settings
+//! menu, the CONFIGURE side panel, the floating RUN control, and the modal
+//! dialogs (help, SVG units, and the three confirmations).
 
 use egui::{Align, Layout, RichText};
 
@@ -8,9 +8,17 @@ use super::{config, prefs, theme, App};
 
 /// Shared look for a panel heading: an accent-coloured step number followed
 /// by the title. Pair it with `heading_rule` below.
+///
+/// An empty `number` draws the title alone, for the panels that are not steps
+/// of the job. The library used to be "01b" - a lettered sub-step inside a
+/// numbered sequence, which is the numbering admitting it does not fit. Like
+/// CONFIGURE, it is optional: a shelf you visit when you have offcuts, not a
+/// stage between importing and nesting.
 pub fn heading(app: &App, ui: &mut egui::Ui, number: &str, key: &str) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(number).color(theme::ACCENT).strong().family(theme::heavy()));
+        if !number.is_empty() {
+            ui.label(RichText::new(number).color(theme::ACCENT).strong().family(theme::heavy()));
+        }
         ui.label(RichText::new(app.t(key)).strong().family(theme::heavy()));
     });
 }
@@ -77,7 +85,7 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
                 // panel it opens: once collapsed, a side panel leaves nothing
                 // behind to click.
                 let label = if app.settings_open { "<<" } else { ">>" };
-                if ui.button(format!("{label} 03 {}", app.t("settings_bar_text"))).on_hover_text(super::keys::hint(app.t("settings_bar_text"), "Ctrl+,")).clicked() {
+                if ui.button(format!("{label} {}", app.t("settings_bar_text"))).on_hover_text(super::keys::hint(app.t("settings_bar_text"), "Ctrl+,")).clicked() {
                     app.settings_open = !app.settings_open;
                 }
                 // Same affordance on the other side: a collapsed side panel
@@ -115,6 +123,21 @@ fn settings_menu(app: &mut App, ctx: &egui::Context) {
                 for lang in super::i18n::Lang::ALL {
                     if ui.selectable_label(app.prefs.lang == lang, lang.label()).clicked() {
                         app.prefs.lang = lang;
+                        // Every label in this UI re-resolves through `t()`
+                        // each frame, so it follows the switch - but the three
+                        // status lines hold text that was resolved once, when
+                        // the event happened, and would sit there in the old
+                        // language until the next action replaced them.
+                        //
+                        // ponytail: cleared rather than re-resolved. Carrying
+                        // the key and its arguments on `Status` would let them
+                        // survive the switch, and is the upgrade if these ever
+                        // hold something worth keeping - today they are
+                        // transient feedback about the last action, and an
+                        // empty line beats a stale one in the wrong language.
+                        app.import_status.clear();
+                        app.run_status.clear();
+                        app.export_status.clear();
                     }
                 }
             });
@@ -125,7 +148,7 @@ fn settings_menu(app: &mut App, ctx: &egui::Context) {
                 for scale in prefs::Scale::ALL {
                     if ui.selectable_label(app.prefs.scale == scale, app.t(scale.key())).clicked() {
                         app.prefs.scale = scale;
-                        theme::apply(ctx, scale.factor());
+                        theme::apply(ctx, scale.factor(), true);
                     }
                 }
             });
@@ -158,7 +181,7 @@ pub fn bottom_bar(app: &mut App, ctx: &egui::Context) {
     });
 }
 
-/// 03 CONFIGURE, as a collapsible right-hand side panel: open it and the
+/// CONFIGURE, as a collapsible right-hand side panel: open it and the
 /// central column narrows rather than being covered, so a setting can be
 /// changed while the sheet it affects stays on screen.
 ///
@@ -169,13 +192,17 @@ pub fn config_panel(app: &mut App, ctx: &egui::Context) {
     if !app.settings_open {
         return;
     }
+    // A share of the window rather than a fixed 460. On a 1366-wide shop
+    // laptop that fixed width took a third of the screen away from the canvas
+    // it exists to configure; on a wide monitor it stops growing, because
+    // nothing in here reads better past ~460.
+    let width = (ctx.screen_rect().width() * 0.30).clamp(340.0, 460.0);
     egui::SidePanel::right("configure")
         .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(8.0))
-        .default_width(460.0)
-        .width_range(360.0..=760.0)
+        .default_width(width)
+        .width_range(320.0..=760.0)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("03").color(theme::ACCENT).strong().family(theme::heavy()));
                 ui.label(RichText::new(app.t("settings_bar_text")).strong().family(theme::heavy()));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.button(">>").on_hover_text(app.t("settings_bar_text")).clicked() {
@@ -256,12 +283,27 @@ pub fn run_float(app: &mut App, ctx: &egui::Context) {
             // Square, like every other edge in this theme - egui's default is
             // a fully rounded pill, which is the one shape the design has no
             // place for.
+            //
+            // **The one place this design moves.** Everything else is static
+            // on purpose (`animation_time` is zero and controls do not even
+            // grow under the pointer), but a nest can run for minutes with
+            // the operator away from the screen, and a bar that only advances
+            // when a generation lands is indistinguishable from one that has
+            // stopped. The travelling highlight is what says "still working"
+            // in between, and the percentage is what says how much longer.
             ui.add(
                 egui::ProgressBar::new(app.progress)
                     .desired_width(240.0 * RUN_BUTTON_SCALE)
                     .corner_radius(egui::CornerRadius::ZERO)
-                    .fill(theme::ACCENT),
+                    .fill(theme::ACCENT)
+                    .animate(true)
+                    .text(RichText::new(format!("{:.0}%", app.progress * 100.0)).color(theme::TEXT).family(theme::heavy())),
             );
+            // egui repaints on input or on request only. Without this the
+            // highlight advances just once per progress message - exactly the
+            // stutter it exists to cover. 30fps is plenty for it and leaves
+            // the GA the cores it is actually using.
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
         }
         if app.cfg.mirror {
             ui.label(RichText::new(app.t("mirror_run_warning")).color(theme::ERROR).small());
@@ -360,6 +402,21 @@ fn help(app: &mut App, ctx: &egui::Context) {
                 for lang in super::i18n::Lang::ALL {
                     if ui.selectable_label(app.prefs.lang == lang, lang.label()).clicked() {
                         app.prefs.lang = lang;
+                        // Every label in this UI re-resolves through `t()`
+                        // each frame, so it follows the switch - but the three
+                        // status lines hold text that was resolved once, when
+                        // the event happened, and would sit there in the old
+                        // language until the next action replaced them.
+                        //
+                        // ponytail: cleared rather than re-resolved. Carrying
+                        // the key and its arguments on `Status` would let them
+                        // survive the switch, and is the upgrade if these ever
+                        // hold something worth keeping - today they are
+                        // transient feedback about the last action, and an
+                        // empty line beats a stale one in the wrong language.
+                        app.import_status.clear();
+                        app.run_status.clear();
+                        app.export_status.clear();
                     }
                 }
             });
@@ -412,23 +469,64 @@ fn help(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// Measure for a help bubble, in points before `text_scale`. Wide enough
+/// that a 400-character explanation is four or five lines rather than a
+/// column, narrow enough to stay inside a readable line length - egui's
+/// plain `on_hover_text` gives neither, since it sizes itself to whatever
+/// the longest unbroken run of text happens to be.
+const HELP_WIDTH: f32 = 380.0;
+
+/// The hover bubble every config option gets: the option's own name as a
+/// heading, a rule, then the explanation.
+///
+/// **Attach this to real widget responses, never to a `ui.horizontal(..)
+/// .response`.** Every config row used to hang its `on_hover_text` on the
+/// row container, and not one of those tooltips ever appeared - verified
+/// against the running app, hovering both the label and the control. A
+/// container response does not win the hover its children are sitting on, so
+/// the explanation was unreachable however long you rested on the row. Union
+/// the label's response with the control's instead (`number_row` below), so
+/// the whole row is live.
+///
+/// The heading earns its place because the bubble can cover the label it
+/// describes, and the fixed measure keeps 200-400 characters of real operator
+/// guidance ("set 0 if your CAM already accounts for it") readable rather than
+/// dumping it as one unstructured blob at whatever width egui picks.
+pub fn help_bubble(response: egui::Response, title: &str, body: &str) -> egui::Response {
+    response.on_hover_ui(|ui| {
+        ui.set_max_width(HELP_WIDTH);
+        ui.label(RichText::new(title).color(theme::ACCENT).family(theme::heavy()));
+        ui.separator();
+        ui.label(RichText::new(body).color(theme::TEXT));
+    })
+}
+
 /// A labelled numeric field, the shape almost every config row takes.
 pub fn number_row<T: egui::emath::Numeric>(ui: &mut egui::Ui, label: &str, tooltip: &str, value: &mut T, speed: f64, range: std::ops::RangeInclusive<T>) {
-    ui.horizontal(|ui| {
-        ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(label).color(theme::DIM)));
-        ui.add(egui::DragValue::new(value).speed(speed).range(range));
-    })
-    .response
-    .on_hover_text(tooltip);
+    let row = ui
+        .horizontal(|ui| {
+            let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(label).color(theme::DIM)));
+            let field = ui.add(egui::DragValue::new(value).speed(speed).range(range));
+            name.union(field)
+        })
+        .inner;
+    help_bubble(row, label, tooltip);
 }
 
 /// A dropdown over a fixed set of variants, each labelled through `t()`.
-pub fn choice<T: PartialEq + Copy>(ui: &mut egui::Ui, id: &str, current: &mut T, options: &[T], label_of: impl Fn(T) -> String) {
-    egui::ComboBox::from_id_salt(id).selected_text(label_of(*current)).show_ui(ui, |ui| {
-        for &option in options {
-            ui.selectable_value(current, option, label_of(option));
-        }
-    });
+///
+/// Returns the closed combo's own response so a caller can hang a
+/// `help_bubble` on it - see that function for why the surrounding row's
+/// response cannot carry one.
+pub fn choice<T: PartialEq + Copy>(ui: &mut egui::Ui, id: &str, current: &mut T, options: &[T], label_of: impl Fn(T) -> String) -> egui::Response {
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(label_of(*current))
+        .show_ui(ui, |ui| {
+            for &option in options {
+                ui.selectable_value(current, option, label_of(option));
+            }
+        })
+        .response
 }
 
 /// Text drawn in the accent colour, for the one-off places that need it.

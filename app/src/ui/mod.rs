@@ -9,9 +9,17 @@
 //! Tauri (see `docs/PORT_STATUS.md`'s Phase 6 row) and the hazard here is
 //! identical.
 //!
-//! Layout, matching what the web UI established: a header strip, then four
-//! numbered steps - 01 IMPORT, 02 ASSIGN ROLES, 03 CONFIGURE (in the bottom
-//! drawer), 04 RESULT - plus a floating RUN control and a floating console.
+//! Layout: a header strip, then the three numbered steps of the actual job -
+//! 01 IMPORT, 02 ASSIGN ROLES, 03 RESULT - plus a floating RUN control, a
+//! floating console, and CONFIGURE in a right-hand side panel.
+//!
+//! **CONFIGURE is deliberately not numbered.** It used to be "03", which put
+//! a hole in the sequence the central column shows: a side panel is not
+//! somewhere the eye travels between 02 and RESULT, so the column read
+//! 01 - 02 - 04 and the numbering was making a promise the layout did not
+//! keep. It is also not a step anyone must pass through: the defaults are
+//! meant to work (see `PRODUCT.md`'s third product principle), so it is
+//! parameters for the run, reachable when wanted, not a stage of it.
 
 mod canvas;
 mod config;
@@ -62,6 +70,42 @@ pub struct Snapshot {
     /// that switching between history entries doesn't carry pins across
     /// results they don't belong to.
     pub locked: std::collections::HashSet<usize>,
+}
+
+/// Groups audit issues into one log line: how many of each kind, on which
+/// sheets, and which parts. Without it the log records a bare count, which
+/// says a nest is unsafe but nothing about why - see the call site.
+///
+/// Part ids are capped because a wholesale failure lists every part on the
+/// sheet, and a log line hundreds of ids long is no more useful than a short
+/// one. The kinds come from `dto::AuditIssueDto` (`overlap`, `outside_sheet`,
+/// `below_spacing`, `outside_margin`).
+fn audit_breakdown(issues: &[crate::dto::AuditIssueDto]) -> String {
+    use std::collections::{BTreeMap, BTreeSet};
+    const MAX_IDS: usize = 8;
+
+    // BTree, not Hash: the line is diffed between runs, so a stable order
+    // matters more than the lookup speed of at most four keys.
+    let mut by_kind: BTreeMap<&str, (usize, BTreeSet<usize>, BTreeSet<usize>)> = BTreeMap::new();
+    for issue in issues {
+        let entry = by_kind.entry(issue.kind.as_str()).or_insert_with(|| (0, BTreeSet::new(), BTreeSet::new()));
+        entry.0 += 1;
+        entry.1.insert(issue.sheet_index);
+        entry.2.extend(issue.part_ids.iter().copied());
+    }
+
+    let join = |values: &BTreeSet<usize>, cap: usize| {
+        let mut out: Vec<String> = values.iter().take(cap).map(usize::to_string).collect();
+        if values.len() > cap {
+            out.push(format!("+{} more", values.len() - cap));
+        }
+        out.join(",")
+    };
+    by_kind
+        .iter()
+        .map(|(kind, (count, sheets, parts))| format!("{kind} x{count} on sheet(s) {} (parts {})", join(sheets, MAX_IDS), join(parts, MAX_IDS)))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Moves one step along the edit history: takes the newest state off `from`,
@@ -130,7 +174,7 @@ pub struct App {
     shape_filter: String,
     confirm_remove: bool,
 
-    // ---- 03 CONFIGURE ----
+    // ---- CONFIGURE ----
     cfg: ConfigForm,
     settings_open: bool,
     /// Whether the left-hand log panel is open.
@@ -167,6 +211,13 @@ pub struct App {
     /// clean one are exactly the distinction the audit exists to make.
     audit: Option<crate::dto::AuditReportDto>,
     auditing: bool,
+    /// What caused the audit currently in flight - "a nest run", "a repack",
+    /// "a drag", and so on. Seven different actions request an audit, and
+    /// until this existed the log recorded only the verdict, so a result that
+    /// came back with 31 fatal issues could not be attributed to the action
+    /// that produced it. The audit is asynchronous, so the reason has to be
+    /// parked here rather than passed through the worker.
+    audit_reason: &'static str,
     /// The saved parts library and remnant shelf. Loaded once at startup; a
     /// load failure leaves this at its default *and* logs loudly, rather than
     /// letting an unreadable file look like an empty library.
@@ -218,12 +269,15 @@ pub struct App {
     /// A best result found in a previous session, waiting on "recover or
     /// start fresh".
     recover_prompt: Option<Box<BestResultDto>>,
+    /// Cleared once the first frame has re-applied the style with real font
+    /// metrics - see `theme::apply`'s `fonts_ready`.
+    metrics_pending: bool,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let prefs: prefs::Prefs = cc.storage.and_then(|s| eframe::get_value(s, PREFS_KEY)).unwrap_or_default();
-        theme::apply(&cc.egui_ctx, prefs.scale.factor());
+        theme::apply(&cc.egui_ctx, prefs.scale.factor(), false);
         // Once, here - not inside `apply`, which reruns on every TEXT SIZE
         // change. See `install_fonts`.
         theme::install_fonts(&cc.egui_ctx);
@@ -270,6 +324,7 @@ impl App {
             snapshot: None,
             audit: None,
             auditing: false,
+            audit_reason: "startup",
             store: Default::default(),
             store_open: false,
             remnants: Vec::new(),
@@ -292,6 +347,7 @@ impl App {
             settings_menu_open: false,
             confirm_reset: false,
             recover_prompt: None,
+            metrics_pending: true,
         };
         app.console.log(console::Kind::Run, "Nestor started");
         app.worker.load_store();
@@ -412,6 +468,20 @@ impl App {
                 let index = self.repacking.take();
                 match (*result, index) {
                     (Ok(response), Some(i)) => {
+                        // In the console, not only on the status line: a
+                        // repack that succeeded left no trace in the log at
+                        // all, so a bad arrangement afterwards could not be
+                        // told apart from a bad drag. The status line is
+                        // transient and the log is what gets read later.
+                        self.console.log(
+                            console::Kind::Plain,
+                            format!(
+                                "repack sheet {}: {}, {:.1}% used",
+                                response.placement.sheet_index,
+                                if response.improved { "improved" } else { "no improvement, kept as-is" },
+                                response.utilisation
+                            ),
+                        );
                         let improved = self.apply_repack(i, response);
                         self.run_status.ok(self.t(if improved { "repack_status_improved" } else { "repack_status_no_improvement" }));
                     }
@@ -455,15 +525,31 @@ impl App {
                 self.auditing = false;
                 match *result {
                     Ok(report) => {
+                        let after = self.audit_reason;
                         if !report.passed {
                             // Loud in the console as well as on the badge: a
                             // fatal issue is the one thing here that must not
                             // be missed by someone not looking at the panel.
-                            self.console.error(format!("audit: {} fatal issue(s), {} warning(s)", report.fatal_count, report.warning_count));
+                            //
+                            // The breakdown is not decoration. "31 fatal
+                            // issue(s)" cannot distinguish 31 parts hanging
+                            // off the sheet from 31 pairwise overlaps, and
+                            // those point at different bugs - a real report
+                            // of exactly that was unattributable for want of
+                            // this line.
+                            self.console.error(format!(
+                                "audit after {after}: {} fatal issue(s), {} warning(s) - {}",
+                                report.fatal_count,
+                                report.warning_count,
+                                audit_breakdown(&report.issues)
+                            ));
                         } else if report.warning_count > 0 {
-                            self.console.log(console::Kind::Plain, format!("audit: passed with {} warning(s)", report.warning_count));
+                            self.console.log(
+                                console::Kind::Plain,
+                                format!("audit after {after}: passed with {} warning(s) - {}", report.warning_count, audit_breakdown(&report.issues)),
+                            );
                         } else {
-                            self.console.log(console::Kind::Plain, "audit: passed".to_string());
+                            self.console.log(console::Kind::Plain, format!("audit after {after}: passed"));
                         }
                         self.audit = Some(report);
                     }
@@ -539,7 +625,7 @@ impl App {
         self.redo_stack.clear();
         self.snapshot = Some(Snapshot::from_history(&self.history[self.history_index]));
         self.consume_used_remnants();
-        self.request_audit();
+        self.request_audit("a nest run");
     }
 
     /// Marks every library remnant that this run actually nested onto as
@@ -581,8 +667,9 @@ impl App {
     ///
     /// Clears the previous verdict first, so the gap between the edit and the
     /// answer reads as "unknown" rather than as the stale pass.
-    fn request_audit(&mut self) {
+    fn request_audit(&mut self, reason: &'static str) {
         self.audit = None;
+        self.audit_reason = reason;
         // Offcuts describe one specific arrangement. Keeping them across a
         // change would offer the user a remnant that no longer exists.
         self.remnants.clear();
@@ -615,7 +702,7 @@ impl App {
         snap.placements[index] = response.placement;
         // A repack rearranges a whole sheet, so its verdict is the one most
         // worth re-earning.
-        self.request_audit();
+        self.request_audit("a repack");
         response.improved
     }
 
@@ -639,7 +726,7 @@ impl App {
     /// Restores the result as it was before the last drag or repack.
     fn undo(&mut self) {
         if step_history(&mut self.undo_stack, &mut self.redo_stack, &mut self.snapshot) {
-            self.request_audit();
+            self.request_audit("an undo");
             self.run_status.ok(self.t("undo_done"));
         } else {
             self.run_status.ok(self.t("undo_nothing"));
@@ -650,7 +737,7 @@ impl App {
     /// which clears the stack - see `push_undo`.
     fn redo(&mut self) {
         if step_history(&mut self.redo_stack, &mut self.undo_stack, &mut self.snapshot) {
-            self.request_audit();
+            self.request_audit("a redo");
             self.run_status.ok(self.t("redo_done"));
         } else {
             self.run_status.ok(self.t("redo_nothing"));
@@ -761,7 +848,7 @@ impl App {
             unplaced_ids: best.unplaced_ids,
             locked: Default::default(),
         });
-        self.request_audit();
+        self.request_audit("recovering the saved best result");
         self.console.log(console::Kind::Best, "recovered the best result from a previous session");
     }
 }
@@ -772,6 +859,12 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // First frame only: `App::new` had to size the buttons from a
+        // constant because egui had no font atlas yet. It has one now, so
+        // re-apply with the label's real row height before anything draws.
+        if std::mem::take(&mut self.metrics_pending) {
+            theme::apply(ctx, self.prefs.scale.factor(), true);
+        }
         self.pump();
         import::handle_dropped_files(self, ctx);
         keys::handle(self, ctx);
@@ -807,6 +900,28 @@ mod tests {
 
     fn snap(fitness: f64) -> Snapshot {
         Snapshot { placements: Vec::new(), fitness, utilisation: 0.0, unplaced_count: 0, unplaced_ids: Vec::new(), locked: Default::default() }
+    }
+
+    /// The whole point of the breakdown is telling one failure mode from
+    /// another in the log, so the kinds must stay separated and counted. The
+    /// id cap is what keeps a wholesale failure - every part on a sheet at
+    /// once, which is exactly the case this was written for - to one readable
+    /// line instead of hundreds of ids.
+    #[test]
+    fn audit_breakdown_separates_kinds_and_caps_the_id_list() {
+        let issue = |kind: &str, sheet: usize, parts: Vec<usize>| crate::dto::AuditIssueDto { kind: kind.to_string(), fatal: true, sheet_index: sheet, part_ids: parts };
+
+        let mixed = vec![issue("overlap", 0, vec![1, 2]), issue("outside_sheet", 1, vec![7]), issue("overlap", 0, vec![2, 3])];
+        let line = audit_breakdown(&mixed);
+        assert!(line.contains("overlap x2 on sheet(s) 0 (parts 1,2,3)"), "got: {line}");
+        assert!(line.contains("outside_sheet x1 on sheet(s) 1 (parts 7)"), "got: {line}");
+
+        let wholesale: Vec<_> = (0..30).map(|id| issue("outside_sheet", 0, vec![id])).collect();
+        let line = audit_breakdown(&wholesale);
+        assert!(line.contains("outside_sheet x30"), "the count is never capped: {line}");
+        assert!(line.contains("+22 more"), "only the id list is capped: {line}");
+
+        assert_eq!(audit_breakdown(&[]), "", "a clean report adds nothing to the line");
     }
 
     /// Undo then redo has to land exactly back where it started, however many

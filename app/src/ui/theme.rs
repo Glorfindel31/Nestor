@@ -11,6 +11,9 @@
 //! free hex field, which meant the app had no colour of its own - every
 //! screenshot was somebody else's palette. One accent, always this one, is
 //! the identity.
+//!
+//! The type is JetBrains Mono, embedded. See `install_fonts` for why it
+//! replaced a Consolas read off `C:\Windows\Fonts`.
 
 use egui::Color32;
 
@@ -55,7 +58,11 @@ pub const ERROR: Color32 = Color32::from_rgb(0xf9, 0x4a, 0x21);
 /// would not read as a signal at all.
 pub const OK: Color32 = ACCENT;
 
-pub fn apply(ctx: &egui::Context, text_scale: f32) {
+/// Applies the palette, widget styling and text metrics.
+///
+/// `fonts_ready` is false only for the call from `App::new`, which happens
+/// before egui has a font atlas - see the button-metrics block below.
+pub fn apply(ctx: &egui::Context, text_scale: f32, fonts_ready: bool) {
     let mut style = (*ctx.style()).clone();
     style.animation_time = 0.0;
 
@@ -173,15 +180,21 @@ pub fn apply(ctx: &egui::Context, text_scale: f32) {
     // shrink-wraps its label, so the padding below is symmetric by
     // construction.
     const BUTTON_GROWTH: f32 = 1.10;
-    // Consolas' row height as a fraction of its nominal point size, measured
-    // off the rendered UI (a 12.5pt button laid out an 18px line at TEXT
-    // SIZE = 1.25). Not queried from `ctx.fonts()`, tempting as that is:
-    // `apply` runs from `App::new`, before the first frame, and egui panics
-    // with "No fonts available until first call to Context::run()" there.
-    // Guessing 1.25 instead was wrong by 8% and turned a 10% bigger button
-    // into a 20% bigger one, so the number has to be the real one.
-    const ROW_HEIGHT_RATIO: f32 = 1.152;
-    let line = 12.5 * text_scale * ROW_HEIGHT_RATIO;
+    // The button label's real laid-out row height, asked of the font rather
+    // than assumed. This used to be a hardcoded ratio measured off the
+    // rendered UI, which was correct only for the face it was measured on -
+    // and guessing it instead was once wrong by 8%, turning a 10% bigger
+    // button into a 20% bigger one.
+    //
+    // `apply` also runs from `App::new`, before the first frame, where egui
+    // has no atlas yet and `ctx.fonts` panics with "No fonts available until
+    // first call to Context::run()". `fonts_ready` is that distinction; the
+    // fallback is JetBrains Mono's own (ascent - descent) / units_per_em, and
+    // `App::update` re-applies on its first frame with the measured value
+    // before anything is drawn.
+    const JETBRAINS_ROW_RATIO: f32 = 1.320;
+    let button_font = egui::FontId::new(12.5 * text_scale, egui::FontFamily::Monospace);
+    let line = if fonts_ready { ctx.fonts(|f| f.row_height(&button_font)) } else { 12.5 * text_scale * JETBRAINS_ROW_RATIO };
     // egui's default box is the line plus 2 * button_padding.y, floored by
     // interact_size.y. Growing both by the same tenth grows the rendered
     // button by exactly a tenth whichever of the two is binding.
@@ -193,58 +206,53 @@ pub fn apply(ctx: &egui::Context, text_scale: f32) {
     ctx.set_style(style);
 }
 
-/// egui's built-in monospace (Hack) has no Vietnamese coverage: every
-/// diacritic in the `vi` dictionary renders as a fallback box, which makes
-/// the whole second language unreadable rather than merely ugly.
+/// Installs JetBrains Mono, embedded in the binary, as the whole UI's type.
 ///
-/// Consolas ships with every Windows install, is monospace, and does cover
-/// Vietnamese - so read it off disk rather than embedding a ~700KB face into
-/// the binary for one script. If it is ever missing, fall back silently to
-/// the built-in font: an app that starts with slightly wrong glyphs beats an
-/// app that refuses to start.
+/// **Why embedded rather than read off the system.** This used to load
+/// Consolas from `C:\Windows\Fonts\consola.ttf`, because egui's built-in
+/// monospace (Hack) has no Vietnamese coverage and every diacritic in the
+/// `vi` dictionary rendered as a fallback box. That worked on Windows and
+/// quietly failed everywhere else: the mac and linux binaries fell through to
+/// Hack, so they shipped a different typeface *and* an unreadable second
+/// language. Since Vietnamese is a product requirement, not a locale demo,
+/// the face has to be in the binary. ~540KB for both weights.
+///
+/// **Why this face.** Its vertical metrics are drawn around its own
+/// Latin-Extended coverage, which is exactly what Consolas' are not:
+///
+/// | | units (em = 1000) |
+/// |---|---|
+/// | tallest Vietnamese cap stack (`Ậ Ộ Ề`) | 1020 |
+/// | hhea ascent | 1020 |
+/// | deepest descender / dot-below (`Ậ Ợ g y`) | -213 |
+/// | hhea descent | -300 |
+/// | cap height | 730, leaving 290 above and 300 below |
+///
+/// Two things fall out of that table. The line box already clears every mark
+/// Vietnamese can stack on a capital, and caps already sit optically centred
+/// in it - so the `FontTweak { y_offset_factor: 0.192 }` that used to nudge
+/// Consolas' glyphs down is gone rather than retuned. That tweak was derived
+/// on the premise that "every label in this UI is uppercase, so no glyph ever
+/// reaches the descender", which `Ậ`'s dot below falsifies; keeping it and
+/// picking a smaller number would have preserved a correction the new face
+/// does not need.
 ///
 /// Call once at startup, not from `apply`: `ctx.set_fonts` throws away and
 /// rebuilds the whole font atlas, while `apply` reruns on every TEXT SIZE
-/// change. Nothing here depends on the text scale anyway - `CAP_CENTRING` is
-/// a *factor*, so it tracks the size on its own.
+/// change. Nothing here depends on the text scale.
 pub fn install_fonts(ctx: &egui::Context) {
-    const CONSOLAS: &str = r"C:\Windows\Fonts\consola.ttf";
-    const CONSOLAS_BOLD: &str = r"C:\Windows\Fonts\consolab.ttf";
-    let consolas_bytes = std::fs::read(CONSOLAS);
-
-    // Nudge the glyphs down inside their line box.
-    //
-    // Every label in this UI is uppercase, so no glyph ever reaches the
-    // descender - but the line box still reserves room for one. Measured on
-    // a 22px button: 2px of space above the caps and 8px below, which reads
-    // as text stuck to the top of the button however symmetric the padding
-    // is. Half that 6px difference, as a fraction of the font size
-    // (3 / 15.625), re-centres the caps optically.
-    //
-    // `y_offset_factor` rather than `y_offset` so it tracks the TEXT SIZE
-    // preference: the gap it corrects is proportional to the font size.
-    // Visual only - it does not move the layout, so nothing reflows.
-    const CAP_CENTRING: f32 = 0.192;
+    const REGULAR: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf");
+    const BOLD: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Bold.ttf");
 
     let mut fonts = egui::FontDefinitions::default();
-    // `heavy()` is referenced all over the UI and epaint panics outright on a
-    // family bound to no fonts, so bind it to the built-in monospace stack
-    // before the missing-Consolas bail-out below can return.
-    let builtin_mono = fonts.families[&egui::FontFamily::Monospace].clone();
-    fonts.families.insert(heavy(), builtin_mono);
-
-    let Ok(bytes) = consolas_bytes else {
-        ctx.set_fonts(fonts);
-        return;
-    };
-    let consolas = egui::FontData::from_owned(bytes).tweak(egui::FontTweak { y_offset_factor: CAP_CENTRING, ..Default::default() });
-    fonts.font_data.insert("consolas".to_owned(), std::sync::Arc::new(consolas));
+    for (name, bytes) in [("jetbrains", REGULAR), ("jetbrains_bold", BOLD)] {
+        fonts.font_data.insert(name.to_owned(), std::sync::Arc::new(egui::FontData::from_static(bytes)));
+    }
     // Front of both families: monospace is what the UI actually uses, and
     // proportional is what egui falls back to for anything that slips
-    // through. The built-ins stay behind it as a further fallback for glyphs
-    // Consolas itself lacks.
+    // through. The built-ins stay behind it for glyphs this face lacks.
     for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
-        fonts.families.entry(family).or_default().insert(0, "consolas".to_owned());
+        fonts.families.entry(family).or_default().insert(0, "jetbrains".to_owned());
     }
 
     // A real bold face, as its own family.
@@ -252,22 +260,10 @@ pub fn install_fonts(ctx: &egui::Context) {
     // `RichText::strong()` only swaps the *colour* in egui - it does not
     // reach for a heavier weight, because a weight has to be a separate
     // loaded font and nothing here loaded one. So every "strong" label in
-    // this UI - the wordmark, the step numbers, RUN NEST - has been the same
-    // stroke thickness as body text all along, which is not what an accent
-    // is for. `heavy()` below is the family that actually is bold.
-    //
-    // Falls back to the regular face if `consolab.ttf` is missing, so the
-    // family always resolves to something: mildly wrong weight beats
-    // tofu boxes.
-    let regular_first = vec!["consolas".to_owned()];
-    let bold_stack = match std::fs::read(CONSOLAS_BOLD) {
-        Ok(bold) => {
-            fonts.font_data.insert("consolas_bold".to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bold).tweak(egui::FontTweak { y_offset_factor: CAP_CENTRING, ..Default::default() })));
-            vec!["consolas_bold".to_owned(), "consolas".to_owned()]
-        }
-        Err(_) => regular_first,
-    };
-    fonts.families.insert(heavy(), bold_stack);
+    // this UI - the wordmark, the step numbers, RUN NEST - would be the same
+    // stroke thickness as body text. `heavy()` below is the family that
+    // actually is bold.
+    fonts.families.insert(heavy(), vec!["jetbrains_bold".to_owned(), "jetbrains".to_owned()]);
 
     ctx.set_fonts(fonts);
 }

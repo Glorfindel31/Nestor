@@ -27,8 +27,13 @@ pub fn run_gui() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Nestor")
-            .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([900.0, 600.0]),
+            // Sized for the smallest screen this app targets: a 1366x768 shop
+            // laptop, where the taskbar and title bar leave roughly 700 rows
+            // usable. The previous 1200x800 default opened taller than that
+            // screen can show, so the first thing such an operator saw was a
+            // window with its bottom edge off-screen.
+            .with_inner_size([1280.0, 700.0])
+            .with_min_inner_size([1024.0, 620.0]),
         ..Default::default()
     };
     eframe::run_native("rustynesting", options, Box::new(|cc| Ok(Box::new(ui::App::new(cc)))))

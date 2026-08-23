@@ -40,7 +40,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     let lang = app.prefs.lang;
     shell::panel_frame(ui, |ui| {
         ui.horizontal(|ui| {
-            shell::heading(app, ui, "01b", "heading_library_text");
+            shell::heading(app, ui, "", "heading_library_text");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button(if app.store_open { "v" } else { ">" }).on_hover_text(app.t("toggle_collapse_tooltip")).clicked() {
                     app.store_open = !app.store_open;

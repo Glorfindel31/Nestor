@@ -94,25 +94,68 @@ pub fn rotated_translated(points: &[PointDto], rotation_deg: f64, dx: f64, dy: f
     points.iter().map(|p| PointDto { x: p.x * cos - p.y * sin + dx, y: p.x * sin + p.y * cos + dy }).collect()
 }
 
-/// Deterministic colour per layer name.
+/// The hue band the chrome owns, in degrees: `ACCENT` sits at 22.5 and
+/// `ERROR` at 11.4, and those two are the only colours in this app that mean
+/// "press this" and "this is wrong". A generated layer hue landing in here
+/// would say one of those things about a part outline, on the largest painted
+/// surface in the window. Nothing drawn from data is allowed inside it.
+const RESERVED_HUE: std::ops::RangeInclusive<f32> = 4.0..=40.0;
+
+/// Colour per layer name: the operations this product names get a fixed one,
+/// everything else gets a stable generated one.
 ///
-/// Real DXF layers are arbitrary user-given names (cut/etch/drill/whatever a
-/// given job uses), so there's no fixed palette that could make sense - hash
-/// the name to a hue instead. The same layer always gets the same colour, in
-/// thumbnails and in the nested result alike, with no legend and no
-/// per-job configuration. Same hash as the web UI's, so colours don't shift
-/// between the two versions of the app.
+/// This used to hash every name to a hue, on the reasoning that DXF layer
+/// names are arbitrary. They are arbitrary in *spelling*, not in meaning -
+/// `PRODUCT.md` names cut / etch / drill as different machine operations, and
+/// hashing meant the same physical operation drew in a different colour in
+/// two files, while nothing stopped a hash landing on the accent.
+///
+/// So: the known operations are pinned, cool and clear of the chrome's warm
+/// band, and anything unrecognised still hashes - just never into
+/// `RESERVED_HUE`. Same-name-same-colour still holds, in thumbnails and in
+/// the nested result alike, with no legend and no per-job configuration.
 pub fn color_for_layer(layer: &str) -> Color32 {
+    let name = layer.trim().to_ascii_lowercase();
+    // Substring rather than equality: real files ship `CUT`, `Cut Layer`,
+    // `OUTER_CUT`, `DRILLING`. First match wins, so the order matters only
+    // where one name contains another.
+    let known = [
+        // The profile - the edge the machine actually follows, so it is the
+        // brightest and coolest thing on the sheet.
+        (["cut", "profile", "outline", "contour"].as_slice(), 193.0_f32, 0.62_f32, 1.0_f32),
+        // Holes: their own hue, because an operator scanning for them is
+        // usually counting them.
+        (["drill", "hole", "bore"].as_slice(), 142.0, 0.60, 0.95),
+        // Surface work - never a through-cut, so it is deliberately the
+        // quietest of the three.
+        (["etch", "engrave", "mark", "score", "raster"].as_slice(), 272.0, 0.52, 0.98),
+    ];
+    if let Some((_, h, s, v)) = known.iter().find(|(names, ..)| names.iter().any(|n| name.contains(n))) {
+        return egui::ecolor::Hsva::new(h / 360.0, *s, *v, 1.0).into();
+    }
+
     let mut hash: u32 = 0;
     for b in layer.bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(b as u32);
+        hash = hash.wrapping_mul(31).wrapping_add(u32::from(b));
     }
-    // Full value and slightly off-full saturation: these sit on `WELL`,
-    // the darkest surface in the palette, so they can afford to be the only
+    // Spread over the circle minus the reserved band, then step over it.
+    //
+    // The band is widened by a degree on each side first, because this colour
+    // round-trips through 8-bit RGB on its way to `Color32` and comes back up
+    // to ~0.3 degrees from where it started. Generating exactly onto the edge
+    // put it back inside the band - which the test below caught.
+    const GUARD: f32 = 1.0;
+    let (lo, hi) = (RESERVED_HUE.start() - GUARD, RESERVED_HUE.end() + GUARD);
+    let span = 360.0 - (hi - lo);
+    let mut hue = (hash % span as u32) as f32;
+    if hue >= lo {
+        hue += hi - lo;
+    }
+    // Full value and slightly off-full saturation: these sit on `WELL`, the
+    // darkest surface in the palette, so they can afford to be the only
     // saturated colour on screen. The chrome around them is zero-chroma by
     // design and does not compete.
-    let hsva = egui::ecolor::Hsva::new((hash % 360) as f32 / 360.0, 0.78, 1.0, 1.0);
-    hsva.into()
+    egui::ecolor::Hsva::new(hue / 360.0, 0.78, 1.0, 1.0).into()
 }
 
 /// Draws a shape and, recursively, every nested child - holes and interior
@@ -205,5 +248,30 @@ mod tests {
     fn layer_colours_are_stable_and_differ_between_layers() {
         assert_eq!(color_for_layer("cut"), color_for_layer("cut"));
         assert_ne!(color_for_layer("cut"), color_for_layer("drilling"));
+    }
+
+    /// The same machine operation must draw the same colour however the file
+    /// spelled it - the whole reason the known names are pinned.
+    #[test]
+    fn known_operations_are_spelling_insensitive() {
+        for names in [["cut", "CUT", "Outer Cut"], ["drill", "DRILLING", "holes"], ["etch", "ENGRAVE", "Score 1"]] {
+            let first = color_for_layer(names[0]);
+            for n in names {
+                assert_eq!(color_for_layer(n), first, "{n} should match {}", names[0]);
+            }
+        }
+    }
+
+    /// No colour drawn from data may impersonate the accent or the error
+    /// signal. Exhaustive over a wide sample of names rather than a few.
+    #[test]
+    fn no_layer_colour_lands_in_the_chrome_hue_band() {
+        let mut names: Vec<String> = (0..4000).map(|i| format!("layer{i}")).collect();
+        names.extend(["cut", "drill", "etch", "0", "DEFAULT", "annotation", "text", "dim"].iter().map(|s| (*s).to_string()));
+        for name in names {
+            let hsva = egui::ecolor::Hsva::from(color_for_layer(&name));
+            let hue = hsva.h * 360.0;
+            assert!(!RESERVED_HUE.contains(&hue), "layer {name:?} drew at hue {hue}, inside the reserved band");
+        }
     }
 }

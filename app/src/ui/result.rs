@@ -34,10 +34,15 @@ pub struct Drag {
 
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     if app.snapshot.is_none() {
+        shell::panel_frame(ui, |ui| {
+            shell::heading(app, ui, "03", "heading_result_text");
+            shell::heading_rule(ui);
+            ui.label(RichText::new(app.t("result_empty")).color(theme::DIM));
+        });
         return;
     }
     shell::panel_frame(ui, |ui| {
-        shell::heading(app, ui, "04", "heading_result_text");
+        shell::heading(app, ui, "03", "heading_result_text");
         shell::heading_rule(ui);
         history_selector(app, ui);
         stats(app, ui);
@@ -103,7 +108,7 @@ fn show_attempt(app: &mut App, index: usize) {
     app.snapshot = Some(Snapshot::from_history(&app.history[index]));
     // A different attempt is a different arrangement - the badge must not
     // carry the previous one's verdict across.
-    app.request_audit();
+    app.request_audit("switching attempt");
 }
 
 fn stats(app: &App, ui: &mut egui::Ui) {
@@ -116,13 +121,35 @@ fn stats(app: &App, ui: &mut egui::Ui) {
             });
             ui.add_space(20.0);
         };
-        stat("stat_fitness", format!("{:.1}", snap.fitness));
+        // Order is the hierarchy here, and it says what this app is scored on:
+        // "material saved is the only score" (`PRODUCT.md`, first product
+        // principle). Utilisation and the sheet count are that score, so they
+        // lead.
         stat("stat_utilisation", format!("{:.1}%", snap.utilisation));
-        stat("stat_unplaced", snap.unplaced_count.to_string());
         stat("stat_sheets_used", snap.placements.len().to_string());
+        stat("stat_unplaced", snap.unplaced_count.to_string());
         audit_badge(app, ui);
+        // Fitness last, and quiet. It is the GA's own internal objective - a
+        // seven-digit number with no unit that an operator cannot act on - and
+        // it used to lead this row at the same weight as utilisation, which
+        // told them the wrong thing was the point. Kept because it is how you
+        // tell two attempts apart when their utilisation ties.
+        ui.vertical(|ui| {
+            ui.label(RichText::new(app.t("stat_fitness")).color(theme::DIM).small());
+            ui.label(RichText::new(format!("{:.0}", snap.fitness)).color(theme::DIM).small());
+        });
     });
 }
+
+/// Candidate B: spend one colour outside the five-colour palette, reserved to
+/// the audit and used nowhere else. Flip to compare the two treatments in the
+/// running window; the loser gets deleted rather than left as a setting.
+const AUDIT_SIXTH_COLOUR: bool = false;
+
+/// Candidate B's colour. Cool on purpose - the whole palette is warm, so this
+/// cannot be mistaken for the accent at a glance the way `OK` (which is
+/// literally `ACCENT`) can.
+const VERIFIED: egui::Color32 = egui::Color32::from_rgb(0x3f, 0xd6, 0xa0);
 
 /// The manufacturability verdict, as one word in the stats row.
 ///
@@ -130,14 +157,22 @@ fn stats(app: &App, ui: &mut egui::Ui) {
 /// The whole value of the badge is that it distinguishes an arrangement
 /// something verified from one nobody did, and defaulting the unknown case
 /// to green would destroy exactly that.
+///
+/// **Why this is not just coloured text.** `OK` is an alias for `ACCENT` and
+/// `ERROR` sits 11 degrees of hue from it, so "passed" and "advisory" used to
+/// render in the identical colour and "fatal" was a near neighbour of both.
+/// On the one screen where being wrong ruins a sheet, the three verdicts were
+/// separated by the word alone. They now differ in shape before colour:
+/// fatal is the only filled badge in the app, advisory is outlined, and a
+/// clean result is quiet - nothing to look at is the point.
 fn audit_badge(app: &App, ui: &mut egui::Ui) {
     let lang = app.prefs.lang;
-    let (key, color, detail) = match (&app.audit, app.auditing) {
-        (_, true) => ("audit_checking", theme::DIM, "audit_checking_tooltip"),
-        (None, false) => ("audit_unknown", theme::DIM, "audit_unknown_tooltip"),
-        (Some(r), false) if !r.passed => ("audit_failed", theme::ERROR, "audit_failed_tooltip"),
-        (Some(r), false) if r.warning_count > 0 => ("audit_warned", theme::ACCENT, "audit_warned_tooltip"),
-        (Some(_), false) => ("audit_passed", theme::OK, "audit_passed_tooltip"),
+    let (key, detail) = match (&app.audit, app.auditing) {
+        (_, true) => ("audit_checking", "audit_checking_tooltip"),
+        (None, false) => ("audit_unknown", "audit_unknown_tooltip"),
+        (Some(r), false) if !r.passed => ("audit_failed", "audit_failed_tooltip"),
+        (Some(r), false) if r.warning_count > 0 => ("audit_warned", "audit_warned_tooltip"),
+        (Some(_), false) => ("audit_passed", "audit_passed_tooltip"),
     };
     ui.vertical(|ui| {
         ui.label(RichText::new(super::i18n::t(lang, "stat_audit")).color(theme::DIM).small());
@@ -148,7 +183,27 @@ fn audit_badge(app: &App, ui: &mut egui::Ui) {
             Some(r) if !app.auditing && r.warning_count > 0 => super::i18n::tv(lang, "audit_warned_count", &[("n", &r.warning_count.to_string())]),
             _ => super::i18n::t(lang, key).to_string(),
         };
-        ui.label(RichText::new(text).color(color).strong().family(theme::heavy())).on_hover_text(audit_detail(app, super::i18n::t(lang, detail)));
+        let label = RichText::new(text).strong().family(theme::heavy());
+        let response = match (&app.audit, app.auditing) {
+            // Fatal: the only filled badge anywhere in this app. Dark text on
+            // the halt colour, so it reads as a stamped verdict rather than
+            // another coloured word in a row of coloured words.
+            (Some(r), false) if !r.passed => egui::Frame::new().fill(theme::ERROR).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| ui.label(label.color(theme::BG))).inner,
+            // Advisory: outlined, not filled. Same accent the rest of the app
+            // uses for "forward progress", but a box around it says this one
+            // is a verdict.
+            (Some(r), false) if r.warning_count > 0 => {
+                let inner = egui::Frame::new().stroke(egui::Stroke::new(1.0_f32, theme::ACCENT)).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| ui.label(label.color(theme::ACCENT)));
+                inner.inner
+            }
+            // Clean: quiet. It is the expected outcome, and a result that
+            // needs no attention should not compete with the two that do.
+            (Some(_), false) => ui.label(label.color(if AUDIT_SIXTH_COLOUR { VERIFIED } else { theme::TEXT })),
+            // Unknown / in flight: dimmer than ordinary text, because it is
+            // an absence of information rather than a verdict.
+            _ => ui.label(label.color(theme::DIM)),
+        };
+        response.on_hover_text(audit_detail(app, super::i18n::t(lang, detail)));
     });
     ui.add_space(20.0);
 }
@@ -735,7 +790,7 @@ impl App {
                 }
                 // The drag was checked against this one part; the audit is
                 // what confirms the sheet as a whole is still sound.
-                self.request_audit();
+                self.request_audit("a drag");
                 let msg = super::i18n::tv(self.prefs.lang, "drag_placed", &[("id", &id.to_string())]);
                 self.run_status.ok(msg);
             }
@@ -772,6 +827,16 @@ fn start_repack(app: &mut App, index: usize) {
         part.locked = snap.locked.contains(&part.id);
     }
     let parts_by_id = sheet_parts(app, index);
+
+    // Logged before the job is handed off, so a repack that never comes back
+    // (hung, or killed with the window) still leaves evidence that it started
+    // and on what. The pinned count matters: pinned parts take a completely
+    // different path (`nesting::repack::repack_around_locked`, greedy, no GA)
+    // from an unpinned repack, so it has to be visible which one ran.
+    app.console.log(
+        super::console::Kind::Plain,
+        format!("repack sheet {}: started, {} part(s), {} pinned", placement.sheet_index, placement.parts.len(), placement.parts.iter().filter(|p| p.locked).count()),
+    );
 
     app.repacking = Some(index);
     app.run_status.ok(app.t("repack_status_running"));

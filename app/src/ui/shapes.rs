@@ -12,7 +12,16 @@ use super::state::{bounds_of, MirrorRule, Role, RotRule};
 use super::{canvas, shell, theme, App};
 
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {
+    // With nothing imported this used to render nothing at all, so the first
+    // thing a new operator saw was step 01 alone above empty space - no sign
+    // that there were further steps or what they would ask for. The heading
+    // stays put and says what will land here.
     if app.shapes.is_empty() {
+        shell::panel_frame(ui, |ui| {
+            shell::heading(app, ui, "02", "heading_roles_text");
+            shell::heading_rule(ui);
+            ui.label(RichText::new(app.t("roles_empty")).color(theme::DIM));
+        });
         return;
     }
     shell::panel_frame(ui, |ui| {

@@ -38,7 +38,10 @@ impl Lang {
     pub fn label(self) -> &'static str {
         match self {
             Lang::En => "ENGLISH",
-            Lang::Vi => "TIENG VIET",
+            // Spelled with its marks, not stripped to ASCII. This is the one
+            // label whose job is to prove the app can render the script it is
+            // offering; written flat it proved the opposite.
+            Lang::Vi => "TIẾNG VIỆT",
         }
     }
 }
@@ -88,6 +91,7 @@ fn lookup<'a>(key: &'a str) -> (&'a str, &'a str) {
         "svg_unit_cancel"                          => ("CANCEL", "HỦY"),
         "svg_unit_ok"                              => ("IMPORT", "NHẬP"),
         "heading_roles_text"                       => ("ASSIGN ROLES", "GÁN VAI TRÒ"),
+        "roles_empty"                              => ("Nothing imported yet. Every shape needs a role - PART to be nested, SHEET to be nested onto.", "Chưa nhập gì. Mỗi hình cần một vai trò - CHI TIẾT để xếp, TẤM PHÔI để xếp lên."),
         "btn_mark_all_parts"                       => ("ALL PART", "TẤT CẢ = CHI TIẾT"),
         "btn_mark_all_parts_tooltip"               => ("Set every imported shape's ROLE to PART in one click, instead of picking each row's dropdown individually.", "Đặt VAI TRÒ của mọi hình đã nhập thành CHI TIẾT chỉ bằng một cú nhấp, thay vì chọn từng dòng một."),
         "btn_mark_all_sheets"                      => ("ALL SHEET", "TẤT CẢ = TẤM PHÔI"),
@@ -145,6 +149,7 @@ fn lookup<'a>(key: &'a str) -> (&'a str, &'a str) {
         "offcut_keep_tooltip"                      => ("Save these offcuts to the library so a later job can nest onto them instead of opening a new sheet.", "Lưu các phần thừa này vào thư viện để công việc sau có thể xếp lên chúng thay vì mở tấm mới."),
         "offcut_name"                              => ("Offcut sheet {sheet} ({w}x{h})", "Phần thừa tấm {sheet} ({w}x{h})"),
         "heading_result_text"                      => ("RESULT", "KẾT QUẢ"),
+        "result_empty"                             => ("No layout yet. RUN NEST packs the parts onto the sheets and the result lands here.", "Chưa có bố cục. CHẠY XẾP HÌNH sẽ xếp các chi tiết lên tấm phôi và kết quả hiện ở đây."),
         "stat_audit"                               => ("AUDIT", "KIỂM TRA"),
         "audit_checking"                           => ("CHECKING", "ĐANG KIỂM TRA"),
         "audit_checking_tooltip"                   => ("Checking every part on every sheet for overlaps, parts off the material, and clearances below what was configured.", "Đang kiểm tra mọi chi tiết trên mọi tấm phôi xem có chồng lấn, lọt ra ngoài vật liệu, hay khoảng cách nhỏ hơn thiết lập không."),
@@ -398,6 +403,7 @@ const KEYS: &[&str] = &[
     "svg_unit_cancel",
     "svg_unit_ok",
     "heading_roles_text",
+    "roles_empty",
     "btn_mark_all_parts",
     "btn_mark_all_parts_tooltip",
     "btn_mark_all_sheets",
@@ -455,6 +461,7 @@ const KEYS: &[&str] = &[
     "offcut_keep_tooltip",
     "offcut_name",
     "heading_result_text",
+    "result_empty",
     "stat_audit",
     "audit_checking",
     "audit_checking_tooltip",

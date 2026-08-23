@@ -1,4 +1,4 @@
-//! 03 CONFIGURE: the nest settings, basic and advanced.
+//! CONFIGURE: the nest settings, basic and advanced.
 //!
 //! Every field keeps the plain-language tooltip the web UI gave it - these
 //! are job parameters a shop-floor operator sets, not developer knobs, and
@@ -31,12 +31,17 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         shell::number_row(ui, t("kerf_label"), t("kerf_tooltip"), &mut app.cfg.kerf, 0.05, 0.0..=100.0);
         shell::number_row(ui, t("runs_label"), t("runs_tooltip"), &mut app.cfg.runs, 0.1, 1..=100);
 
-        ui.horizontal(|ui| {
-            ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("cleanup_label")).color(theme::DIM)));
-            ui.add(egui::TextEdit::singleline(&mut app.cfg.cleanup_threshold).desired_width(70.0).hint_text(t("cleanup_placeholder")));
-        })
-        .response
-        .on_hover_text(t("cleanup_tooltip"));
+        // `.inner`, not `.response` - a row container never wins the hover its
+        // own children are under, so a tooltip hung on it can't be reached.
+        // See `shell::help_bubble`.
+        let cleanup_row = ui
+            .horizontal(|ui| {
+                let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("cleanup_label")).color(theme::DIM)));
+                let field = ui.add(egui::TextEdit::singleline(&mut app.cfg.cleanup_threshold).desired_width(70.0).hint_text(t("cleanup_placeholder")));
+                name.union(field)
+            })
+            .inner;
+        shell::help_bubble(cleanup_row, t("cleanup_label"), t("cleanup_tooltip"));
         ui.label(RichText::new(t("cleanup_hint")).color(theme::DIM).small());
 
         ui.add_space(6.0);
@@ -45,7 +50,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         // face - and no asymmetric feature has to stay on one face. Flipping
         // one that does have a side silently produces scrap.
         ui.horizontal(|ui| {
-            ui.checkbox(&mut app.cfg.mirror, t("mirror_label")).on_hover_text(t("mirror_tooltip"));
+            shell::help_bubble(ui.checkbox(&mut app.cfg.mirror, t("mirror_label")), t("mirror_label"), t("mirror_tooltip"));
             if app.cfg.mirror {
                 ui.label(RichText::new(t("mirror_on_badge")).color(theme::ERROR).strong().family(theme::heavy()));
             }
@@ -72,15 +77,17 @@ fn advanced(app: &mut App, ui: &mut egui::Ui) {
     let t = |k: &'static str| tr(lang, k);
     ui.separator();
 
-    ui.horizontal(|ui| {
-        ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("placement_label")).color(theme::DIM)));
-        let options: Vec<PlacementTypeDto> = PLACEMENT_TYPES.iter().map(|(v, _)| *v).collect();
-        shell::choice(ui, "placement", &mut app.cfg.placement_type, &options, |v| {
-            PLACEMENT_TYPES.iter().find(|(o, _)| *o == v).map(|(_, k)| t(k).to_string()).unwrap_or_default()
-        });
-    })
-    .response
-    .on_hover_text(t("placement_tooltip"));
+    let placement_row = ui
+        .horizontal(|ui| {
+            let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("placement_label")).color(theme::DIM)));
+            let options: Vec<PlacementTypeDto> = PLACEMENT_TYPES.iter().map(|(v, _)| *v).collect();
+            let combo = shell::choice(ui, "placement", &mut app.cfg.placement_type, &options, |v| {
+                PLACEMENT_TYPES.iter().find(|(o, _)| *o == v).map(|(_, k)| t(k).to_string()).unwrap_or_default()
+            });
+            name.union(combo)
+        })
+        .inner;
+    shell::help_bubble(placement_row, t("placement_label"), t("placement_tooltip"));
     ui.label(RichText::new(t("placement_hint")).color(theme::DIM).small());
 
     // The rotation grid is left exactly as the engine takes it, including the
@@ -94,12 +101,14 @@ fn advanced(app: &mut App, ui: &mut egui::Ui) {
     ui.label(RichText::new(t("mutation_hint")).color(theme::DIM).small());
     shell::number_row(ui, t("generations_label"), t("generations_tooltip"), &mut app.cfg.generations, 0.2, 1..=10_000);
 
-    ui.horizontal(|ui| {
-        ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("dominant_label")).color(theme::DIM)));
-        ui.add(egui::Slider::new(&mut app.cfg.dominant_threshold, 0.01..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-    })
-    .response
-    .on_hover_text(t("dominant_tooltip"));
+    let dominant_row = ui
+        .horizontal(|ui| {
+            let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("dominant_label")).color(theme::DIM)));
+            let slider = ui.add(egui::Slider::new(&mut app.cfg.dominant_threshold, 0.01..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+            name.union(slider)
+        })
+        .inner;
+    shell::help_bubble(dominant_row, t("dominant_label"), t("dominant_tooltip"));
     ui.label(RichText::new(t("dominant_hint")).color(theme::DIM).small());
 
     shell::number_row(ui, t("max_threads_label"), t("max_threads_tooltip"), &mut app.cfg.max_threads, 0.1, 0..=256);
