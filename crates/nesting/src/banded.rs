@@ -368,25 +368,34 @@ fn pareto_front(mut units: Vec<Unit>) -> Vec<Unit> {
 }
 
 /// The polygon `obstacle_nfp` should pair on, as a hole-free `LayeredPolygon`:
-/// the outline itself when it is cheap enough, otherwise a coarse convex shell
-/// of it - hull, simplified, then grown back by the simplification tolerance so
-/// it still contains the original.
+/// the outline itself when it is cheap enough, otherwise a coarse shell of it -
+/// simplified, then grown back by the simplification tolerance so it still
+/// contains the original.
 ///
 /// Which branch is taken is purely a cost decision; see `EXACT_AT_OR_BELOW` for
-/// the measurement, and why handing a concave part its hull throws away the
-/// only thing that makes it nest.
+/// the measurement, and why handing a concave part a shape without its
+/// concavities throws away the only thing that makes it nest.
 ///
-/// The hull alone is not enough for the expensive branch. A clearance-padded
-/// outline is already close to convex - `three.dxf`'s 258 points hull to 214 -
-/// and `obstacle_nfp` on two 214-point polygons still takes ~1.7s, eight times
-/// per sheet. Simplified it is a couple of dozen points and the whole catalogue
-/// drops from 13s to well under a second.
+/// **Simplified, not hulled, and that is the point.** The expensive branch used
+/// to take the convex hull first. That is fine for a part which is nearly
+/// convex anyway and catastrophic for one which is not: `nestTest04.dxf` pads
+/// to 175 points, so it took this branch, and its hull measures 502,241mm²
+/// against the part's own 395,372 - a fifth of the shape invented, including
+/// the whole notch two copies would interlock through. Douglas-Peucker instead
+/// keeps a subset of the *real* vertices, so the point count drops the same way
+/// while every concavity big enough to nest into survives. It is the same
+/// failure `EXACT_AT_OR_BELOW` was introduced for, one bound higher up.
 ///
-/// **The re-offset is what keeps it honest.** Douglas-Peucker keeps a subset
-/// of the original vertices, so on a convex outline the result is *inscribed* -
-/// it would let two parts sit up to `SHELL_TOLERANCE` too close. Growing it
-/// back by that much makes the shell a superset again, so a pair the NFP calls
-/// legal really is.
+/// Simplifying is what makes the branch affordable at all: `obstacle_nfp` is a
+/// Minkowski sum, and on two ~200-point polygons it takes ~1.7s, eight times
+/// per sheet - a couple of dozen points takes the whole catalogue from 13s to
+/// well under a second.
+///
+/// **The re-offset is what keeps it honest.** Douglas-Peucker is *inscribed*
+/// wherever it cuts a convex corner, which would let two parts sit up to
+/// `SHELL_TOLERANCE` too close; growing it back by that much makes the shell a
+/// superset again, so a pair the NFP calls legal really is. (Where it shortcuts
+/// a concavity it covers material instead, which is conservative already.)
 fn shell_of(poly: &geometry::dxf_import::LayeredPolygon) -> geometry::dxf_import::LayeredPolygon {
     /// Millimetres. Parts this packer helps are hundreds of mm across, so a
     /// couple of mm of slack in a pair box is under a percent of it.
@@ -411,18 +420,17 @@ fn shell_of(poly: &geometry::dxf_import::LayeredPolygon) -> geometry::dxf_import
     if poly.points.len() <= EXACT_AT_OR_BELOW {
         return geometry::dxf_import::LayeredPolygon { points: poly.points.clone(), children: Vec::new(), texts: Vec::new(), real_boundary: None, ..poly.clone() };
     }
-    /// Below this the hull is already cheap, and simplifying it only spends
-    /// the tolerance for nothing - it cost `two.dxf`'s six-point profile a
-    /// whole part per sheet.
+    /// Below this a shape is already cheap to pair on, and simplifying it only
+    /// spends the tolerance for nothing - it cost `two.dxf`'s six-point profile
+    /// a whole part per sheet. Unreachable from here today (the branch above
+    /// keeps anything at or below 128 exact) and kept because the two bounds
+    /// answer different questions.
     const SIMPLIFY_ABOVE: usize = 32;
-    // NEST_PAIR_EXACT=1: pair on the true outline instead of the shell. An
-    // experiment, not a mode - `row_step` bisects assuming convex shells.
-    let hull = geometry::hull_polygon::hull(&poly.points).unwrap_or_else(|| poly.points.clone());
-    let points = if hull.len() > SIMPLIFY_ABOVE {
-        let simplified = geometry::simplify::simplify(&hull, Some(SHELL_TOLERANCE), false);
-        geometry::clipper::offset(&simplified, SHELL_TOLERANCE).into_iter().next().unwrap_or(hull)
+    let points = if poly.points.len() > SIMPLIFY_ABOVE {
+        let simplified = geometry::simplify::simplify(&poly.points, Some(SHELL_TOLERANCE), false);
+        geometry::clipper::offset(&simplified, SHELL_TOLERANCE).into_iter().next().unwrap_or_else(|| poly.points.clone())
     } else {
-        hull
+        poly.points.clone()
     };
     geometry::dxf_import::LayeredPolygon { points, children: Vec::new(), texts: Vec::new(), real_boundary: None, ..poly.clone() }
 }
