@@ -168,6 +168,31 @@ const MAX_UNIT_CACHE_ENTRIES: usize = 4096;
 
 static UNIT_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<UnitCacheKey, Vec<Unit>>>> = std::sync::LazyLock::new(Default::default);
 
+/// Rewrites every member's angle from "relative to the polygon we were
+/// handed" to absolute - the angle from the part's *original* outline, which
+/// is what a `PlacedPart::rotation` means to everything downstream.
+///
+/// `part.polygon` arrives already rotated by `part.rotation` (`place_parts`
+/// does that on entry), and all the box arithmetic above works in angles
+/// relative to it, so the base has to be added back on the way out. Leaving
+/// it relative is silently correct for any part the GA left at 0 degrees and
+/// wrong for every other one, and the boxes still describe the absolute
+/// geometry - so the caller places a part it has mis-rotated, off the sheet.
+///
+/// **A function rather than a loop at the end of `build_units_uncached`
+/// because that function has two exits.** The `available < 2` one skipped it,
+/// so the last remaining copy of a shape - and only that copy, and only once
+/// the GA had turned it - came back relative. That is what put an 880x720 part
+/// off a 1500x1500 sheet under `--placement box`.
+fn into_absolute(mut units: Vec<Unit>, base: f64) -> Vec<Unit> {
+    for unit in &mut units {
+        for member in &mut unit.members {
+            member.0 += base;
+        }
+    }
+    units
+}
+
 fn build_units_uncached(part: &NestPart, base_rotation: f64, available: usize, curve_tolerance: f64) -> Vec<Unit> {
     let a = rotate_layered_polygon(&part.polygon, base_rotation);
     let Some(ab) = get_polygon_bounds(&a.points) else { return Vec::new() };
@@ -183,7 +208,7 @@ fn build_units_uncached(part: &NestPart, base_rotation: f64, available: usize, c
         Unit { members: vec![(base_rotation, -ab.x, -ab.y)], source_id: part.source_id, width: ab.width, height: ab.height, area: a_area, step: ab.width };
     single.step = row_step(part, &single);
     if available < 2 {
-        return vec![single];
+        return into_absolute(vec![single], part.rotation);
     }
 
     // **Pairing searches shells, which are the true outlines up to
@@ -301,19 +326,7 @@ fn build_units_uncached(part: &NestPart, base_rotation: f64, available: usize, c
         u.step = row_step(part, u);
     }
     out.push(single);
-    // **Absolute, not relative.** `part.polygon` arrives already rotated by
-    // `part.rotation` (`place_parts` does that on entry), while a
-    // `PlacedPart::rotation` is read downstream as the angle to turn the part's
-    // *original* outline by. Everything above works in angles relative to the
-    // polygon it was handed, so the two have to be added here. Leaving it
-    // relative is silently correct for any part the GA left at 0 degrees and
-    // wrong for every other one - which is why it survived a fixture test and
-    // put every part of a real nest off the sheet.
-    for unit in &mut out {
-        for member in &mut unit.members {
-            member.0 += part.rotation;
-        }
-    }
+    let out = into_absolute(out, part.rotation);
     if std::env::var("NEST_BANDED").is_ok_and(|v| v != "0") {
         for u in &out {
             eprintln!("    unit src {} base {base_rotation} x{} {:.1}x{:.1} density {:.3} step {:.1}", part.source_id, u.count(), u.width, u.height, u.density(), u.step);

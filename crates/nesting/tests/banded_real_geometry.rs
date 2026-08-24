@@ -511,3 +511,40 @@ fn the_first_sheet_places_the_shape_at_the_front_of_the_queue() {
     let big_on_first = first.parts.iter().filter(|p| parts.iter().find(|q| q.id == p.id).expect("id exists").source_id == 0).count();
     assert!(big_on_first > 0, "the big part never reached the first sheet - the band packer took it with the small shape instead");
 }
+
+/// **The last copy of a shape is reported at an absolute rotation too.**
+///
+/// `build_units` has two exits, and the `available < 2` one - taken when only
+/// one copy of a shape is left, which is every late sheet of a real job -
+/// returned its member angle *relative* to the polygon it was handed while its
+/// box arithmetic described the absolute geometry. The caller then rotated the
+/// part to the reported angle and dropped it at a position computed for a
+/// different one: on `nestTest04.dxf` under `--placement box` an 880x720 part
+/// landed 1320mm from where the band said it would, straight off a 1500x1500
+/// sheet.
+///
+/// Invisible until the GA had turned a part, and invisible while a shape still
+/// had two copies to pair - which is why the sibling test above, at twelve
+/// copies, passes either way. One copy each is the whole point of this one.
+///
+/// Reverting `into_absolute` at the `available < 2` return fails this.
+#[test]
+fn the_last_copy_of_a_shape_is_reported_at_an_absolute_rotation() {
+    const BASE: f64 = 90.0;
+    let originals = real_parts(1);
+    let parts: Vec<NestPart> = originals
+        .iter()
+        .map(|p| NestPart { polygon: rotate_layered_polygon(&p.polygon, BASE), rotation: BASE, ..p.clone() })
+        .collect();
+
+    let sheet = usable_sheet();
+    let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
+    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None).expect("should place something");
+    assert!(!result.placed.is_empty());
+
+    for p in &result.placed {
+        let original = originals.iter().find(|q| q.id == p.id).expect("placed id must exist");
+        let moved = shift_layered_polygon(&rotate_layered_polygon(&original.polygon, p.rotation), p.placement.x, p.placement.y);
+        assert!(!has_material_outside_sheet(&moved, &sheet), "part {} escapes the sheet at rotation {}", p.id, p.rotation);
+    }
+}

@@ -2036,18 +2036,14 @@ pub fn place_parts(
                 // proposed. The greedy sheet then wins by default, which is the
                 // correct fallback - it is a fully validated layout.
                 //
-                // **This is a guard, not the fix, and it has no unit test
-                // because the fault has not been reduced to one.** The bug is
-                // in `banded` itself and it is real: `--placement box` on
-                // `nestTest04.dxf` x50 + `nestTest03.dxf` x250 (1500x1500,
-                // spacing 5) fails the export audit without this, and passes
-                // with it. But `pack_sheet` called directly does not reproduce
-                // it - not across available-counts, not with parts carrying a
-                // base rotation, not at the same quantities - and neither does
-                // a single `place_parts` call. It only appears through the GA,
-                // so whatever unit choice is wrong depends on a sheet state
-                // that only mutated gene orders reach. Worth isolating; until
-                // then this at least stops an invalid sheet being shipped.
+                // The fault this was written for is fixed at its source -
+                // `banded::into_absolute`, which one of `build_units`' two
+                // exits used to skip, so the last remaining copy of a shape
+                // came back at a relative rotation. This check stays anyway:
+                // it is the validation `banded`'s own module doc promises the
+                // caller does, it is the only thing standing between a
+                // box-arithmetic layout and the export audit, and it costs one
+                // Clipper difference per band member.
                 let all_on_sheet = cand_placed
                     .iter()
                     .all(|o| !has_material_outside_sheet(&geometry::dxf_import::shift_layered_polygon(&o.polygon, o.placement.x, o.placement.y), sheet));
