@@ -48,18 +48,6 @@ When you cut parts from a sheet of material, you usually have a lot of empty spa
 
 Nesting is the process of arranging those parts as efficiently as possible:
 
-```text
-┌───────────────────────────────┐
-│  ◇◇    ┌─────┐     △△△       │
-│ ◇◇◇    │     │    △△△△      │
-│  ◇     └─────┘      △△       │
-│                               │
-│  ┌──────┐   ○ ○ ○    ▱▱▱     │
-│  │      │   ○ ○ ○   ▱▱▱▱    │
-│  └──────┘                    │
-└───────────────────────────────┘
-```
-
 Better nesting means:
 
 * less material purchased
