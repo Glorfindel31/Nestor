@@ -38,15 +38,16 @@ OPTIONS:
     --spacing MM       clearance between parts (default 0)
     --kerf MM          cut width; adds to both of the above (default 0)
     --rotations N      angles tried per part (default 4)
-    --generations N    GA generations (default 5)
-    --population N     GA population (default 10)
+    --generations N    GA generations (default 2)
+    --population N     GA population (default 4)
     --runs N           escalating attempts (default 1)
+    --threads N        cap CPU threads (default 0 = every core)
     --seed N           RNG seed (default 0)
     --placement TYPE   gravity|box|convexhull|tightfit|gravitytightfit|gravitycorrective
                        (default tightfit)
-    --tolerance MM     curve tessellation tolerance on import (default 0.1)
+    --tolerance MM     curve tessellation tolerance on import (default 0.3)
     --svg-unit UNIT    mm|cm|m|px - what one SVG user unit means
-    --out FILE         write the result; format from the extension (.dxf/.svg)
+    --out FILE         write the result; format from the extension (.dxf/.svg/.pdf)
     --unplaced         include never-placed parts in the export
     --json             print the summary as JSON instead of text
     -h, --help         this
@@ -94,11 +95,16 @@ impl Default for Options {
             config: NestConfigDto {
                 placement_type: PlacementTypeDto::TightFit,
                 rotations: 4,
-                population_size: 10,
+                // Mirrors `ui::state::ConfigForm::default` on purpose - the
+                // harness has to measure what the window actually ships, and
+                // these used to be the untuned `index.html` numbers
+                // (population 10, generations 5, tolerance 0.1), making every
+                // bench row 2-4x slower than a real run.
+                population_size: 4,
                 mutation_rate: 10.0,
                 dominant_part_area_threshold: nesting::placement::DEFAULT_DOMINANT_PART_AREA_THRESHOLD,
-                curve_tolerance: 0.1,
-                generations: 5,
+                curve_tolerance: 0.3,
+                generations: 2,
                 margin: 0.0,
                 spacing: 0.0,
                 kerf: 0.0,
@@ -142,6 +148,7 @@ fn parse_args() -> Result<Option<Options>, String> {
             "--generations" => opts.config.generations = number(&value("--generations")?, "--generations")?,
             "--population" => opts.config.population_size = number(&value("--population")?, "--population")?,
             "--runs" => opts.config.runs = number(&value("--runs")?, "--runs")?,
+            "--threads" => opts.config.max_threads = number(&value("--threads")?, "--threads")?,
             "--seed" => opts.config.seed = number(&value("--seed")?, "--seed")?,
             "--tolerance" => opts.config.curve_tolerance = number(&value("--tolerance")?, "--tolerance")?,
             "--placement" => opts.config.placement_type = placement_type(&value("--placement")?)?,
@@ -269,13 +276,70 @@ fn run() -> Result<(), String> {
         match std::path::Path::new(out).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
             Some("svg") => commands::export_svg(out, request)?,
             Some("dxf") => commands::export_dxf(out, request)?,
+            // The same job report the window's REPORT button writes, from the
+            // same `commands::export_report` - so the report layout can be
+            // iterated on without driving the GUI.
+            Some("pdf") => commands::export_report(
+                out,
+                rustynesting::dto::ReportRequest {
+                    export: request,
+                    config: opts.config.clone(),
+                    parts: report_parts(&opts, &response, &labels, &quantities),
+                    title: None,
+                },
+            )?,
             other => return Err(format!("--out: don't know how to write '{}'", other.unwrap_or("a file with no extension"))),
         }
         eprintln!("nest: wrote {out}");
     }
 
     report(&opts, &response, &audit, elapsed, &labels, &quantities);
+    // NEST_PROFILE=1 dumps the placement hot-path phase timers to stderr, so
+    // --json stays diffable.
+    if nesting::profile::enabled() {
+        eprintln!("
+phase                     seconds        calls");
+        for (name, seconds, calls) in nesting::profile::report() {
+            eprintln!("{name:<24} {seconds:>8.2} {calls:>12}");
+        }
+        for (name, hits) in nesting::profile::counters() {
+            eprintln!("{name:<24} {hits:>21}");
+        }
+    }
     Ok(())
+}
+
+/// The report's part list: one row per source shape, with how many copies of
+/// it the result actually placed. Mirrors `ui::result::report_part_list`,
+/// which does the same id-block arithmetic against the shape table.
+fn report_parts(opts: &Options, response: &rustynesting::dto::RunNestResponse, labels: &[String], quantities: &[usize]) -> Vec<rustynesting::dto::ReportPartDto> {
+    let source = source_of_id(quantities);
+    let mut nested = vec![0usize; quantities.len()];
+    for placement in &response.placements {
+        for part in &placement.parts {
+            if let Some(&s) = source.get(part.id & !nesting::dispatch::MIRROR_ID_BIT) {
+                nested[s] += 1;
+            }
+        }
+    }
+    let mut first_id = 0usize;
+    let mut out = Vec::new();
+    for (i, &quantity) in quantities.iter().enumerate() {
+        if quantity == 0 {
+            continue;
+        }
+        if let Some(polygon) = response.parts_by_id.get(&first_id) {
+            out.push(rustynesting::dto::ReportPartDto {
+                name: labels.get(i).cloned().unwrap_or_else(|| format!("part{}", i + 1)),
+                quantity,
+                nested: nested[i],
+                polygon: polygon.clone(),
+            });
+        }
+        first_id += quantity;
+    }
+    let _ = opts;
+    out
 }
 
 /// One word for the whole audit, so a harness can compare runs on a string

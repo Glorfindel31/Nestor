@@ -1,25 +1,32 @@
-//! Writes a nest result out as a printable PDF job report: a summary page
-//! (totals, per-sheet table, the settings the run used) followed by one
-//! to-scale page per sheet showing the actual layout with part labels.
+//! Writes a nest result out as a printable PDF job report, laid out to match
+//! the reference nester's own report page for page: a Part-List / Sheet-List /
+//! Remnant Info summary, then one page per *distinct layout* showing that
+//! sheet drawn to scale with its own part table.
+//!
+//! **One page per distinct layout, not per sheet.** Eleven sheets cut from two
+//! arrangements is two pages, not eleven, and the Duplicate column is what
+//! says how many times each is cut. That is what the reference report does and
+//! it is what someone at a machine actually wants - the eleven identical pages
+//! were paper, not information.
 //!
 //! **Hand-rolled, no PDF crate.** The obvious candidate (`printpdf`) resolves
 //! to a 30-plus-crate tree - font shaping, image codecs, a vector-graphics
 //! engine, an RNG - for a page that strokes polylines and writes a few lines
-//! of Helvetica. What this module actually needs is a subset of PDF 1.4 that
-//! has not changed since 2001: a content stream of `m`/`l`/`h`/`S` path
-//! operators, `BT`/`Tf`/`Td`/`Tj`/`ET` for text, and one of the 14 standard
-//! fonts, which need no embedding. That is the ~200 lines below.
+//! of Times. What this module actually needs is a subset of PDF 1.4 that has
+//! not changed since 2001: a content stream of `m`/`l`/`h`/`S` path operators,
+//! `BT`/`Tf`/`Td`/`Tj`/`ET` for text, and two of the 14 standard fonts, which
+//! need no embedding.
 //!
-//! ponytail: WinAnsi + the built-in Helvetica means **the report is
-//! English-only** - a Vietnamese UI string or a non-ASCII layer name is
-//! transliterated to `?` rather than rendered (see `pdf_string`). Embedding a
-//! TrueType font with a real Unicode CMap is the upgrade path, and roughly
-//! triples this file; not worth it until someone actually needs it.
+//! ponytail: WinAnsi + the built-in Times means **the report is English-only**
+//! - a Vietnamese UI string or a non-ASCII layer name is transliterated to `?`
+//! rather than rendered (see `pdf_string`). Embedding a TrueType font with a
+//! real Unicode CMap is the upgrade path, and roughly triples this file; not
+//! worth it until someone actually needs it.
 //!
-//! Parts are labelled by their position on the sheet (`#1`, `#2`, ...), which
-//! is what someone matching a printed page against a pile of cut parts needs;
-//! see `sheet_page` for why neither the layer name nor the run's internal
-//! part id is used.
+//! ponytail: text is positioned with one average-width constant per point
+//! size (`text_width`) rather than the real Times metrics, because everything
+//! centred here is a heading or a short numeric cell where being a point out
+//! is invisible. Embed the AFM widths if a long centred string ever looks off.
 //!
 //! Geometry comes in as the same `SheetLayout`/`PlacedShape` values
 //! `dxf_export`/`svg_export` take, straight from the caller's
@@ -31,13 +38,38 @@ use std::fmt::Write as _;
 use crate::dxf_export::{PlacedShape, SheetLayout};
 use crate::dxf_import::{polygon_material_area, rotate_layered_polygon, shift_layered_polygon, LayeredPolygon};
 use crate::point::Point;
-use crate::polygon::{get_polygon_bounds, polygon_area};
+use crate::polygon::{get_polygon_bounds, polygon_area, Bounds};
+
+/// What an empty outline measures - only reachable for a degenerate shape,
+/// and printing zeros is better than refusing to draw the page.
+const NO_BOUNDS: Bounds = Bounds { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
 
 /// A4 landscape in PostScript points (1/72 inch), the unit PDF's default
 /// coordinate system uses.
 const PAGE_W: f64 = 841.89;
 const PAGE_H: f64 = 595.28;
-const MARGIN: f64 = 40.0;
+
+/// The page frame and footer, in the reference report's own coordinates.
+const FRAME_L: f64 = 18.38;
+const FRAME_R: f64 = 823.51;
+const FRAME_T: f64 = 576.90;
+const FRAME_B: f64 = 18.38;
+const RULE_L: f64 = 18.75;
+const RULE_R: f64 = 823.14;
+const FOOTER_RULE_Y: f64 = 36.29;
+
+/// Where a table's own left and right edges sit.
+const TABLE_L: f64 = 20.63;
+const TABLE_R: f64 = 821.26;
+
+/// Vertical rhythm inside a table, measured off the reference report.
+const HEAD_DROP: f64 = 13.5;
+const HEAD_RULE_DROP: f64 = 16.8;
+const FIRST_ROW_DROP: f64 = 28.4;
+const ROW_PITCH: f64 = 16.91;
+const ROW_RULE_DROP: f64 = 8.5;
+const TOTAL_DROP: f64 = 12.6;
+const TABLE_TAIL: f64 = 5.8;
 
 /// One line of the report's part table.
 ///
@@ -58,11 +90,11 @@ pub struct ReportPart {
 }
 
 /// Everything the report says that isn't derivable from the drawn geometry.
-/// Anything that *is* derivable is computed from the layouts themselves (see
-/// `export_report`), so the printed numbers can never disagree with the
-/// printed picture.
+/// Anything that *is* derivable is computed from the layouts themselves, so
+/// the printed numbers can never disagree with the printed picture.
 #[derive(Clone, Debug)]
 pub struct ReportMeta {
+    /// The report's heading, and the name in the top-left of page 1.
     pub title: String,
     /// When the report was produced, already formatted. `geometry` owns no
     /// clock and has no business knowing the user's timezone.
@@ -72,44 +104,27 @@ pub struct ReportMeta {
     /// from every piece around it.
     pub spacing: f64,
     pub parts: Vec<ReportPart>,
-    /// `(label, value)` pairs, printed verbatim - the caller decides which
-    /// settings are worth showing rather than this module knowing about
-    /// `NestConfigDto`.
-    pub settings: Vec<(String, String)>,
-    /// The manufacturability verdict, if one was run. `None` prints nothing
-    /// at all rather than an implied pass - a report that says "PASSED"
-    /// about a nest nobody checked is worse than one that stays silent.
-    #[allow(clippy::struct_field_names)]
-    pub audit: Option<ReportAudit>,
 }
 
-/// The audit verdict as the report prints it.
-///
-/// Deliberately pre-rendered strings rather than the `nesting::audit` types:
-/// `geometry` must not depend on `nesting`, and the report only ever prints
-/// this - it never reasons about an issue's kind. `passed` stays a bool
-/// because the heading is the one part that is not free text.
-#[derive(Clone, Debug)]
-pub struct ReportAudit {
-    pub passed: bool,
-    /// One-line verdict, e.g. "PASSED - no overlaps, all pieces on the sheet".
-    pub headline: String,
-    /// Individual findings, already formatted. Truncated by the caller.
-    pub issues: Vec<String>,
-}
-
-/// Renders the report and returns the PDF bytes.
-#[must_use]
 pub fn export_report(layouts: &[SheetLayout], meta: &ReportMeta) -> Vec<u8> {
-    let mut pages: Vec<String> = Vec::new();
-
     let stats: Vec<SheetStats> = layouts.iter().map(sheet_stats).collect();
-    pages.extend(summary_pages(meta, layouts, &stats));
-    for (index, layout) in layouts.iter().enumerate() {
-        pages.push(sheet_page(layout, index, &stats[index]));
+    let groups = nest_groups(layouts);
+    let materials = material_names(layouts);
+
+    let mut pages = summary_pages(meta, layouts, &stats, &groups, &materials);
+    for (n, group) in groups.iter().enumerate() {
+        pages.extend(layout_pages(meta, &layouts[group.first], &stats[group.first], group, n, &materials));
+    }
+    if pages.is_empty() {
+        pages.push(String::new());
     }
 
-    assemble(&pages)
+    // The frame carries "page n / total", so it can only be drawn once every
+    // page exists.
+    let total = pages.len();
+    let framed: Vec<String> =
+        pages.iter().enumerate().map(|(i, body)| format!("{}{body}", frame(i + 1, total, &meta.generated))).collect();
+    assemble(&framed)
 }
 
 struct SheetStats {
@@ -143,93 +158,639 @@ fn placed_geometry(part: &PlacedShape) -> LayeredPolygon {
     shift_layered_polygon(&rotate_layered_polygon(&part.shape, part.rotation), part.x, part.y)
 }
 
-// --- content streams ---------------------------------------------------
-
-/// A paginating content-stream builder.
+/// The stock name each sheet is cut from, as the report's MatName column.
 ///
-/// The summary is four stacked tables whose lengths all come from the job -
-/// fifteen sheets and forty part types do not fit on one page, and silently
-/// running off the bottom is the failure mode a report must not have. `ensure`
-/// starts a fresh page when the next block would not fit; everything else just
-/// writes and lets the cursor fall.
-struct Doc {
-    pages: Vec<String>,
-    cur: String,
-    y: f64,
+/// Sheets of the same size are the same material to whoever is ordering it, so
+/// they share a name; a job mixing two stock sizes gets `sheet-0`/`sheet-1`.
+fn material_names(layouts: &[SheetLayout]) -> Vec<String> {
+    let mut sizes: Vec<(f64, f64)> = Vec::new();
+    layouts
+        .iter()
+        .map(|layout| {
+            let b = get_polygon_bounds(&layout.sheet.points).map_or((0.0, 0.0), |b| (b.width, b.height));
+            let at = sizes.iter().position(|s| (s.0 - b.0).abs() < 0.05 && (s.1 - b.1).abs() < 0.05).unwrap_or_else(|| {
+                sizes.push(b);
+                sizes.len() - 1
+            });
+            format!("sheet-{at}")
+        })
+        .collect()
 }
 
-/// Where a page's cursor starts.
-const TOP: f64 = PAGE_H - MARGIN - 18.0;
+// --- tables -------------------------------------------------------------
 
-impl Doc {
-    fn new() -> Self {
-        Self { pages: Vec::new(), cur: String::new(), y: TOP }
+/// One drawn cell: where it goes and whether it hangs off that x or straddles
+/// it. The reference report left-aligns the Name column and centres every
+/// other one, headers included.
+#[derive(Clone)]
+enum Cell {
+    Left(f64, String),
+    Centre(f64, String),
+}
+
+impl Cell {
+    fn draw(&self, out: &mut String, y: f64, size: f64, bold: bool) {
+        match self {
+            Cell::Left(x, value) => text_at(out, value, *x, y, size, bold),
+            Cell::Centre(cx, value) => text_at(out, value, cx - text_width(value, size) / 2.0, y, size, bold),
+        }
+    }
+}
+
+/// A bordered table: header band, a dashed rule under it, body rows, a solid
+/// rule, then a totals row. Draws itself top-down from `y_top` and reports
+/// where it ended so the next block can follow.
+struct Table {
+    left: f64,
+    right: f64,
+    header: Vec<Cell>,
+    /// `(cells, optional part outline to draw as a thumbnail at this x)`.
+    rows: Vec<(Vec<Cell>, Option<(f64, LayeredPolygon)>)>,
+    totals: Vec<Cell>,
+    /// The reference bolds the Sheet-List totals and not the Part-List's.
+    bold_totals: bool,
+}
+
+impl Table {
+    fn draw(&self, out: &mut String, y_top: f64) -> f64 {
+        hline(out, self.left, self.right, y_top);
+        for cell in &self.header {
+            cell.draw(out, y_top - HEAD_DROP, 10.0, true);
+        }
+        dashed_hline(out, self.left, self.right, y_top - HEAD_RULE_DROP);
+
+        let mut y = y_top - FIRST_ROW_DROP;
+        for (cells, thumb) in &self.rows {
+            for cell in cells {
+                cell.draw(out, y, 10.0, false);
+            }
+            if let Some((x, shape)) = thumb {
+                thumbnail(out, shape, *x, y - 5.7);
+            }
+            y -= ROW_PITCH;
+        }
+        // `y` has already stepped past the last row.
+        let last = y + ROW_PITCH;
+        let rule_y = last - ROW_RULE_DROP;
+        hline(out, self.left + 1.87, self.right - 1.87, rule_y);
+
+        let bottom = if self.totals.is_empty() {
+            rule_y - TABLE_TAIL
+        } else {
+            for cell in &self.totals {
+                cell.draw(out, rule_y - TOTAL_DROP, 10.0, self.bold_totals);
+            }
+            rule_y - TOTAL_DROP - TABLE_TAIL
+        };
+        hline(out, self.left, self.right, bottom);
+        vline(out, self.left, y_top + 0.37, bottom);
+        vline(out, self.right, y_top + 0.37, bottom);
+        bottom
     }
 
-    fn ensure(&mut self, space: f64) {
-        if self.y - space < MARGIN {
-            self.pages.push(std::mem::take(&mut self.cur));
-            self.y = TOP;
+    /// Height this table will occupy, so a caller can decide whether it fits.
+    fn height(&self) -> f64 {
+        let body = FIRST_ROW_DROP + ROW_PITCH * (self.rows.len().max(1) - 1) as f64;
+        body + ROW_RULE_DROP + if self.totals.is_empty() { 0.0 } else { TOTAL_DROP } + TABLE_TAIL
+    }
+}
+
+// --- the summary page ---------------------------------------------------
+
+/// Column centres, straight off the reference report's own page 1. The Name
+/// column is left-aligned; every other column, header and value alike, is
+/// centred on these.
+const PART_NAME_X: f64 = 24.3;
+const PART_THUMB_X: f64 = 259.8;
+const PART_COLS: [f64; 8] = [303.3, 347.3, 393.8, 452.3, 532.3, 594.1, 663.3, 759.6];
+const PART_HEADS: [&str; 8] = ["Total", "Nested", "Left", "Width [mm]", "Height [mm]", "CtrQty", "Area [m²]", "Length [m]"];
+
+const SHEET_NAME_X: f64 = 58.4;
+const SHEET_COLS: [f64; 7] = [172.2, 269.1, 369.0, 470.8, 570.6, 673.5, 771.8];
+const SHEET_HEADS: [&str; 7] = ["Duplicate", "MatName", "Width [mm]", "Height [mm]", "CtrQty", "Util [%]", "Length [m]"];
+
+const REMNANT_L: f64 = 21.75;
+const REMNANT_R: f64 = 321.75;
+const REMNANT_COLS: [f64; 4] = [60.0, 143.4, 218.2, 289.8];
+const REMNANT_HEADS: [&str; 4] = ["Width [mm]", "Height [mm]", "Qty", "Area [m²]"];
+
+/// Where page 1's content starts, and where any page must stop.
+const CONTENT_TOP: f64 = 513.45;
+const CONTENT_BOTTOM: f64 = 44.0;
+
+fn summary_pages(
+    meta: &ReportMeta,
+    layouts: &[SheetLayout],
+    stats: &[SheetStats],
+    groups: &[NestGroup],
+    materials: &[String],
+) -> Vec<String> {
+    let mut pages: Vec<String> = Vec::new();
+    let mut out = String::new();
+
+    // Title band.
+    text_centre(&mut out, &meta.title, PAGE_W / 2.0, 545.13, 20.0, true);
+    text_at(&mut out, "Date:", 626.34, 552.1, 10.0, false);
+    text_at(&mut out, &meta.generated, 651.0, 552.1, 10.0, false);
+    hline(&mut out, RULE_L, RULE_R, CONTENT_TOP);
+
+    let mut y = CONTENT_TOP;
+
+    // --- Part-List ---
+    y = section(&mut pages, &mut out, y, "Part-List");
+    let part_rows: Vec<(Vec<Cell>, Option<(f64, LayeredPolygon)>)> = meta
+        .parts
+        .iter()
+        .enumerate()
+        .map(|(i, part)| {
+            let b = get_polygon_bounds(&part.shape.points).unwrap_or(NO_BOUNDS);
+            let values = [
+                part.quantity.to_string(),
+                part.nested.to_string(),
+                part.quantity.saturating_sub(part.nested).to_string(),
+                format!("{:.2}", b.width),
+                format!("{:.2}", b.height),
+                contour_count(&part.shape).to_string(),
+                format!("{:.3}", polygon_material_area(&part.shape) / 1e6),
+                format!("{:.3}", cut_length(&part.shape) / 1000.0),
+            ];
+            let mut cells = vec![Cell::Left(PART_NAME_X, format!("{}  {}", i + 1, part.name))];
+            cells.extend(PART_COLS.iter().zip(values).map(|(&cx, v)| Cell::Centre(cx, v)));
+            (cells, Some((PART_THUMB_X, part.shape.clone())))
+        })
+        .collect();
+    let ordered: usize = meta.parts.iter().map(|p| p.quantity).sum();
+    let nested: usize = meta.parts.iter().map(|p| p.nested).sum();
+    let part_table = Table {
+        left: TABLE_L,
+        right: TABLE_R,
+        header: std::iter::once(Cell::Left(PART_NAME_X, "Name".into()))
+            .chain(PART_COLS.iter().zip(PART_HEADS).map(|(&cx, h)| Cell::Centre(cx, h.into())))
+            .collect(),
+        rows: part_rows,
+        totals: vec![Cell::Centre(PART_COLS[0], ordered.to_string()), Cell::Centre(PART_COLS[1], nested.to_string())],
+        bold_totals: false,
+    };
+    y = fit(&mut pages, &mut out, y, part_table.height());
+    y = part_table.draw(&mut out, y);
+
+    // The little boxed count under the part table.
+    y -= 0.37;
+    let box_bottom = y - 15.28;
+    text_at(&mut out, &format!("Total Parts Count: {}", meta.parts.len()), TABLE_L + 2.17, y - 12.35, 10.0, true);
+    hline(&mut out, TABLE_L - 0.38, TABLE_L + 137.17, y);
+    hline(&mut out, TABLE_L - 0.38, TABLE_L + 137.17, box_bottom);
+    vline(&mut out, TABLE_L, y, box_bottom);
+    vline(&mut out, TABLE_L + 136.79, y, box_bottom);
+    y = box_bottom;
+
+    // --- Sheet-List ---
+    y = section(&mut pages, &mut out, y, "Sheet-List");
+    let mut total_length = 0.0;
+    let mut total_pieces = 0usize;
+    let sheet_rows: Vec<(Vec<Cell>, Option<(f64, LayeredPolygon)>)> = groups
+        .iter()
+        .enumerate()
+        .map(|(n, group)| {
+            let layout = &layouts[group.first];
+            let stat = &stats[group.first];
+            let b = get_polygon_bounds(&layout.sheet.points).unwrap_or(NO_BOUNDS);
+            let length: f64 = layout.parts.iter().map(|p| cut_length(&p.shape)).sum::<f64>() / 1000.0;
+            total_length += length * group.duplicate as f64;
+            total_pieces += stat.parts * group.duplicate;
+            let values = [
+                group.duplicate.to_string(),
+                materials.get(group.first).cloned().unwrap_or_default(),
+                format!("{:.2}", b.width),
+                format!("{:.2}", b.height),
+                stat.parts.to_string(),
+                format!("{:.2}", stat.utilisation()),
+                format!("{length:.3}"),
+            ];
+            let mut cells = vec![Cell::Left(SHEET_NAME_X, format!("sheet{}", n + 1))];
+            cells.extend(SHEET_COLS.iter().zip(values).map(|(&cx, v)| Cell::Centre(cx, v)));
+            (cells, None)
+        })
+        .collect();
+    let sheet_table = Table {
+        left: TABLE_L,
+        right: TABLE_R,
+        header: std::iter::once(Cell::Left(SHEET_NAME_X, "Name".into()))
+            .chain(SHEET_COLS.iter().zip(SHEET_HEADS).map(|(&cx, h)| Cell::Centre(cx, h.into())))
+            .collect(),
+        rows: sheet_rows,
+        totals: vec![
+            Cell::Centre(SHEET_COLS[0], layouts.len().to_string()),
+            Cell::Centre(SHEET_COLS[4], total_pieces.to_string()),
+            Cell::Centre(SHEET_COLS[6], format!("Total:{total_length:.3}")),
+        ],
+        bold_totals: true,
+    };
+    y = fit(&mut pages, &mut out, y, sheet_table.height());
+    y = sheet_table.draw(&mut out, y);
+
+    // --- Remnant Info ---
+    let remnants = remnant_rows(layouts, groups, meta.spacing);
+    if !remnants.is_empty() {
+        y = fit(&mut pages, &mut out, y, 40.0 + ROW_PITCH * remnants.len() as f64);
+        y -= 15.97;
+        text_centre(&mut out, "Remnant Info", (REMNANT_L + REMNANT_R) / 2.0, y, 10.0, true);
+        y -= 2.81;
+        hline(&mut out, REMNANT_L, REMNANT_R, y);
+        for (&cx, head) in REMNANT_COLS.iter().zip(REMNANT_HEADS) {
+            text_centre(&mut out, head, cx, y - 14.47, 10.0, true);
+        }
+        let mut row_y = y - 30.63;
+        for (w, h, qty) in &remnants {
+            let values = [grouped(*w), grouped(*h), qty.to_string(), format!("{:.3}", w * h / 1e6)];
+            for (&cx, value) in REMNANT_COLS.iter().zip(values) {
+                text_centre(&mut out, &value, cx, row_y, 10.0, false);
+            }
+            row_y -= ROW_PITCH;
         }
     }
 
-    fn line(&mut self, value: &str, size: f64) {
-        self.ensure(size + 5.0);
-        text(&mut self.cur, value, MARGIN, self.y, size);
-        self.y -= size + 5.0;
-    }
+    pages.push(out);
+    pages
+}
 
-    /// A section title with a rule under it. Reserves enough room that a
-    /// heading can never be the last thing on a page with its table overleaf.
-    fn heading(&mut self, value: &str) {
-        self.ensure(60.0);
-        self.y -= 10.0;
-        text(&mut self.cur, value, MARGIN, self.y, 12.0);
-        self.y -= 5.0;
-        self.rule();
-        self.y -= 13.0;
-    }
+/// A centred section heading, starting a new page first if it would not have
+/// its table under it.
+fn section(pages: &mut Vec<String>, out: &mut String, y: f64, title: &str) -> f64 {
+    let y = fit(pages, out, y, 80.0);
+    text_centre(out, title, PAGE_W / 2.0, y - 21.55, 18.0, true);
+    y - 26.0
+}
 
-    /// One table row. `cells` are `(x offset from the left margin, text)`.
-    fn row(&mut self, cells: &[(f64, String)], size: f64) {
-        self.ensure(size + 4.0);
-        for (x, value) in cells {
-            text(&mut self.cur, value, MARGIN + x, self.y, size);
+/// Breaks to a new page when `space` would not fit under `y`.
+fn fit(pages: &mut Vec<String>, out: &mut String, y: f64, space: f64) -> f64 {
+    if y - space < CONTENT_BOTTOM {
+        pages.push(std::mem::take(out));
+        FRAME_T - 20.0
+    } else {
+        y
+    }
+}
+
+/// Distinct usable offcut rectangles across the job, with how many sheets
+/// yield each - the reference's own Remnant Info shape.
+///
+/// Sized in whole millimetres because that is what goes on the label, and two
+/// offcuts that round to the same label are the same stock item.
+fn remnant_rows(layouts: &[SheetLayout], groups: &[NestGroup], spacing: f64) -> Vec<(f64, f64, usize)> {
+    let mut rows: Vec<(f64, f64, usize)> = Vec::new();
+    for group in groups {
+        let offcut = sheet_offcut(&layouts[group.first], spacing);
+        let (w, h) = (offcut.usable_w.floor(), offcut.usable_h.floor());
+        if w < 1.0 || h < 1.0 {
+            continue;
         }
-        self.y -= size + 4.0;
+        match rows.iter_mut().find(|r| (r.0 - w).abs() < 0.5 && (r.1 - h).abs() < 0.5) {
+            Some(row) => row.2 += group.duplicate,
+            None => rows.push((w, h, group.duplicate)),
+        }
+    }
+    rows
+}
+
+// --- one page per distinct layout ---------------------------------------
+
+const LSHEET_NAME_X: f64 = 74.84;
+const LSHEET_COLS: [f64; 5] = [222.2, 352.6, 485.9, 621.0, 757.0];
+const LSHEET_HEADS: [&str; 5] = ["Duplicate", "MatName", "Width [mm]", "Height [mm]", "Util [%]"];
+
+const LPART_L: f64 = 27.19;
+const LPART_R: f64 = 814.69;
+const LPART_NO_X: f64 = 45.8;
+const LPART_NAME_X: f64 = 65.74;
+const LPART_THUMB_X: f64 = 383.74;
+const LPART_COLS: [f64; 5] = [458.8, 550.4, 622.0, 690.1, 771.8];
+const LPART_HEADS: [&str; 5] = ["Width [mm]", "Height [mm]", "CtrQty", "Area [m²]", "Quantity"];
+
+/// The drawing box, exactly the reference's own.
+const DRAW_X: f64 = 22.5;
+const DRAW_W: f64 = 796.88;
+const DRAW_H: f64 = 252.0;
+
+fn layout_pages(
+    meta: &ReportMeta,
+    layout: &SheetLayout,
+    stat: &SheetStats,
+    group: &NestGroup,
+    n: usize,
+    materials: &[String],
+) -> Vec<String> {
+    // Every y on this page is the reference report's own. The sheet's summary
+    // row sits *above* the drawing frame, not inside it - drawing it as an
+    // ordinary bordered table put the layout straight through the header.
+    const HEAD_DASH_Y: f64 = 540.70;
+    const HEAD_TEXT_Y: f64 = 528.72;
+    const HEAD_ROW_Y: f64 = 514.56;
+    const FRAME_TOP_Y: f64 = 511.26;
+    const FRAME_BOT_Y: f64 = 255.51;
+    const DRAW_Y: f64 = 257.38;
+    const PARTS_HEAD_Y: f64 = 242.03;
+    const PARTS_DASH_Y: f64 = 238.73;
+    const PARTS_ROW_Y: f64 = 227.12;
+
+    let mut out = String::new();
+    let name = format!("sheet{}", n + 1);
+    text_centre(&mut out, &name, PAGE_W / 2.0, 545.15, 18.0, true);
+
+    // The sheet's own row.
+    dashed_hline(&mut out, TABLE_L + 0.37, TABLE_R - 0.38, HEAD_DASH_Y);
+    let b = get_polygon_bounds(&layout.sheet.points).unwrap_or(NO_BOUNDS);
+    let material = materials.get(group.first).cloned().unwrap_or_default();
+    let values = [
+        group.duplicate.to_string(),
+        material,
+        format!("{:.2}", b.width),
+        format!("{:.2}", b.height),
+        format!("{:.2}", stat.utilisation()),
+    ];
+    text_at(&mut out, "Name", LSHEET_NAME_X, HEAD_TEXT_Y, 10.0, true);
+    text_at(&mut out, &name, LSHEET_NAME_X, HEAD_ROW_Y, 10.0, false);
+    for ((&cx, head), value) in LSHEET_COLS.iter().zip(LSHEET_HEADS).zip(values) {
+        text_centre(&mut out, head, cx, HEAD_TEXT_Y, 10.0, true);
+        text_centre(&mut out, &value, cx, HEAD_ROW_Y, 10.0, false);
     }
 
-    fn rule(&mut self) {
-        let _ = writeln!(
-            self.cur,
-            "0.6 0.6 0.6 RG 0.5 w {:.2} {:.2} m {:.2} {:.2} l S 0 0 0 RG",
-            MARGIN,
-            self.y,
-            PAGE_W - MARGIN,
-            self.y
+    // The pieces on this sheet, grouped by which part they are. Worked out
+    // before anything is drawn, because the drawing captions each piece with
+    // the row number the table below is about to give it.
+    let matched: Vec<Option<usize>> = layout.parts.iter().map(|p| match_part(meta, &p.shape)).collect();
+    let mut counts: Vec<usize> = vec![0; meta.parts.len()];
+    let mut unknown = 0usize;
+    for at in &matched {
+        match at {
+            Some(at) => counts[*at] += 1,
+            None => unknown += 1,
+        }
+    }
+    // Row number per part, in the order the table lists them - parts with no
+    // piece on this sheet get no row and so no number.
+    let mut row_of: Vec<Option<usize>> = vec![None; meta.parts.len()];
+    let mut next_row = 0usize;
+    for (at, &count) in counts.iter().enumerate() {
+        if count > 0 {
+            next_row += 1;
+            row_of[at] = Some(next_row);
+        }
+    }
+    let unlisted_row = (unknown > 0).then(|| next_row + 1);
+    let labels: Vec<Option<usize>> = matched.iter().map(|at| at.map_or(unlisted_row, |at| row_of[at])).collect();
+
+    // The drawing frame, and the sheet inside it.
+    hline(&mut out, TABLE_L - 0.38, TABLE_R + 0.37, FRAME_TOP_Y);
+    hline(&mut out, TABLE_L + 0.37, TABLE_R - 0.38, FRAME_BOT_Y);
+    vline(&mut out, TABLE_L, FRAME_TOP_Y + 0.37, FRAME_BOT_Y - 0.38);
+    vline(&mut out, TABLE_R, FRAME_TOP_Y + 0.37, FRAME_BOT_Y - 0.38);
+    draw_sheet(&mut out, layout, DRAW_X, DRAW_Y, &labels);
+
+    text_at(&mut out, "No.", LPART_NO_X - text_width("No.", 10.0) / 2.0, PARTS_HEAD_Y, 10.0, true);
+    text_at(&mut out, "Name", LPART_NAME_X, PARTS_HEAD_Y, 10.0, true);
+    for (&cx, head) in LPART_COLS.iter().zip(LPART_HEADS) {
+        text_centre(&mut out, head, cx, PARTS_HEAD_Y, 10.0, true);
+    }
+    dashed_hline(&mut out, LPART_L, LPART_R, PARTS_DASH_Y);
+
+    // The last row that still clears the footer rule, with room for the totals
+    // row and the remnant line under it. Everything past it collapses into a
+    // single "+N more" - a table that silently runs off the page is the one
+    // failure a report must not have.
+    let last_row_y = FOOTER_RULE_Y + TOTAL_DROP + 16.0 + ROW_PITCH;
+
+    let mut y = PARTS_ROW_Y;
+    let mut no = 0usize;
+    let mut total_contours = 0usize;
+    let mut total_qty = 0usize;
+    let mut hidden = 0usize;
+    for (part, &count) in meta.parts.iter().zip(counts.iter()) {
+        if count == 0 {
+            continue;
+        }
+        no += 1;
+        if y < last_row_y {
+            hidden += 1;
+            total_contours += contour_count(&part.shape) * count;
+            total_qty += count;
+            continue;
+        }
+        let pb = get_polygon_bounds(&part.shape.points).unwrap_or(NO_BOUNDS);
+        let contours = contour_count(&part.shape);
+        total_contours += contours * count;
+        total_qty += count;
+        let values = [
+            format!("{:.2}", pb.width),
+            format!("{:.2}", pb.height),
+            contours.to_string(),
+            format!("{:.3}", polygon_material_area(&part.shape) * count as f64 / 1e6),
+            count.to_string(),
+        ];
+        text_centre(&mut out, &no.to_string(), LPART_NO_X, y, 10.0, false);
+        text_at(&mut out, &part.name, LPART_NAME_X, y, 10.0, false);
+        thumbnail(&mut out, &part.shape, LPART_THUMB_X, y - 5.7);
+        for (&cx, value) in LPART_COLS.iter().zip(values) {
+            text_centre(&mut out, &value, cx, y, 10.0, false);
+        }
+        y -= ROW_PITCH;
+    }
+    if unknown > 0 {
+        no += 1;
+        total_qty += unknown;
+        if y >= last_row_y {
+            text_centre(&mut out, &no.to_string(), LPART_NO_X, y, 10.0, false);
+            text_at(&mut out, "(unlisted)", LPART_NAME_X, y, 10.0, false);
+            text_centre(&mut out, &unknown.to_string(), LPART_COLS[4], y, 10.0, false);
+            y -= ROW_PITCH;
+        } else {
+            hidden += 1;
+        }
+    }
+    if hidden > 0 {
+        text_at(&mut out, &format!("... and {hidden} more part type(s)"), LPART_NAME_X, y, 10.0, false);
+        y -= ROW_PITCH;
+    }
+
+    let rule_y = y + ROW_PITCH - ROW_RULE_DROP;
+    hline(&mut out, LPART_L, LPART_R, rule_y);
+    text_centre(&mut out, &total_contours.to_string(), LPART_COLS[2], rule_y - TOTAL_DROP, 10.0, false);
+    text_centre(&mut out, &total_qty.to_string(), LPART_COLS[4], rule_y - TOTAL_DROP, 10.0, false);
+
+    let offcut = sheet_offcut(layout, meta.spacing);
+    if offcut.usable_w >= 1.0 && offcut.usable_h >= 1.0 {
+        text_at(
+            &mut out,
+            &format!(
+                "Remnant Size: {:.2}x{:.2} Area:{:.3}",
+                offcut.usable_w,
+                offcut.usable_h,
+                offcut.usable_w * offcut.usable_h / 1e6
+            ),
+            LPART_L,
+            rule_y - TOTAL_DROP - 16.0,
+            10.0,
+            false,
         );
     }
 
-    fn finish(mut self) -> Vec<String> {
-        self.pages.push(self.cur);
-        self.pages
+    vec![out]
+}
+
+/// Which `meta.parts` entry a placed shape is a copy of.
+///
+/// Matched on measurements rather than identity because a `PlacedShape` has
+/// none by the time it reaches here: material area, contour count and cut
+/// length together separate any two parts a person would call different, and
+/// all three are rotation-invariant, which the bounding box is not.
+fn match_part(meta: &ReportMeta, shape: &LayeredPolygon) -> Option<usize> {
+    let area = polygon_material_area(shape);
+    let contours = contour_count(shape);
+    let length = cut_length(shape);
+    meta.parts.iter().position(|p| {
+        contour_count(&p.shape) == contours
+            && (polygon_material_area(&p.shape) - area).abs() <= area.abs().mul_add(1e-6, 1e-6)
+            && (cut_length(&p.shape) - length).abs() <= length.mul_add(1e-6, 1e-6)
+    })
+}
+
+/// The sheet, to scale, inside the reference's own drawing box - blue line
+/// art, each piece captioned with its row number in this page's part table.
+///
+/// The number, not a `#n` position label: it is what lets someone holding a
+/// cut piece find the row that says how big it is and how many there are, and
+/// it is what the reference report draws.
+fn draw_sheet(out: &mut String, layout: &SheetLayout, x: f64, y: f64, labels: &[Option<usize>]) {
+    let Some(bounds) = get_polygon_bounds(&layout.sheet.points) else { return };
+    let scale = (DRAW_W / bounds.width.max(1e-9)).min(DRAW_H / bounds.height.max(1e-9));
+    let ox = x + (DRAW_W - bounds.width * scale) / 2.0;
+    let oy = y + (DRAW_H - bounds.height * scale) / 2.0;
+    // PDF's y axis points up, same as this codebase's, so this is a plain
+    // scale-and-offset - no flip anywhere.
+    let map = |p: Point| (ox + (p.x - bounds.x) * scale, oy + (p.y - bounds.y) * scale);
+
+    let _ = writeln!(out, "q 0 0 1 RG 0.66 w");
+    path(out, &layout.sheet.points, map);
+    let mut captions: Vec<(usize, f64, f64)> = Vec::new();
+    for (i, part) in layout.parts.iter().enumerate() {
+        let geometry = placed_geometry(part);
+        stroke_tree(out, &geometry, map);
+        if let (Some(no), Some(b)) = (labels.get(i).copied().flatten(), get_polygon_bounds(&geometry.points)) {
+            let (cx, cy) = map(Point::new(b.x + b.width / 2.0, b.y + b.height / 2.0));
+            captions.push((no, cx, cy));
+        }
+    }
+    let _ = writeln!(out, "Q");
+    for (no, cx, cy) in captions {
+        text_centre(out, &no.to_string(), cx, cy - 3.0, 9.0, false);
     }
 }
 
-/// Column layouts, as x offsets in points from the left margin. Mirrors the
-/// three tables a SuperNesting job report prints, in its column order, so the
-/// two can be read side by side.
-const PART_COLS: &[f64] = &[0.0, 150.0, 215.0, 270.0, 320.0, 395.0, 470.0, 555.0, 650.0];
-const NEST_COLS: &[f64] = &[0.0, 90.0, 170.0, 250.0, 330.0, 420.0, 510.0, 610.0];
-const REMNANT_COLS: &[f64] = &[0.0, 90.0, 180.0, 250.0, 360.0, 470.0];
-
-fn cells<const N: usize>(cols: &[f64], values: [String; N]) -> Vec<(f64, String)> {
-    cols.iter().copied().zip(values).collect()
+/// A part's outline shrunk into a 14.4pt square, the size the reference puts
+/// beside every table row.
+fn thumbnail(out: &mut String, shape: &LayeredPolygon, x: f64, y: f64) {
+    const SIZE: f64 = 14.4;
+    let Some(b) = get_polygon_bounds(&shape.points) else { return };
+    let scale = (SIZE / b.width.max(1e-9)).min(SIZE / b.height.max(1e-9));
+    let ox = x + (SIZE - b.width * scale) / 2.0;
+    let oy = y + (SIZE - b.height * scale) / 2.0;
+    let map = |p: Point| (ox + (p.x - b.x) * scale, oy + (p.y - b.y) * scale);
+    let _ = writeln!(out, "q 0 0 1 RG 0.4 w");
+    stroke_tree(out, shape, map);
+    let _ = writeln!(out, "Q");
 }
+
+// --- the page frame -----------------------------------------------------
+
+/// The border, the footer rule and "date ... n / total" - identical on every
+/// page, drawn before that page's own content.
+fn frame(page: usize, total: usize, generated: &str) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "q 0 0 0 RG 0.75 w");
+    hline(&mut out, FRAME_L, FRAME_R, FRAME_T);
+    hline(&mut out, FRAME_L, FRAME_R, FRAME_B);
+    vline(&mut out, FRAME_L, FRAME_T + 0.38, FRAME_B);
+    vline(&mut out, FRAME_R, FRAME_T + 0.38, FRAME_B);
+    hline(&mut out, RULE_L, RULE_R, FOOTER_RULE_Y);
+    let _ = writeln!(out, "Q");
+    text_at(&mut out, generated, 20.55, 24.68, 10.0, false);
+    text_at(&mut out, &page.to_string(), 665.56, 23.18, 10.0, false);
+    text_at(&mut out, "/", 718.18, 23.18, 10.0, false);
+    text_at(&mut out, &total.to_string(), 770.81, 23.18, 10.0, false);
+    out
+}
+
+// --- drawing primitives -------------------------------------------------
+
+fn hline(out: &mut String, x0: f64, x1: f64, y: f64) {
+    let _ = writeln!(out, "0.75 w 0 0 0 RG {x0:.2} {y:.2} m {x1:.2} {y:.2} l S");
+}
+
+fn dashed_hline(out: &mut String, x0: f64, x1: f64, y: f64) {
+    let _ = writeln!(out, "q [2.25 1.5] 0 d 0.75 w 0 0 0 RG {x0:.2} {y:.2} m {x1:.2} {y:.2} l S Q");
+}
+
+fn vline(out: &mut String, x: f64, y0: f64, y1: f64) {
+    let _ = writeln!(out, "0.75 w 0 0 0 RG {x:.2} {y0:.2} m {x:.2} {y1:.2} l S");
+}
+
+fn stroke_tree(out: &mut String, shape: &LayeredPolygon, map: impl Fn(Point) -> (f64, f64) + Copy) {
+    path(out, &shape.points, map);
+    for child in &shape.children {
+        stroke_tree(out, child, map);
+    }
+}
+
+fn path(out: &mut String, points: &[Point], map: impl Fn(Point) -> (f64, f64)) {
+    let Some((first, rest)) = points.split_first() else { return };
+    let (x, y) = map(*first);
+    let _ = writeln!(out, "{x:.3} {y:.3} m");
+    for p in rest {
+        let (x, y) = map(*p);
+        let _ = writeln!(out, "{x:.3} {y:.3} l");
+    }
+    let _ = writeln!(out, "h S");
+}
+
+fn text_at(out: &mut String, value: &str, x: f64, y: f64, size: f64, bold: bool) {
+    let font = if bold { "/F2" } else { "/F1" };
+    let _ = writeln!(out, "BT {font} {size} Tf {x:.2} {y:.2} Td ({}) Tj ET", pdf_string(value));
+}
+
+fn text_centre(out: &mut String, value: &str, cx: f64, y: f64, size: f64, bold: bool) {
+    text_at(out, value, cx - text_width(value, size) / 2.0, y, size, bold);
+}
+
+/// See this module's doc comment: one average advance width, not the real
+/// Times metrics.
+fn text_width(value: &str, size: f64) -> f64 {
+    value.chars().count() as f64 * size * 0.487
+}
+
+/// Escapes a string for a PDF literal and drops anything the built-in
+/// WinAnsi Times can't represent - see this module's doc comment.
+fn pdf_string(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| match c {
+            '(' => "\\(".to_string(),
+            ')' => "\\)".to_string(),
+            '\\' => "\\\\".to_string(),
+            // WinAnsi does carry a superscript two, and the reference report
+            // heads its area columns `[m²]` with it - so emit it by its octal
+            // code rather than dropping it into the `?` bucket below.
+            '²' => "\\262".to_string(),
+            c if c.is_ascii_graphic() || c == ' ' => c.to_string(),
+            _ => "?".to_string(),
+        })
+        .collect()
+}
+
+// --- derived numbers ----------------------------------------------------
 
 /// How many separate closed contours a piece has - its outline plus every
 /// hole, all the way down. This is what a machine actually cuts, and it is the
-/// column SuperNesting calls `CtrQty`.
+/// column the reference report calls `CtrQty`.
 fn contour_count(shape: &LayeredPolygon) -> usize {
     1 + shape.children.iter().map(contour_count).sum::<usize>()
 }
@@ -238,13 +799,11 @@ fn contour_count(shape: &LayeredPolygon) -> usize {
 /// tracks this far more closely than it tracks area, which is why the
 /// reference report carries it on every row.
 fn cut_length(shape: &LayeredPolygon) -> f64 {
-    let outline: f64 = (0..shape.points.len())
-        .map(|i| shape.points[i].distance_to(shape.points[(i + 1) % shape.points.len()]))
-        .sum();
-    outline + shape.children.iter().map(cut_length).sum::<f64>()
+    let ring: f64 = shape.points.iter().enumerate().map(|(i, p)| p.distance_to(shape.points[(i + 1) % shape.points.len()])).sum();
+    ring + shape.children.iter().map(cut_length).sum::<f64>()
 }
 
-/// One row of the nests table: a distinct layout, and how many sheets are cut
+/// One row of the sheet table: a distinct layout, and how many sheets are cut
 /// from it.
 struct NestGroup {
     /// Index into `stats` of the first sheet with this layout.
@@ -253,7 +812,8 @@ struct NestGroup {
 }
 
 /// Groups sheets that are laid out identically, so the report can say "cut
-/// this one three times" instead of listing three indistinguishable rows.
+/// this one three times" instead of listing three indistinguishable rows -
+/// and print one page for it instead of three.
 ///
 /// This is the column the reference tool's own report leads with, and it is
 /// also the measurement for `PLAN.md` 1.2 - a nester that finds one good
@@ -261,7 +821,7 @@ struct NestGroup {
 /// and one that re-solves every sheet from scratch produces a wall of ones.
 ///
 /// Two sheets match when their outlines match and every piece sits in the same
-/// place, rounded to 0.1mm - far below any tolerance that matters, and well
+/// place, rounded to 0.05mm - far below any tolerance that matters, and well
 /// above the float noise two independently-computed placements carry.
 fn nest_groups(layouts: &[SheetLayout]) -> Vec<NestGroup> {
     /// Millimetres. Two placements this close are the same placement - well
@@ -314,15 +874,13 @@ fn nest_groups(layouts: &[SheetLayout]) -> Vec<NestGroup> {
     groups
 }
 
-/// `1234567.8` -> `1 234 568`. Areas in mm2 run to seven digits on a real
-/// sheet, and an ungrouped run of digits is genuinely hard to read off a
-/// printed page.
+/// `1234567.8` -> `1,234,568`. The reference report groups with commas.
 fn grouped(value: f64) -> String {
     let digits = format!("{:.0}", value.max(0.0));
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
         if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(' ');
+            out.push(',');
         }
         out.push(c);
     }
@@ -330,6 +888,12 @@ fn grouped(value: f64) -> String {
 }
 
 /// What one sheet has left over once every piece on it is cut.
+///
+/// `count`/`reclaimable` are measured but not printed - the reference report's
+/// Remnant Info carries only the labelled rectangle. They stay because they
+/// are what the module's own tests check the printed rectangle against: a
+/// label larger than the true free area would be material that isn't there.
+#[cfg_attr(not(test), allow(dead_code))]
 struct Offcut {
     /// How many separate leftover pieces the sheet breaks into.
     count: usize,
@@ -358,318 +922,26 @@ fn sheet_offcut(layout: &SheetLayout, spacing: f64) -> Offcut {
     }
 }
 
-fn summary_pages(meta: &ReportMeta, layouts: &[SheetLayout], stats: &[SheetStats]) -> Vec<String> {
-    let mut doc = Doc::new();
-
-    let total_sheet: f64 = stats.iter().map(|s| s.sheet_area).sum();
-    let total_used: f64 = stats.iter().map(|s| s.used_area).sum();
-    let utilisation = if total_sheet > 0.0 { total_used / total_sheet * 100.0 } else { 0.0 };
-    let placed: usize = stats.iter().map(|s| s.parts).sum();
-    let ordered: usize = meta.parts.iter().map(|p| p.quantity).sum();
-    let groups = nest_groups(layouts);
-
-    text(&mut doc.cur, &meta.title, MARGIN, doc.y, 18.0);
-    text(&mut doc.cur, &format!("Generated {}", meta.generated), PAGE_W / 2.0 + 150.0, doc.y, 10.0);
-    doc.y -= 26.0;
-
-    doc.heading("SUMMARY");
-    for line in [
-        format!("Sheets used: {}", stats.len()),
-        format!("Distinct layouts: {} (see SHEET LIST)", groups.len()),
-        format!("Utilisation: {utilisation:.1}%"),
-        format!("Material used: {} mm2 of {} mm2", grouped(total_used), grouped(total_sheet)),
-        format!("Waste: {} mm2", grouped(total_sheet - total_used)),
-        format!("Pieces placed: {placed} of {ordered}"),
-    ] {
-        doc.line(&line, 11.0);
-    }
-    if placed < ordered {
-        doc.line(&format!("NOT PLACED: {} piece(s) did not fit.", ordered - placed), 11.0);
-    }
-
-    // High on the page, immediately under the headline numbers: this is the
-    // line someone signs against, so it must not be something you have to
-    // turn a page to find.
-    if let Some(audit) = &meta.audit {
-        doc.heading("MANUFACTURABILITY CHECK");
-        doc.line(&audit.headline, 11.0);
-        for issue in &audit.issues {
-            doc.line(&format!("  {issue}"), 10.0);
-        }
-    }
-
-    doc.heading("PART LIST");
-    doc.row(
-        &cells(
-            PART_COLS,
-            [
-                "Name".into(),
-                "Total".into(),
-                "Nested".into(),
-                "Left".into(),
-                "Width [mm]".into(),
-                "Height [mm]".into(),
-                "Contours".into(),
-                "Area [m2]".into(),
-                "Length [m]".into(),
-            ],
-        ),
-        10.0,
-    );
-    let mut part_length = 0.0;
-    for part in &meta.parts {
-        let b = get_polygon_bounds(&part.shape.points).unwrap_or(crate::polygon::Bounds { x: 0.0, y: 0.0, width: 0.0, height: 0.0 });
-        let length = cut_length(&part.shape);
-        part_length += length * part.nested as f64;
-        doc.row(
-            &cells(
-                PART_COLS,
-                [
-                    part.name.clone(),
-                    format!("{}", part.quantity),
-                    format!("{}", part.nested),
-                    format!("{}", part.quantity.saturating_sub(part.nested)),
-                    format!("{:.2}", b.width),
-                    format!("{:.2}", b.height),
-                    format!("{}", contour_count(&part.shape)),
-                    format!("{:.3}", polygon_material_area(&part.shape) / 1e6),
-                    format!("{:.3}", length / 1000.0),
-                ],
-            ),
-            10.0,
-        );
-    }
-    doc.row(
-        &cells(
-            PART_COLS,
-            [
-                "Total".into(),
-                format!("{ordered}"),
-                format!("{placed}"),
-                format!("{}", ordered.saturating_sub(placed)),
-                String::new(),
-                String::new(),
-                String::new(),
-                format!("{:.3}", total_used / 1e6),
-                format!("{:.3}", part_length / 1000.0),
-            ],
-        ),
-        10.0,
-    );
-
-    doc.heading("SHEET LIST");
-    doc.line("One row per distinct layout. Duplicate is how many sheets are cut from it - identical nests are not relisted.", 10.0);
-    doc.row(
-        &cells(
-            NEST_COLS,
-            [
-                "Name".into(),
-                "Duplicate".into(),
-                "Width [mm]".into(),
-                "Height [mm]".into(),
-                "Pieces".into(),
-                "Contours".into(),
-                "Util [%]".into(),
-                "Length [m]".into(),
-            ],
-        ),
-        10.0,
-    );
-    let mut sheet_length = 0.0;
-    for (n, group) in groups.iter().enumerate() {
-        let layout = &layouts[group.first];
-        let sheet = &stats[group.first];
-        let b = get_polygon_bounds(&layout.sheet.points).unwrap_or(crate::polygon::Bounds { x: 0.0, y: 0.0, width: 0.0, height: 0.0 });
-        let contours: usize = layout.parts.iter().map(|p| contour_count(&p.shape)).sum();
-        let length: f64 = layout.parts.iter().map(|p| cut_length(&p.shape)).sum();
-        sheet_length += length * group.duplicate as f64;
-        doc.row(
-            &cells(
-                NEST_COLS,
-                [
-                    format!("nest{}", n + 1),
-                    format!("{}", group.duplicate),
-                    format!("{:.2}", b.width),
-                    format!("{:.2}", b.height),
-                    format!("{}", sheet.parts),
-                    format!("{contours}"),
-                    format!("{:.2}", sheet.utilisation()),
-                    format!("{:.3}", length / 1000.0),
-                ],
-            ),
-            10.0,
-        );
-    }
-    doc.row(
-        &cells(
-            NEST_COLS,
-            [
-                "Total".into(),
-                format!("{}", stats.len()),
-                String::new(),
-                String::new(),
-                format!("{placed}"),
-                String::new(),
-                format!("{utilisation:.2}"),
-                format!("{:.3}", sheet_length / 1000.0),
-            ],
-        ),
-        10.0,
-    );
-
-    doc.heading("REMNANT INFO");
-    // Spelled out because waste and remnant are not the same number and the
-    // difference is money: waste is everything not cut into a piece, a remnant
-    // is the part of it big enough and clear enough to put back on the shelf
-    // and nest onto again.
-    doc.line("What is left of each nest once every piece is cut, and can go back on the shelf as stock. Width and height", 10.0);
-    doc.line("are the largest rectangle that fits inside it - what is safe to label and book in. Area is the true free area,", 10.0);
-    doc.line("which is larger and rarely rectangular. Both already allow for the cut clearance.", 10.0);
-    doc.row(
-        &cells(REMNANT_COLS, ["Name".into(), "Width [mm]".into(), "Height [mm]".into(), "Qty".into(), "Area [m2]".into(), "Total [m2]".into()]),
-        10.0,
-    );
-    let mut reclaimable_total = 0.0;
-    for (n, group) in groups.iter().enumerate() {
-        let offcut = sheet_offcut(&layouts[group.first], meta.spacing);
-        let total = offcut.reclaimable * group.duplicate as f64;
-        reclaimable_total += total;
-        if offcut.count == 0 {
-            continue;
-        }
-        doc.row(
-            &cells(
-                REMNANT_COLS,
-                [
-                    format!("nest{}", n + 1),
-                    format!("{:.0}", offcut.usable_w),
-                    format!("{:.0}", offcut.usable_h),
-                    format!("{}", group.duplicate),
-                    format!("{:.3}", offcut.reclaimable / 1e6),
-                    format!("{:.3}", total / 1e6),
-                ],
-            ),
-            10.0,
-        );
-    }
-    doc.row(
-        &cells(
-            REMNANT_COLS,
-            ["Total".into(), String::new(), String::new(), String::new(), String::new(), format!("{:.3}", reclaimable_total / 1e6)],
-        ),
-        10.0,
-    );
-
-    doc.heading("SETTINGS");
-    for (label, value) in &meta.settings {
-        doc.line(&format!("{label}: {value}"), 10.0);
-    }
-
-    doc.finish()
-}
-
-fn sheet_page(layout: &SheetLayout, index: usize, stats: &SheetStats) -> String {
-    let mut out = String::new();
-    text(
-        &mut out,
-        &format!("Sheet {} - {} pieces - {:.1}% utilisation", index + 1, stats.parts, stats.utilisation()),
-        MARGIN,
-        PAGE_H - MARGIN - 4.0,
-        12.0,
-    );
-
-    let Some(bounds) = get_polygon_bounds(&layout.sheet.points) else {
-        return out;
-    };
-    // Fit the sheet into the page's drawing box, preserving aspect ratio.
-    let box_w = PAGE_W - 2.0 * MARGIN;
-    let box_h = PAGE_H - 2.0 * MARGIN - 30.0;
-    let scale = (box_w / bounds.width.max(1e-9)).min(box_h / bounds.height.max(1e-9));
-    let ox = MARGIN + (box_w - bounds.width * scale) / 2.0;
-    let oy = MARGIN + (box_h - bounds.height * scale) / 2.0;
-    // PDF's y axis points up, same as this codebase's, so this is a plain
-    // scale-and-offset - no flip anywhere.
-    let map = |p: Point| (ox + (p.x - bounds.x) * scale, oy + (p.y - bounds.y) * scale);
-
-    let _ = writeln!(out, "0.55 0.55 0.55 RG 0.8 w");
-    path(&mut out, &layout.sheet.points, map);
-
-    let _ = writeln!(out, "0 0 0 RG 0.6 w");
-    for (n, part) in layout.parts.iter().enumerate() {
-        let geometry = placed_geometry(part);
-        stroke_tree(&mut out, &geometry, map);
-
-        // Labelled by position on this sheet, not by the run's internal part
-        // id and not by layer name (which is very often the DXF default "0",
-        // i.e. no information at all). "Sheet 2, piece 5" is what someone
-        // matching this page against a pile of cut parts actually needs, and
-        // it needs no data this module would otherwise have to be told.
-        if let Some(b) = get_polygon_bounds(&geometry.points) {
-            let (cx, cy) = map(Point::new(b.x + b.width / 2.0, b.y + b.height / 2.0));
-            let label = format!("#{}", n + 1);
-            text(&mut out, &label, cx - 5.0, cy - 3.0, 9.0);
-        }
-    }
-
-    out
-}
-
-fn stroke_tree(out: &mut String, shape: &LayeredPolygon, map: impl Fn(Point) -> (f64, f64) + Copy) {
-    path(out, &shape.points, map);
-    for child in &shape.children {
-        stroke_tree(out, child, map);
-    }
-}
-
-fn path(out: &mut String, points: &[Point], map: impl Fn(Point) -> (f64, f64)) {
-    let Some((first, rest)) = points.split_first() else { return };
-    let (x, y) = map(*first);
-    let _ = writeln!(out, "{x:.3} {y:.3} m");
-    for p in rest {
-        let (x, y) = map(*p);
-        let _ = writeln!(out, "{x:.3} {y:.3} l");
-    }
-    let _ = writeln!(out, "h S");
-}
-
-fn text(out: &mut String, value: &str, x: f64, y: f64, size: f64) {
-    let _ = writeln!(out, "BT /F1 {size} Tf {x:.2} {y:.2} Td ({}) Tj ET", pdf_string(value));
-}
-
-/// Escapes a string for a PDF literal and drops anything the built-in
-/// WinAnsi Helvetica can't represent - see this module's doc comment.
-fn pdf_string(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| match c {
-            '(' => "\\(".to_string(),
-            ')' => "\\)".to_string(),
-            '\\' => "\\\\".to_string(),
-            c if c.is_ascii_graphic() || c == ' ' => c.to_string(),
-            _ => "?".to_string(),
-        })
-        .collect()
-}
-
 // --- the PDF container itself ------------------------------------------
 
 /// Wraps the content streams into a minimal, valid PDF 1.4 file: catalog,
-/// page tree, one page + one stream per content string, one standard font,
+/// page tree, one page + one stream per content string, two standard fonts,
 /// then the cross-reference table every reader needs to find them.
 fn assemble(pages: &[String]) -> Vec<u8> {
     let mut objects: Vec<String> = Vec::new();
-    // 1 = catalog, 2 = page tree, 3 = font, then (page, stream) pairs.
-    let first_page_obj = 4;
+    // 1 = catalog, 2 = page tree, 3 = roman, 4 = bold, then (page, stream) pairs.
+    let first_page_obj = 5;
     let kids: Vec<String> = (0..pages.len()).map(|i| format!("{} 0 R", first_page_obj + i * 2)).collect();
 
     objects.push("<< /Type /Catalog /Pages 2 0 R >>".to_string());
     objects.push(format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), pages.len()));
-    objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_string());
+    objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman /Encoding /WinAnsiEncoding >>".to_string());
+    objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Times-Bold /Encoding /WinAnsiEncoding >>".to_string());
 
     for (i, content) in pages.iter().enumerate() {
         let stream_obj = first_page_obj + i * 2 + 1;
         objects.push(format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_W:.2} {PAGE_H:.2}] /Resources << /Font << /F1 3 0 R >> >> /Contents {stream_obj} 0 R >>"
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_W:.2} {PAGE_H:.2}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {stream_obj} 0 R >>"
         ));
         objects.push(format!("<< /Length {} >>\nstream\n{content}endstream", content.len()));
     }
@@ -720,151 +992,79 @@ mod tests {
 
     fn meta() -> ReportMeta {
         ReportMeta {
-            title: "Test job".into(),
+            title: "nestresult".into(),
             generated: "2026-01-01 09:00".into(),
             spacing: 2.0,
             parts: vec![ReportPart { name: "widget".into(), quantity: 4, nested: 3, shape: square(10.0) }],
-            settings: vec![("Spacing".into(), "2 mm".into())],
-            audit: None,
         }
     }
 
-    /// The verdict has to reach the page. A report that silently drops it is
-    /// exactly as useless as no audit at all, and nothing else here would
-    /// notice - the PDF still renders perfectly well without it.
     #[test]
-    fn the_audit_verdict_is_printed_on_the_summary_page() {
-        let mut meta = meta();
-        meta.audit = Some(ReportAudit {
-            passed: false,
-            headline: "FAILED - 2 fatal issue(s), 0 warning(s). DO NOT CUT.".into(),
-            issues: vec!["OVERLAP - sheet 1, #3 + #7".into()],
-        });
-        let text = String::from_utf8(export_report(&[layout(2)], &meta)).expect("ASCII only");
-        assert!(text.contains("MANUFACTURABILITY CHECK"), "the section heading must appear");
-        assert!(text.contains("DO NOT CUT"), "the verdict must appear");
-        assert!(text.contains("OVERLAP - sheet 1"), "the individual finding must appear");
-    }
-
-    /// No audit must print nothing at all - never an implied pass. A report
-    /// claiming a nest is fine when nobody checked it is the one output here
-    /// that could get someone to cut a bad sheet.
-    #[test]
-    fn no_audit_prints_no_verdict_rather_than_an_implied_pass() {
-        let text = String::from_utf8(export_report(&[layout(2)], &meta())).expect("ASCII only");
-        assert!(!text.contains("MANUFACTURABILITY CHECK"), "an unchecked nest must not get a verdict section");
-        assert!(!text.contains("PASSED"), "an unchecked nest must never read as passed");
-    }
-
-    #[test]
-    fn writes_a_structurally_valid_pdf_with_one_page_per_sheet_plus_a_summary() {
+    fn writes_a_structurally_valid_pdf() {
         let bytes = export_report(&[layout(2), layout(1)], &meta());
         let text = String::from_utf8(bytes).expect("the writer only emits ASCII");
 
         assert!(text.starts_with("%PDF-1.4"), "must announce itself as a PDF");
         assert!(text.trim_end().ends_with("%%EOF"), "must be terminated");
-        // One page per sheet, plus however many pages the summary tables
-        // needed - asserted by what is drawn on them rather than by a fixed
-        // total, so growing the summary does not read as losing a sheet.
-        assert_eq!(text.matches("Sheet 1 - ").count(), 1, "sheet 1 gets its own page");
-        assert_eq!(text.matches("Sheet 2 - ").count(), 1, "sheet 2 gets its own page");
-        let pages = text.matches("/Type /Page\n").count() + text.matches("/Type /Page ").count();
-        assert!(pages >= 3, "expected at least a summary page plus one per sheet, got {pages}");
         assert!(text.contains("startxref"), "readers need the xref offset");
-        // The xref table must have one entry per object plus the free entry.
         let object_count = text.matches(" 0 obj").count();
         assert!(text.contains(&format!("/Size {}", object_count + 1)));
+        assert!(text.contains("/Times-Roman") && text.contains("/Times-Bold"), "both fonts must be declared");
     }
 
-    /// The report's numbers are derived from the geometry it draws, so this
-    /// is a real cross-check rather than a tautology.
+    /// The report is the reference's three tables and nothing else - no
+    /// summary block, no settings dump, no audit section.
     #[test]
-    fn the_summary_reports_utilisation_measured_off_the_drawn_geometry() {
-        // Three 10x10 parts on a 100x100 sheet: 300 of 10000 = 3%.
-        let bytes = export_report(&[layout(3)], &meta());
-        let text = String::from_utf8(bytes).unwrap();
-        assert!(text.contains("Utilisation: 3.0%"), "expected 3% utilisation in:\n{text}");
-        assert!(text.contains("Pieces placed: 3 of 4"));
-        assert!(text.contains("NOT PLACED: 1 piece"), "a shortfall must be called out, not left to arithmetic");
+    fn the_summary_page_is_the_reference_tables_and_nothing_else() {
+        let text = String::from_utf8(export_report(&[layout(2)], &meta())).expect("ASCII only");
+        for wanted in ["Part-List", "Sheet-List", "Total Parts Count: 1", "MatName", "CtrQty", "Duplicate"] {
+            assert!(text.contains(wanted), "missing {wanted}");
+        }
+        for unwanted in ["SUMMARY", "SETTINGS", "MANUFACTURABILITY", "Utilisation:", "Generated"] {
+            assert!(!text.contains(unwanted), "the reference report has no {unwanted} and neither should this one");
+        }
+    }
+
+    /// **One page per distinct layout, not per sheet.** Eleven sheets from two
+    /// arrangements is a three-page report; the old one-page-per-sheet version
+    /// printed nine identical pages of nothing new.
+    #[test]
+    fn identical_sheets_share_one_page_instead_of_repeating() {
+        let layouts: Vec<SheetLayout> = vec![layout(3), layout(3), layout(3), layout(2)];
+        let text = String::from_utf8(export_report(&layouts, &meta())).expect("ASCII only");
+        let pages = text.matches("/Type /Page ").count();
+        assert_eq!(pages, 3, "summary + two distinct layouts, got {pages}");
+        assert!(text.contains("sheet1") && text.contains("sheet2"));
+        assert!(!text.contains("sheet3"), "four sheets, two layouts - there is no sheet3 page");
+    }
+
+    /// Every page carries the frame and its own "n / total".
+    #[test]
+    fn every_page_is_framed_and_numbered() {
+        let text = String::from_utf8(export_report(&[layout(3), layout(2)], &meta())).expect("ASCII only");
+        let pages = text.matches("/Type /Page ").count();
+        assert_eq!(text.matches("(/) Tj").count(), pages, "one page-number separator per page");
+        assert_eq!(text.matches(&format!("({pages}) Tj")).count() >= pages, true, "each page prints the total");
     }
 
     #[test]
     fn an_empty_result_still_produces_a_readable_one_page_report() {
-        let bytes = export_report(&[], &meta());
-        let text = String::from_utf8(bytes).unwrap();
+        let text = String::from_utf8(export_report(&[], &meta())).expect("ASCII only");
         assert!(text.starts_with("%PDF-1.4"));
-        assert!(text.contains("Sheets used: 0"));
-        assert!(text.contains("Pieces placed: 0 of 4"));
+        assert!(text.contains("Part-List"));
+        assert_eq!(text.matches("/Type /Page ").count(), 1);
     }
 
-    /// The reference tool's report leads with a Duplicate column, and it is
-    /// the only thing on the page that says whether the nester found one good
-    /// arrangement and reused it or re-solved every sheet from scratch. Two
-    /// identical sheets must collapse to one row saying "x2", not two rows.
-    #[test]
-    fn identically_laid_out_sheets_collapse_into_one_nest_row() {
-        let groups = nest_groups(&[layout(3), layout(3), layout(2)]);
-        assert_eq!(groups.len(), 2, "two distinct layouts, not three sheets");
-        assert_eq!(groups[0].duplicate, 2, "the repeated layout is counted, not relisted");
-        assert_eq!(groups[1].duplicate, 1);
-        assert_eq!(groups[1].first, 2, "a group points at the first sheet that had its layout");
-    }
-
-    /// **Regression: a hair's difference must not split a group.** The first
-    /// version formatted each coordinate to one decimal and compared the
-    /// strings, so a single part sitting on a rounding boundary put the whole
-    /// sheet in its own row. Caught on a real 253-piece result whose two
-    /// sheets were identical down to the drawn PDF operators and still
-    /// reported as two distinct layouts - which understates exactly the thing
-    /// the Duplicate column exists to show.
-    #[test]
-    fn placements_a_hair_apart_are_the_same_layout() {
-        // Two sheets whose first part sits either side of a formatting
-        // boundary: 0.0499 rounds to "0.0" and 0.0501 to "0.1", so the old
-        // string comparison called these different layouts over two ten
-        // thousandths of a millimetre.
-        let mut a = layout(3);
-        let mut b = layout(3);
-        a.parts[0].x += 0.0499;
-        b.parts[0].x += 0.0501;
-        let groups = nest_groups(&[a, b]);
-        assert_eq!(groups.len(), 1, "sub-micron differences are not different layouts");
-        assert_eq!(groups[0].duplicate, 2);
-    }
-
-    /// ...but a genuinely different arrangement still gets its own row.
-    #[test]
-    fn a_really_moved_part_is_a_different_layout() {
-        let mut moved = layout(3);
-        moved.parts[0].x += 5.0;
-        assert_eq!(nest_groups(&[layout(3), moved]).len(), 2);
-    }
-
-    /// Same pieces in the same places, reached in a different placement order,
-    /// is the same pattern to whoever has to cut it.
-    #[test]
-    fn placement_order_does_not_split_a_nest_group() {
-        let mut shuffled = layout(3);
-        shuffled.parts.reverse();
-        assert_eq!(nest_groups(&[layout(3), shuffled]).len(), 1);
-    }
-
-    /// The part list is the half of the report the summary totals cannot give
-    /// you: which piece is short, and by how many. Its columns mirror the
-    /// reference tool's own Part-List so the two can be read side by side.
+    /// The part list is the half of the report the drawing cannot give you:
+    /// which piece is short, and by how many.
     #[test]
     fn the_part_list_prints_ordered_nested_and_left_with_the_measured_columns() {
         let mut meta = meta();
         meta.parts = vec![ReportPart { name: "bracket".into(), quantity: 50, nested: 47, shape: square(404.0) }];
         let text = String::from_utf8(export_report(&[layout(2)], &meta)).expect("ASCII only");
-        assert!(text.contains("PART LIST"), "the section must exist");
         assert!(text.contains("bracket"));
-        assert!(text.contains("404.00"), "size in mm, measured off the shape");
-        assert!(text.contains("Contours"), "the cut-contour count is a column the machine cares about");
-        assert!(text.contains("Length"), "cut length is a column");
-        // 50 ordered, 47 nested, 3 left - the last one is the whole point.
-        assert!(text.contains("(47)"), "nested count");
-        assert!(text.contains("(3)"), "left count");
+        assert!(text.contains("(404.00) Tj"), "size in mm, measured off the shape");
+        assert!(text.contains("(50) Tj") && text.contains("(47) Tj") && text.contains("(3) Tj"), "ordered/nested/left");
     }
 
     /// Contours and cut length are per-piece manufacturing numbers, and both
@@ -880,10 +1080,10 @@ mod tests {
 
     #[test]
     fn big_numbers_are_grouped_and_negatives_clamp_rather_than_printing_a_sign() {
-        assert_eq!(grouped(1_234_567.8), "1 234 568");
+        assert_eq!(grouped(1_234_567.8), "1,234,568");
         assert_eq!(grouped(999.0), "999");
         assert_eq!(grouped(0.0), "0");
-        assert_eq!(grouped(-5.0), "0", "waste can go very slightly negative on rounding");
+        assert_eq!(grouped(-5.0), "0");
     }
 
     /// A long job must not run off the bottom of the page - the numbers would
@@ -894,24 +1094,40 @@ mod tests {
         meta.parts = (0..60).map(|i| ReportPart { name: format!("part-{i}"), quantity: 1, nested: 1, shape: square(1.0) }).collect();
         let layouts: Vec<SheetLayout> = (0..40).map(|i| layout(i % 5 + 1)).collect();
         let stats: Vec<SheetStats> = layouts.iter().map(sheet_stats).collect();
-        let pages = summary_pages(&meta, &layouts, &stats);
+        let groups = nest_groups(&layouts);
+        let materials = material_names(&layouts);
+        let pages = summary_pages(&meta, &layouts, &stats, &groups, &materials);
         assert!(pages.len() > 1, "expected the summary to paginate, got {} page(s)", pages.len());
         assert!(pages.iter().all(|p| p.contains("Tj")), "an emitted page must not be blank");
     }
 
-    /// Waste and remnant are different numbers and the report must not let
-    /// them be read as the same one: waste is everything not cut into a piece,
-    /// a remnant is the part of it big enough to nest onto again.
+    /// A placed shape has no identity by the time the report draws it, so the
+    /// per-sheet table has to recognise it by measurement. Two parts of the
+    /// same area but different outlines must not be confused.
     #[test]
-    fn the_remnant_section_says_what_is_reusable_and_explains_itself() {
-        let text = String::from_utf8(export_report(&[layout(3)], &meta())).expect("ASCII only");
-        assert!(text.contains("REMNANT INFO"), "the section must exist");
-        assert!(text.contains("back on the shelf as stock"), "and must say what a remnant actually is");
-        // Three 10x10 parts on a 100x100 sheet leaves a large offcut, so this
-        // must be a real measurement rather than a zero placeholder.
+    fn a_placed_shape_is_matched_back_to_the_part_it_is_a_copy_of() {
+        let mut meta = meta();
+        let tall = LayeredPolygon { points: vec![Point::new(0.0, 0.0), Point::new(4.0, 0.0), Point::new(4.0, 25.0), Point::new(0.0, 25.0)], ..square(1.0) };
+        meta.parts = vec![
+            ReportPart { name: "square".into(), quantity: 1, nested: 1, shape: square(10.0) },
+            ReportPart { name: "strip".into(), quantity: 1, nested: 1, shape: tall.clone() },
+        ];
+        assert_eq!(match_part(&meta, &square(10.0)), Some(0));
+        assert_eq!(match_part(&meta, &tall), Some(1), "same 100mm2 area, different cut length");
+        assert_eq!(match_part(&meta, &square(7.0)), None);
+    }
+
+    /// Waste and remnant are different numbers: waste is everything not cut
+    /// into a piece, a remnant is the part of it big enough to nest onto again.
+    #[test]
+    fn the_remnant_row_is_the_usable_rectangle_not_the_whole_offcut() {
         let offcut = sheet_offcut(&layout(3), 2.0);
         assert!(offcut.reclaimable > 5_000.0, "expected most of the sheet reclaimable, got {}", offcut.reclaimable);
         assert!(offcut.usable_w > 0.0 && offcut.usable_h > 0.0, "a usable rectangle must be reported");
+        assert!(
+            offcut.usable_w * offcut.usable_h <= offcut.reclaimable + 1.0,
+            "the labelled rectangle can never exceed the true free area"
+        );
     }
 
     /// A sheet with nothing on it is untouched stock, not an offcut - filing it

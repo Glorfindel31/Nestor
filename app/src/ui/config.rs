@@ -111,6 +111,13 @@ fn advanced(app: &mut App, ui: &mut egui::Ui) {
     shell::help_bubble(dominant_row, t("dominant_label"), t("dominant_tooltip"));
     ui.label(RichText::new(t("dominant_hint")).color(theme::DIM).small());
 
-    shell::number_row(ui, t("max_threads_label"), t("max_threads_tooltip"), &mut app.cfg.max_threads, 0.1, 0..=256);
+    // Capped at what this machine actually has, so the knob is monotonic:
+    // more threads is never slower, and the top of the range means "all of
+    // them". Above the real count the setting only ever costs time - see
+    // `commands::effective_threads`, which clamps the same way for a config
+    // saved before this cap existed.
+    let cores = std::thread::available_parallelism().map_or(256, std::num::NonZeroUsize::get);
+    shell::number_row(ui, t("max_threads_label"), t("max_threads_tooltip"), &mut app.cfg.max_threads, 0.1, 0..=cores);
+    ui.label(RichText::new(super::i18n::tv(lang, "max_threads_hint", &[("cores", &cores.to_string())])).color(theme::DIM).small());
     shell::number_row(ui, t("seed_label"), t("seed_tooltip"), &mut app.cfg.seed, 1.0, 0..=u64::MAX);
 }

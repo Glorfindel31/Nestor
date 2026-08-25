@@ -32,6 +32,7 @@ use geometry::inner_nfp::inner_nfp;
 use geometry::obstacle_nfp::obstacle_nfp;
 use geometry::point::Point;
 use geometry::polygon::{almost_equal, get_polygon_bounds, is_rectangle, polygon_area, Bounds};
+use rayon::prelude::*;
 
 use std::sync::Arc;
 
@@ -83,7 +84,7 @@ fn cached_obstacle_nfp(
     curve_tolerance: f64,
 ) -> Option<Arc<CachedNfp>> {
     let cached = cache.get_or_compute(part_source(obstacle_id), part_source(part_id), obstacle_rotation, part_rotation, false, false, || {
-        obstacle_nfp(obstacle, part, curve_tolerance).map(|nfp| CachedNfp::Outer { outer: nfp.outer, children: nfp.children })
+        crate::profile::OBSTACLE_NFP_COMPUTE.time(|| obstacle_nfp(obstacle, part, curve_tolerance).map(|nfp| CachedNfp::Outer { outer: nfp.outer, children: nfp.children }))
     })?;
     // The `Arc` is returned rather than unpacked into an owned `ObstacleNfp`
     // on purpose: this is the hottest call in the engine (3.7M times on the
@@ -908,6 +909,17 @@ pub(crate) struct NfpAccumulator {
     /// unchanged vertex should be bit-identical, and anything less exact
     /// would flatter the measurement.
     prev_candidates: HashMap<(usize, i64), std::collections::HashSet<(u64, u64)>>,
+    /// Obstacle NFPs already fetched from the shared `NfpCache` on this
+    /// sheet, keyed exactly as the cache is.
+    ///
+    /// The shared cache is one global `Mutex<HashMap<String, _>>` and every
+    /// lookup `format!`s its key, so a hit costs ~170ns single-threaded and
+    /// ~160us once several `dispatch` threads are convoying on that mutex -
+    /// measured at 31s of the 37s test05 run, against 17s of actual NFP
+    /// computation. This is a plain thread-local front for it: same keys,
+    /// same `Arc`s, no lock. The shared cache still does the computing, so
+    /// two threads never duplicate one.
+    obstacle_nfp: HashMap<(usize, i64, usize, i64), Option<Arc<CachedNfp>>>,
 }
 
 /// Recomputes a memoised contact score and panics if it moved, when
@@ -1032,9 +1044,14 @@ pub(crate) fn try_place_part_on_sheet_accumulated(
     let mut error = false;
 
     for obstacle in new_obstacles {
-        let Some(cached) = crate::profile::OBSTACLE_NFP_LOOKUP
-            .time(|| cached_obstacle_nfp(cache, &obstacle.polygon, obstacle.source_id, obstacle.rotation, part, part_source_id, part_rotation, config.curve_tolerance))
-        else {
+        let obstacle_key = (obstacle.source_id, crate::cache_key::normalize_rotation(obstacle.rotation), part_source_id, crate::cache_key::normalize_rotation(part_rotation));
+        let Some(cached) = crate::profile::OBSTACLE_NFP_LOOKUP.time(|| {
+            accumulator
+                .obstacle_nfp
+                .entry(obstacle_key)
+                .or_insert_with(|| cached_obstacle_nfp(cache, &obstacle.polygon, obstacle.source_id, obstacle.rotation, part, part_source_id, part_rotation, config.curve_tolerance))
+                .clone()
+        }) else {
             error = true;
             break;
         };
@@ -1282,16 +1299,12 @@ pub(crate) fn try_place_part_on_sheet_accumulated(
         let shiftvector = champion.shiftvector;
         let test_shifted = shift_layered_polygon(part, shiftvector.x, shiftvector.y);
 
-        let mut is_overlapping = has_material_outside_sheet(&test_shifted, sheet);
-        if !is_overlapping {
-            for obstacle in placed {
-                let placed_shifted = shift_layered_polygon(&obstacle.polygon, obstacle.placement.x, obstacle.placement.y);
-                if has_material_overlap(&test_shifted, &placed_shifted) {
-                    is_overlapping = true;
-                    break;
-                }
+        let is_overlapping = crate::profile::OVERLAP_VALIDATE.time(|| {
+            if has_material_outside_sheet(&test_shifted, sheet) {
+                return true;
             }
-        }
+            placed.iter().any(|obstacle| has_material_overlap(&test_shifted, &shift_layered_polygon(&obstacle.polygon, obstacle.placement.x, obstacle.placement.y)))
+        });
 
         if !is_overlapping {
             on_candidates(&trace_candidates(&candidates, Some(champion_idx), part_rotation));
@@ -1439,6 +1452,17 @@ pub fn place_parts(
     // and unused for every other placement type.
     let mut rotation_by_source: HashMap<usize, f64> = HashMap::new();
 
+    // The widest `rotation_steps` can ever be for this run - the plain grid,
+    // or the longest explicit angle list any part rule carries.
+    let max_rotation_slots = config
+        .part_rules
+        .values()
+        .map(|r| r.angles.len())
+        .chain(std::iter::once(config.rotations.max(1) as usize))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+
     let mut cancelled_early = false;
     let mut sheet_idx = 0usize;
     while !parts.is_empty() {
@@ -1458,10 +1482,30 @@ pub fn place_parts(
         fitness += sheet_area;
 
         let mut placed: Vec<PlacedObstacle> = Vec::new();
-        // One accumulator per sheet: `placed` below is append-only for this
-        // sheet's whole scan and starts empty for the next one, which is
-        // exactly `NfpAccumulator`'s contract.
-        let mut nfp_accumulator = NfpAccumulator::default();
+        // One accumulator per sheet *per rotation slot*: `placed` below is
+        // append-only for this sheet's whole scan and starts empty for the
+        // next one, which is exactly `NfpAccumulator`'s contract.
+        //
+        // Split by *angle* rather than shared because every one of the
+        // accumulator's four maps is keyed by a tuple that already contains
+        // the part's rotation, so two angles never touch the same entry -
+        // splitting loses no reuse at all, and it is what lets the rotation
+        // loop below evaluate its angles in parallel.
+        //
+        // By angle and not by position in `rotation_steps`' output: that list
+        // starts at whatever rotation the part already carries, so slot 0 is
+        // a different angle for almost every part, and splitting on it threw
+        // away three quarters of the contact memo's hit rate (measured:
+        // 2.06M repeated candidate positions down to 1.45M, candidate scoring
+        // 14.3s up to 34.4s).
+        //
+        // `Mutex` only because a slice cannot hand out `&mut` at arbitrary
+        // indices; the angles within one part's step list are distinct, so no
+        // two of the parallel tasks below ever want the same lock.
+        // ponytail: uncontended by construction, revisit only if a rotation
+        // rule ever repeats an angle.
+        let mut nfp_accumulators: Vec<std::sync::Mutex<NfpAccumulator>> = Vec::with_capacity(max_rotation_slots);
+        let mut accumulator_slot: HashMap<i64, usize> = HashMap::new();
         // Which slots of `parts` (indices, stable across this sheet's scan
         // since nothing removes elements mid-scan) got placed this pass -
         // NOT which ids: unlike the original's `parts.indexOf(placed[i])` +
@@ -1769,7 +1813,6 @@ pub fn place_parts(
             // cache as everywhere else in this file, so trying
             // `config.rotations` angles here is mostly cache hits after the
             // first few parts of any given shape have been tried.
-            let mut trial_rotation;
             let mut trial_polygon = parts[i].polygon.clone();
             // (score, result, rotation, polygon) of the best rotation seen so
             // far - `result.minarea` is always `CandidateScore::area()`'s raw
@@ -1806,51 +1849,85 @@ pub fn place_parts(
             // rotation search itself targets.
             let neighborhood = tight_fit_neighborhood(sheet, &placed, config.placement_type);
 
-            for (angle, delta) in rotation_steps(config, parts[i].id, parts[i].rotation) {
-                if delta != 0.0 {
-                    trial_polygon = rotate_layered_polygon(&trial_polygon, delta);
-                }
-                trial_rotation = angle;
-                // Checked every iteration, not just once per part: each
-                // iteration is a real Clipper-backed placement attempt
-                // (`try_place_part_on_sheet_with_neighborhood`), so without
-                // this a Stop request could still have to wait out up to
-                // `config.rotations` of them before the caller sees it -
-                // same responsiveness contract as the per-part check above.
-                if should_cancel() {
-                    cancelled_early = true;
-                    break;
-                }
-                if let Some(sheet_nfp) = cached_inner_nfp(cache, sheet, sheet_src, &trial_polygon, parts[i].source_id, trial_rotation, config.curve_tolerance) {
-                    if !sheet_nfp.is_empty() {
-                        let outcome = try_place_part_on_sheet_accumulated(
-                            &trial_polygon,
-                            parts[i].source_id,
-                            trial_rotation,
-                            &sheet_nfp,
-                            sheet,
-                            &placed,
-                            config,
-                            cache,
-                            &|candidates| rotation_traces.lock().expect("single-threaded call, lock never contested").extend_from_slice(candidates),
-                            &neighborhood,
-                            &mut nfp_accumulator,
-                        );
-                        if let Some(result) = outcome.placed() {
-                            // `total_cmp`, not a bare `<`: this codebase treats bare
-                            // float `<` against a possibly-NaN value as a real gap
-                            // elsewhere (see this module's own `Option<f64>` fitness
-                            // handling) - NaN sorts as "never wins" here, not silently
-                            // passed through as an unexamined tie.
-                            let better = match &best {
-                                None => true,
-                                Some((best_score, ..)) => result.minarea.total_cmp(best_score).is_lt(),
-                            };
-                            if better {
-                                best = Some((result.minarea, result, trial_rotation, trial_polygon.clone()));
-                            }
-                        }
+            // The rotations are evaluated in parallel, then reduced in slot
+            // order. See `nfp_accumulators` for why the memo survives this,
+            // and `place_parts`' own doc note for why the parallelism has to
+            // be here rather than one level up.
+            let steps = rotation_steps(config, parts[i].id, parts[i].rotation);
+            // Rotating is a cumulative walk (each `delta` is relative to the
+            // previous angle), so the trial geometry is still built serially -
+            // it is ~0.01s of a 40s run, and doing it up front is what makes
+            // the expensive part independent per slot.
+            let trials: Vec<(f64, LayeredPolygon)> = steps
+                .iter()
+                .map(|&(angle, delta)| {
+                    if delta != 0.0 {
+                        trial_polygon = rotate_layered_polygon(&trial_polygon, delta);
                     }
+                    (angle, trial_polygon.clone())
+                })
+                .collect();
+            // Checked once per part rather than once per rotation now that
+            // the rotations run together: a cancel can no longer be observed
+            // mid-loop, and one part's worth of rotations is the granularity
+            // a Stop request waits out.
+            if should_cancel() {
+                cancelled_early = true;
+                break;
+            }
+            // Resolved serially so the parallel scan below only ever indexes.
+            let slots: Vec<usize> = trials
+                .iter()
+                .map(|&(angle, _)| {
+                    let next = accumulator_slot.len();
+                    let slot = *accumulator_slot.entry(crate::cache_key::normalize_rotation(angle)).or_insert(next);
+                    while nfp_accumulators.len() <= slot {
+                        nfp_accumulators.push(std::sync::Mutex::new(NfpAccumulator::default()));
+                    }
+                    slot
+                })
+                .collect();
+            let outcomes: Vec<Option<(PlaceOnSheetResult, f64, LayeredPolygon)>> = trials
+                .par_iter()
+                .zip(slots.par_iter())
+                .map(|((angle, polygon), &slot)| {
+                    let mut accumulator = nfp_accumulators[slot].lock().expect("one angle per task, lock never contested");
+                    let accumulator = &mut *accumulator;
+                    let sheet_nfp = cached_inner_nfp(cache, sheet, sheet_src, polygon, parts[i].source_id, *angle, config.curve_tolerance)?;
+                    if sheet_nfp.is_empty() {
+                        return None;
+                    }
+                    let outcome = try_place_part_on_sheet_accumulated(
+                        polygon,
+                        parts[i].source_id,
+                        *angle,
+                        &sheet_nfp,
+                        sheet,
+                        &placed,
+                        config,
+                        cache,
+                        &|candidates| rotation_traces.lock().expect("lock never poisoned").extend_from_slice(candidates),
+                        &neighborhood,
+                        accumulator,
+                    );
+                    outcome.placed().map(|result| (result, *angle, polygon.clone()))
+                })
+                .collect();
+
+            // Reduced in slot order, not in completion order, so the
+            // first-wins tie-break below is exactly what the serial loop gave.
+            for (result, angle, polygon) in outcomes.into_iter().flatten() {
+                // `total_cmp`, not a bare `<`: this codebase treats bare
+                // float `<` against a possibly-NaN value as a real gap
+                // elsewhere (see this module's own `Option<f64>` fitness
+                // handling) - NaN sorts as "never wins" here, not silently
+                // passed through as an unexamined tie.
+                let better = match &best {
+                    None => true,
+                    Some((best_score, ..)) => result.minarea.total_cmp(best_score).is_lt(),
+                };
+                if better {
+                    best = Some((result.minarea, result, angle, polygon));
                 }
             }
 
@@ -1960,13 +2037,13 @@ pub fn place_parts(
             let places_anchor = |b: &crate::banded::BandedSheet| {
                 anchor_source_id.is_none_or(|anchor| b.consumed.iter().filter_map(|&i| parts_before_sheet.get(i)).any(|p| p.source_id == anchor))
             };
-            let banded = crate::banded::pack_sheet(usable, &parts_before_sheet, config.curve_tolerance, None, &config.part_rules).and_then(|free| {
+            let banded = crate::profile::BANDED_PACK.time(|| crate::banded::pack_sheet(usable, &parts_before_sheet, config.curve_tolerance, None, &config.part_rules).and_then(|free| {
                 if places_anchor(&free) {
                     Some(free)
                 } else {
                     crate::banded::pack_sheet(usable, &parts_before_sheet, config.curve_tolerance, anchor_source_id, &config.part_rules)
                 }
-            });
+            }));
             if let Some(banded) = banded {
                 // Scored on the *same* measure the greedy pass reports -
                 // `polygon_material_area`, holes subtracted - not on the band

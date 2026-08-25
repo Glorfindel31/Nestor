@@ -207,6 +207,73 @@ const MAX_UNIT_CACHE_ENTRIES: usize = 4096;
 
 static UNIT_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<UnitCacheKey, Vec<Unit>>>> = std::sync::LazyLock::new(Default::default);
 
+/// Band *plans* already searched, keyed by everything the search reads.
+///
+/// `search` is a depth-first walk of up to `NODE_BUDGET` nodes and it was the
+/// single most expensive thing in the engine - 38s of the ~50s `pack_sheet`
+/// spent per 800-part run, at ~96ms a call. It is also called once per sheet
+/// per individual per generation, and the GA only permutes part *order*: the
+/// pool a sheet starts from is very often one an earlier individual already
+/// searched from.
+///
+/// Only `Plan::bands` is cached, never the placements. `materialise` re-runs
+/// against the caller's own `parts`/`Pool`, so the `consumed` indices always
+/// belong to this call and no index remapping is involved.
+///
+/// The key is what `search` can actually see: the sheet box, the anchor
+/// filter, and per shape - **in first-seen order, because `build_catalogue`
+/// walks `parts` and takes the first part of each `source_id`** - that
+/// shape's own `unit_cache_key` plus how many copies the pool holds.
+type PlanCacheKey = (u64, u64, Option<usize>, Vec<(UnitCacheKey, usize)>);
+
+static PLAN_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<PlanCacheKey, Vec<f64>>>> = std::sync::LazyLock::new(Default::default);
+
+/// The shape fingerprints `build_catalogue` reads, in the order it reads
+/// them - the key both caches below are built on.
+fn shape_fingerprints(parts: &[NestPart], curve_tolerance: f64, rules: &PartRules) -> Vec<(UnitCacheKey, usize)> {
+    let counts = Pool::new(parts);
+    let mut shapes: Vec<(UnitCacheKey, usize)> = Vec::new();
+    let mut seen: Vec<usize> = Vec::new();
+    for part in parts {
+        if seen.contains(&part.source_id) {
+            continue;
+        }
+        seen.push(part.source_id);
+        let available = counts.available(part.source_id);
+        // `base_rotation` 0.0: the catalogue is built at every `ANGLES` entry
+        // off this same part, so the base is a constant across them and the
+        // part's own carried rotation is what distinguishes one key from
+        // another - which `unit_cache_key` already folds in.
+        shapes.push((unit_cache_key(part, 0.0, available, curve_tolerance, rules), available));
+    }
+    shapes
+}
+
+fn plan_cache_key(sheet_bounds: Bounds, shapes: &[(UnitCacheKey, usize)], anchor: Option<usize>) -> PlanCacheKey {
+    (sheet_bounds.width.to_bits(), sheet_bounds.height.to_bits(), anchor, shapes.to_vec())
+}
+
+/// `build_catalogue`'s own output, cached whole.
+///
+/// `UNIT_CACHE` already stops the Minkowski work from repeating, but the
+/// catalogue still paid for a full `Vec<Unit>` clone out of that cache per
+/// shape per base angle, once per `pack_sheet` - 13s of an 800-part run.
+/// An `Arc` hands the same list back instead.
+static CATALOGUE_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<Vec<(UnitCacheKey, usize)>, std::sync::Arc<Vec<Unit>>>>> = std::sync::LazyLock::new(Default::default);
+
+fn cached_catalogue(parts: &[NestPart], curve_tolerance: f64, rules: &PartRules, shapes: &[(UnitCacheKey, usize)]) -> std::sync::Arc<Vec<Unit>> {
+    if let Some(hit) = CATALOGUE_CACHE.lock().ok().and_then(|c| c.get(shapes).cloned()) {
+        return hit;
+    }
+    let built = std::sync::Arc::new(build_catalogue(parts, curve_tolerance, rules));
+    if let Ok(mut cache) = CATALOGUE_CACHE.lock() {
+        if cache.len() < MAX_UNIT_CACHE_ENTRIES {
+            cache.insert(shapes.to_vec(), std::sync::Arc::clone(&built));
+        }
+    }
+    built
+}
+
 /// Rewrites every member's angle from "relative to the polygon we were
 /// handed" to absolute - the angle from the part's *original* outline, which
 /// is what a `PlacedPart::rotation` means to everything downstream.
@@ -673,10 +740,17 @@ pub fn pack_sheet(sheet_bounds: Bounds, parts: &[NestPart], curve_tolerance: f64
     if parts.is_empty() || sheet_bounds.width <= 0.0 || sheet_bounds.height <= 0.0 {
         return None;
     }
-    let mut catalogue = build_catalogue(parts, curve_tolerance, rules);
-    if let Some(anchor) = anchor {
-        catalogue.retain(|u| u.source_id == anchor);
-    }
+    let shapes = crate::profile::BANDED_CATALOGUE.time(|| shape_fingerprints(parts, curve_tolerance, rules));
+    let full_catalogue = crate::profile::BANDED_CATALOGUE.time(|| cached_catalogue(parts, curve_tolerance, rules, &shapes));
+    // Only the anchored pass needs its own list; the common case borrows.
+    let anchored: Vec<Unit>;
+    let catalogue: &[Unit] = match anchor {
+        Some(anchor) => {
+            anchored = full_catalogue.iter().filter(|u| u.source_id == anchor).cloned().collect();
+            &anchored
+        }
+        None => &full_catalogue,
+    };
     if catalogue.is_empty() {
         return None;
     }
@@ -686,7 +760,7 @@ pub fn pack_sheet(sheet_bounds: Bounds, parts: &[NestPart], curve_tolerance: f64
     // only as a disappointing sheet count.
     if std::env::var("NEST_BANDED").is_ok_and(|v| v != "0") {
         eprintln!("banded: sheet {:.1}x{:.1}", sheet_bounds.width, sheet_bounds.height);
-        for u in &catalogue {
+        for u in catalogue {
             eprintln!(
                 "  src {:>2} x{} {:>8.1}x{:<8.1} density {:.3}  across {}  bands {}",
                 u.source_id,
@@ -706,14 +780,35 @@ pub fn pack_sheet(sheet_bounds: Bounds, parts: &[NestPart], curve_tolerance: f64
     let mut heights: Vec<f64> = catalogue.iter().filter(|u| u.width <= sheet_bounds.width && u.height <= sheet_bounds.height).map(|u| u.height).collect();
     heights.sort_by(f64::total_cmp);
     heights.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
-    for height in heights {
-        let plan = uniform_plan(sheet_bounds, parts, &catalogue, height);
-        if plan.area > best.area {
-            best = plan;
+    crate::profile::BANDED_UNIFORM.time(|| {
+        for height in heights {
+            let plan = uniform_plan(sheet_bounds, parts, &catalogue, height);
+            if plan.area > best.area {
+                best = plan;
+            }
+        }
+    });
+    let plan_key = plan_cache_key(sheet_bounds, &shapes, anchor);
+    match PLAN_CACHE.lock().ok().and_then(|c| c.get(&plan_key).cloned()) {
+        Some(bands) => {
+            crate::profile::PLAN_CACHE_HIT.add(1);
+            // `area` is only ever compared against other candidate plans
+            // during the search; a cached plan skips that comparison
+            // entirely, and `materialise` recomputes the real area below.
+            best = Plan { bands, area: 0.0 };
+        }
+        None => {
+            let mut budget = NODE_BUDGET;
+            crate::profile::BANDED_SEARCH.time(|| search(sheet_bounds, parts, &catalogue, &mut pool, sheet_bounds.height, &mut Plan::default(), &mut best, &mut budget));
+            crate::profile::PLAN_CACHE_MISS.add(1);
+            if let Ok(mut cache) = PLAN_CACHE.lock() {
+                // Same cap policy as `UNIT_CACHE`: stop growing, keep what is there.
+                if cache.len() < MAX_UNIT_CACHE_ENTRIES {
+                    cache.insert(plan_key, best.bands.clone());
+                }
+            }
         }
     }
-    let mut budget = NODE_BUDGET;
-    search(sheet_bounds, parts, &catalogue, &mut pool, sheet_bounds.height, &mut Plan::default(), &mut best, &mut budget);
     if best.bands.is_empty() {
         return None;
     }

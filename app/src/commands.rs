@@ -504,13 +504,9 @@ pub fn repack_sheet(request: RepackSheetRequest) -> Result<RepackSheetResponse, 
     // command never read it at all), since repack::repack_sheet's own
     // dispatch::run dispatches its GA generations via rayon::par_iter,
     // which runs on rayon's uncapped global pool absent an explicit scope.
-    let pool = if request.config.max_threads > 0 {
-        Some(
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(request.config.max_threads)
-                .build()
-                .map_err(|e| format!("couldn't build a {}-thread pool: {e}", request.config.max_threads))?,
-        )
+    let threads = effective_threads(request.config.max_threads);
+    let pool = if threads > 0 {
+        Some(rayon::ThreadPoolBuilder::new().num_threads(threads).build().map_err(|e| format!("couldn't build a {threads}-thread pool: {e}"))?)
     } else {
         None
     };
@@ -608,6 +604,28 @@ struct PreparedNestInputs {
 /// limits) - just enough to stop a fat-fingered config from pinning a CPU
 /// core on an effectively-unkillable job before the user notices there's a
 /// Stop button to press.
+
+/// How many threads a `max_threads` setting should actually get.
+///
+/// `0` means uncapped. Anything above the machine's own thread count is
+/// clamped down to it, because asking for more is never faster and is
+/// measurably slower: on a 6-core/12-thread box, the 800-part benchmark runs
+/// 22.8s at 8 threads, 24.0s uncapped, 25.5s at 100 and **33.5s at 256** -
+/// identical nests every time, just more context switching, and past the core
+/// count a thread can be preempted while holding one of the shared NFP/unit/
+/// band-plan cache locks and stall every other thread behind it.
+///
+/// Clamped rather than rejected so an existing saved `config.json` asking for
+/// 100 keeps working - it just behaves as "all of them", which is what it
+/// meant. The `<= 256` validation above stays where it is for the same
+/// reason.
+fn effective_threads(max_threads: usize) -> usize {
+    if max_threads == 0 {
+        return 0;
+    }
+    max_threads.min(std::thread::available_parallelism().map_or(usize::MAX, std::num::NonZeroUsize::get))
+}
+
 fn validate_nest_config(config: &NestConfigDto) -> Result<(), String> {
     if config.rotations == 0 || config.rotations > 360 {
         return Err("rotations must be between 1 and 360".into());
@@ -857,59 +875,10 @@ pub fn audit_nest(request: crate::dto::AuditRequest) -> Result<crate::dto::Audit
     Ok((&audit(&sheets)).into())
 }
 
-/// Turns an audit result into the block the PDF prints.
-///
-/// An audit that failed to *run* prints as an explicit "could not be checked"
-/// rather than being omitted: a missing section reads as "nothing to report",
-/// which is exactly the wrong thing to infer.
-///
-/// The issue list is capped - a badly broken nest can produce hundreds, and a
-/// summary page that becomes a fault listing stops being a summary.
-fn report_audit(result: Result<crate::dto::AuditReportDto, String>) -> Option<geometry::pdf_export::ReportAudit> {
-    const MAX_LISTED: usize = 12;
-    let report = match result {
-        Ok(report) => report,
-        Err(e) => {
-            return Some(geometry::pdf_export::ReportAudit {
-                passed: false,
-                headline: format!("NOT CHECKED - the manufacturability check could not run ({e})"),
-                issues: Vec::new(),
-            })
-        }
-    };
-
-    let headline = if !report.passed {
-        format!("FAILED - {} fatal issue(s), {} warning(s). DO NOT CUT.", report.fatal_count, report.warning_count)
-    } else if report.warning_count > 0 {
-        format!("PASSED with {} warning(s) - cuttable, but not exactly as configured.", report.warning_count)
-    } else {
-        "PASSED - no overlaps, every piece on its sheet, all clearances met.".to_string()
-    };
-
-    let issues = report
-        .issues
-        .iter()
-        .take(MAX_LISTED)
-        .map(|i| {
-            let kind = match i.kind.as_str() {
-                "overlap" => "OVERLAP",
-                "outside_sheet" => "OFF THE SHEET",
-                "below_spacing" => "TOO CLOSE",
-                "outside_margin" => "INSIDE MARGIN",
-                other => other,
-            };
-            let ids = i.part_ids.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(" + ");
-            format!("{kind} - sheet {}, {ids}", i.sheet_index + 1)
-        })
-        .chain((report.issues.len() > MAX_LISTED).then(|| format!("...and {} more", report.issues.len() - MAX_LISTED)))
-        .collect();
-
-    Some(geometry::pdf_export::ReportAudit { passed: report.passed, headline, issues })
-}
-
-/// Writes the PDF job report: a summary page plus one to-scale page per
-/// sheet. Reuses `build_export_layouts` verbatim, so the report draws
-/// exactly what a DXF/SVG export of the same result would contain.
+/// Writes the PDF job report: the Part-List / Sheet-List / Remnant Info
+/// summary, then one to-scale page per distinct sheet layout. Reuses
+/// `build_export_layouts` verbatim, so the report draws exactly what a
+/// DXF/SVG export of the same result would contain.
 ///
 /// `include_unplaced` is forced off - never-placed parts belong in the
 /// summary's "not placed" count, not packed into a fake extra sheet page.
@@ -917,24 +886,19 @@ pub fn export_report(path: &str, request: ReportRequest) -> Result<(), String> {
     let mut export = request.export;
     export.include_unplaced = false;
 
-    // Run the audit here, from the same inputs, rather than accepting a
-    // verdict from the caller: a passed-in result could describe an
-    // arrangement edited since it was computed, and a report that certifies
-    // the wrong nest is worse than one that certifies nothing. Same reasoning
-    // the pdf module already applies to its derived numbers - "the printed
-    // numbers can never disagree with the printed picture".
-    let audit = audit_nest(crate::dto::AuditRequest {
-        sheets: export.sheets.clone(),
-        placements: export.placements.clone(),
-        parts_by_id: export.parts_by_id.clone(),
-        config: request.config.clone(),
-    });
-
+    // No audit is run here any more: the report is the reference tool's three
+    // tables and nothing else, so there is no verdict section to fill. The
+    // check still runs after every nest and shows as the RESULT badge - this
+    // only stops the report paying for a second one it would not print.
     let layouts = build_export_layouts(export)?;
     let config = &request.config;
     let meta = geometry::pdf_export::ReportMeta {
-        title: request.title.unwrap_or_else(|| "Nesting job report".to_string()),
-        generated: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+        // Headed by the output file's own name, like the reference report -
+        // "nestresult.pdf" prints as "nestresult".
+        title: request
+            .title
+            .unwrap_or_else(|| std::path::Path::new(path).file_stem().map_or_else(|| "nestresult".into(), |s| s.to_string_lossy().into_owned())),
+        generated: chrono::Local::now().format("%b %d, %Y %I:%M %p").to_string(),
         spacing: config.spacing,
         parts: request
             .parts
@@ -946,17 +910,6 @@ pub fn export_report(path: &str, request: ReportRequest) -> Result<(), String> {
                 shape: p.polygon.clone().into(),
             })
             .collect(),
-        settings: vec![
-            ("Margin".to_string(), format!("{} mm", config.margin)),
-            ("Spacing".to_string(), format!("{} mm", config.spacing)),
-            ("Kerf".to_string(), format!("{} mm", config.kerf)),
-            ("Runs".to_string(), config.runs.to_string()),
-            ("Starting rotations".to_string(), config.rotations.to_string()),
-            ("Mirroring".to_string(), if config.mirror { "allowed" } else { "off" }.to_string()),
-            ("Curve tolerance".to_string(), format!("{} mm", config.curve_tolerance)),
-            ("Seed".to_string(), config.seed.to_string()),
-        ],
-        audit: report_audit(audit),
     };
 
     let bytes = geometry::pdf_export::export_report(&layouts, &meta);
@@ -1164,6 +1117,7 @@ pub fn run_nest_with_progress(
     // `build_global()`, which is exactly why this can't just be threads=0's
     // shared pool, but a fresh `ThreadPoolBuilder` still only needs building
     // once here, reused by every run's `pool.install` below).
+    let max_threads = effective_threads(max_threads);
     let pool = if max_threads > 0 {
         Some(rayon::ThreadPoolBuilder::new().num_threads(max_threads).build().map_err(|e| format!("couldn't build a {max_threads}-thread pool: {e}"))?)
     } else {
@@ -3247,10 +3201,13 @@ mod tests {
         assert!(text.starts_with("%PDF-"));
         assert!(text.trim_end().ends_with("%%EOF"));
         assert!(text.contains("Job 42"), "the caller's title is the heading");
-        assert!(text.contains("Utilisation: 2.0%"), "utilisation is measured off the drawn geometry");
-        assert!(text.contains("Pieces placed: 2 of 2"));
+        assert!(text.contains("Part-List") && text.contains("Sheet-List"), "the reference report's tables");
         assert!(text.contains("bracket"), "the piece table is printed");
-        assert!(text.contains("Spacing"), "the settings the run used are printed");
+        // Two 10mm parts on a 100mm sheet: 200 of 10000 = 2%, measured off the
+        // drawn geometry rather than passed in.
+        assert!(text.contains("(2.00) Tj"), "the sheet's utilisation column, in:
+{text}");
+        assert!(text.contains("(2) Tj"), "ordered and nested counts");
         std::fs::remove_file(&path).ok();
     }
 
