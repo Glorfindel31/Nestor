@@ -341,7 +341,14 @@ fn placements_are_reported_at_an_absolute_rotation() {
 /// band fits, and the sheet takes **52**; over the 250-part job that is 6
 /// sheets against 5, which is what the commercial nester gets.
 ///
-/// Reverting `shell_of`'s point-count branch to always hull fails this at 48.
+/// **54, not 52,** since `pack_sheet` seeds its search with the best uniform
+/// band plan: nine 160-tall bands of three pairs each is the answer, and the
+/// depth-first search alone never backtracked far enough to try it. 54 is also
+/// exactly what the commercial nester puts on this sheet (81.98%), so this is
+/// the real ceiling and not a lucky number.
+///
+/// Reverting `shell_of`'s point-count branch to always hull fails this at 48;
+/// dropping the `uniform_plan` seed fails it at 52.
 #[test]
 fn a_concave_part_pairs_on_its_outline_not_its_hull() {
     const JOB_SPACING: f64 = 5.0;
@@ -363,7 +370,7 @@ fn a_concave_part_pairs_on_its_outline_not_its_hull() {
 
     // The bounding-box ceiling is 48 - see the doc comment. Anything at or
     // below it means the interlock was thrown away, whatever the cause.
-    assert!(result.placed.len() >= 52, "expected the outline pairing's 52 parts, got {} (48 means it paired on the hull)", result.placed.len());
+    assert!(result.placed.len() >= 54, "expected 54 parts, got {} (52 means the uniform-plan seed is gone, 48 means it paired on the hull)", result.placed.len());
 
     // A denser sheet is only worth having if it is a legal one.
     let placed = materialise(&parts, &result);

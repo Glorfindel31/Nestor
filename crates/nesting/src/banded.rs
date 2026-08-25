@@ -651,7 +651,18 @@ pub fn pack_sheet(sheet_bounds: Bounds, parts: &[NestPart], curve_tolerance: f64
         }
     }
     let mut pool = Pool::new(parts);
+    // Seeded with the best single-height plan before the search, because the
+    // search cannot be trusted to find it - see `uniform_plan`.
     let mut best = Plan::default();
+    let mut heights: Vec<f64> = catalogue.iter().filter(|u| u.width <= sheet_bounds.width && u.height <= sheet_bounds.height).map(|u| u.height).collect();
+    heights.sort_by(f64::total_cmp);
+    heights.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    for height in heights {
+        let plan = uniform_plan(sheet_bounds, parts, &catalogue, height);
+        if plan.area > best.area {
+            best = plan;
+        }
+    }
     let mut budget = NODE_BUDGET;
     search(sheet_bounds, parts, &catalogue, &mut pool, sheet_bounds.height, &mut Plan::default(), &mut best, &mut budget);
     if best.bands.is_empty() {
@@ -716,6 +727,36 @@ fn search(sheet: Bounds, parts: &[NestPart], catalogue: &[Unit], pool: &mut Pool
             pool.give_back(parts[index].source_id, index);
         }
     }
+}
+
+/// The best plan that repeats one band height for the whole sheet.
+///
+/// `search` is depth-first over band heights in ascending order and capped by
+/// `NODE_BUDGET`, so on a sheet that takes nine bands it spends the entire
+/// budget inside the shortest band's subtree and never backtracks far enough
+/// to try "the tallest band, nine times". That is the plain grid answer, it is
+/// often the best one, and losing it is expensive: `probe_bitten.dxf`
+/// (1500x1500, spacing 5) came out at 52 parts a sheet where a uniform
+/// 160-tall plan holds **54**, which is exactly the commercial nester's
+/// number. Seeding costs one `fill_band` per band per distinct height - a
+/// couple of dozen calls of pure arithmetic per sheet - and the search can
+/// then only improve on it.
+fn uniform_plan(sheet: Bounds, parts: &[NestPart], catalogue: &[Unit], height: f64) -> Plan {
+    let mut pool = Pool::new(parts);
+    let mut plan = Plan::default();
+    let mut height_left = sheet.height;
+    while height <= height_left + f64::EPSILON {
+        let mut placed = Vec::new();
+        let mut consumed = Vec::new();
+        fill_band(sheet, 0.0, height, parts, catalogue, &mut pool, &mut placed, &mut consumed);
+        if consumed.is_empty() {
+            break;
+        }
+        plan.area += consumed.iter().filter_map(|&i| parts.get(i)).map(|p| polygon_area(&p.polygon.points).abs()).sum::<f64>();
+        plan.bands.push(height);
+        height_left -= height;
+    }
+    plan
 }
 
 /// Replays a chosen band sequence to produce the real placements.

@@ -270,12 +270,29 @@ pub fn run_float(app: &mut App, ctx: &egui::Context) {
                     app.worker.cancel.cancel();
                     app.run_status.ok(app.t("run_status_stopped"));
                 }
-            } else if ui
-                .add_enabled(!app.shapes.is_empty(), big(RichText::new(app.t("btn_run")).color(accent)))
-                .on_hover_text(super::keys::hint(app.t("btn_run_tooltip"), "Ctrl+R"))
-                .clicked()
-            {
-                app.start_run();
+            } else {
+                // **What this search is about to cost, before the wait rather
+                // than after it.** `runs` raises rotations, population and
+                // generations together, so the basic panel's friendliest knob
+                // is also the one that quietly turns a 47-second job into a
+                // ten-minute one for the same answer - see
+                // `ConfigForm::search_cost_multiple`. Shown only once the
+                // settings are actually above the defaults, so the normal case
+                // stays uncluttered, and coloured once it is expensive enough
+                // to be worth a second look rather than at any increase.
+                let cost = app.cfg.search_cost_multiple();
+                if cost > 1.05 {
+                    let text = super::i18n::tv(app.prefs.lang, "search_cost", &[("n", &format!("{cost:.0}"))]);
+                    let colour = if cost >= 4.0 { theme::ERROR } else { theme::DIM };
+                    ui.label(RichText::new(text).color(colour).small()).on_hover_text(app.t("search_cost_tooltip"));
+                }
+                if ui
+                    .add_enabled(!app.shapes.is_empty(), big(RichText::new(app.t("btn_run")).color(accent)))
+                    .on_hover_text(super::keys::hint(app.t("btn_run_tooltip"), "Ctrl+R"))
+                    .clicked()
+                {
+                    app.start_run();
+                }
             }
         });
 

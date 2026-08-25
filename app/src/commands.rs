@@ -196,6 +196,41 @@ pub fn save_best_result_if_better(candidate: &BestResultDto) -> Result<(), Strin
     Ok(())
 }
 
+/// Turns every imported shape so its minimum-area bounding rectangle sits
+/// axis-aligned.
+///
+/// **A part must nest the same however its drawing happened to be saved.** The
+/// rotation grid is `k * 360/rotations` measured from the file's own
+/// orientation, so a part drawn on the diagonal is only ever offered diagonal
+/// placements, and the band packer's two base orientations are 0 and 90 for
+/// the same reason. Measured on `nestTest01.dxf` x250 (1500x1500, spacing 5):
+/// as drawn it nests to 11 sheets at 23 parts a sheet; the identical geometry
+/// re-saved from CAD rotated by 37 degrees nests to 13 sheets at 20 a sheet.
+/// The commercial nester returns 11 for both.
+///
+/// Applied at import rather than inside the nest so there is exactly one
+/// outline per part everywhere - canvas, library, nest and export all read the
+/// same points, and a placement's rotation stays absolute against them. The
+/// absolute angle a part is *drawn* at carries no meaning downstream: nesting
+/// is free to turn it anyway, and the exported profile is the same shape.
+///
+/// A shape already axis-aligned reports 0 and is returned untouched (see
+/// `min_area_rect_angle`'s own test), so this is a no-op on every drawing that
+/// was already right.
+fn normalise_orientation(tree: Vec<geometry::dxf_import::LayeredPolygon>) -> Vec<geometry::dxf_import::LayeredPolygon> {
+    tree.into_iter()
+        .map(|shape| {
+            let angle = geometry::hull_polygon::min_area_rect_angle(&shape.points);
+            if angle.abs() < 1e-9 {
+                shape
+            } else {
+                geometry::dxf_import::rotate_layered_polygon(&shape, angle)
+            }
+        })
+        .collect()
+}
+
+
 /// Reads a DXF file from disk and returns its closed profiles as a
 /// parent/hole tree (`geometry::dxf_import::build_polygon_tree`) - the
 /// frontend is expected to turn these into `PartDto`s (assigning quantities)
@@ -224,7 +259,7 @@ pub fn import_dxf(path: &str, curve_tolerance: f64) -> Result<Vec<PolygonDto>, S
     let mut tree = geometry::dxf_import::build_polygon_tree(flat);
     geometry::dxf_import::attach_texts(&mut tree, texts);
 
-    Ok(tree.iter().map(PolygonDto::from).collect())
+    Ok(normalise_orientation(tree).iter().map(PolygonDto::from).collect())
 }
 
 /// Reads an SVG file from disk and returns its closed profiles as a
@@ -254,7 +289,7 @@ pub fn import_svg(path: &str, curve_tolerance: f64, unit_override: Option<&str>)
     let flat = geometry::svg_import::parse_svg(&text, curve_tolerance, unit_override)?;
     let guessed = unit_override.is_none() && geometry::svg_import::size_is_guessed(&text);
     let tree = geometry::dxf_import::build_polygon_tree(flat);
-    Ok((tree.iter().map(PolygonDto::from).collect(), guessed))
+    Ok((normalise_orientation(tree).iter().map(PolygonDto::from).collect(), guessed))
 }
 
 /// Builds the `Vec<SheetLayout>` both `export_dxf`/`export_svg` write out -
@@ -360,6 +395,21 @@ pub fn export_svg(path: &str, request: ExportRequest) -> Result<(), String> {
     std::fs::write(path, svg).map_err(|e| format!("couldn't write {path}: {e}"))
 }
 
+/// Exact-geometry identity for a part, used to group quantity-copies back
+/// under one NFP-cache source id in `repack_sheet`. Bit patterns, not an
+/// epsilon compare: copies of one shape are `clone()`s, so they are equal to
+/// the bit and anything that isn't is a different shape as far as the cache
+/// is concerned. Holes are included - two parts sharing an outline but not
+/// their interior features have different obstacle NFPs.
+fn shape_key(poly: &LayeredPolygon) -> Vec<(u64, u64)> {
+    let mut key: Vec<(u64, u64)> = poly.points.iter().map(|p| (p.x.to_bits(), p.y.to_bits())).collect();
+    for child in &poly.children {
+        key.push((u64::MAX, u64::MAX)); // separator, so [a][b] and [ab] can't collide
+        key.extend(shape_key(child));
+    }
+    key
+}
+
 /// The manual, click-a-sheet counterpart to `run_nest_with_progress`'s
 /// automatic `cleanup_threshold_percent` pass - both backed by the same
 /// `nesting::repack::repack_sheet`. Takes just one sheet's worth of state
@@ -389,11 +439,22 @@ pub fn repack_sheet(request: RepackSheetRequest) -> Result<RepackSheetResponse, 
         })
         .collect::<Result<_, &str>>()?;
 
-    // A one-off manual repack has no run-wide source_id grouping to reuse -
-    // each id stands for itself (fine: repack_sheet gets a fresh NfpCache
-    // per call regardless, so there's no cross-run cache benefit being left
-    // on the table by not threading the original run's shape_ids through).
-    let shape_ids: HashMap<usize, usize> = request.placement.parts.iter().map(|p| (p.id, p.id)).collect();
+    // A one-off manual repack has no run-wide source_id grouping to reuse, so
+    // it derives one from the geometry it was handed. This used to map every
+    // id to itself, on the reasoning that a fresh NfpCache per call leaves no
+    // *cross-call* benefit on the table - true, and beside the point: the
+    // cache is keyed by source_id (`placement::cached_inner_nfp`), so within
+    // a single call N copies of one shape were N distinct keys and paid for N
+    // identical inner/outer NFP computations, per rotation, per generation.
+    // Copies of one shape are exact clones (`dto::expand_parts`), so equal
+    // geometry is a sound grouping key; a mirrored copy is genuinely
+    // different geometry and correctly lands in its own group.
+    let shape_ids: HashMap<usize, usize> = {
+        let mut ids: Vec<usize> = parts_by_id.keys().copied().collect();
+        ids.sort_unstable(); // lowest id in each group wins, so the map is deterministic
+        let mut first_with_shape: HashMap<Vec<(u64, u64)>, usize> = HashMap::new();
+        ids.iter().map(|&id| (id, *first_with_shape.entry(shape_key(&parts_by_id[&id])).or_insert(id))).collect()
+    };
 
     // `sheet` above is always a *local*, single-sheet slice from here on
     // (`std::slice::from_ref(&sheet)`) - `recompute_totals` indexes its
@@ -987,8 +1048,10 @@ fn to_placements_dto(placements: Vec<nesting::placement::SheetPlacement>) -> Vec
 /// growth, not anything self-tuning - simple and predictable beats clever
 /// here; revisit with real multi-job benchmark data if it proves too
 /// aggressive/conservative in practice.
-const RUN_POPULATION_STEP: usize = 4;
-const RUN_GENERATIONS_STEP: usize = 5;
+/// `pub` so `ui::state::ConfigForm::search_cost_multiple` can price a run
+/// with the real numbers instead of a second, hand-synced copy of them.
+pub const RUN_POPULATION_STEP: usize = 4;
+pub const RUN_GENERATIONS_STEP: usize = 5;
 
 /// This run's rotations/population_size/generations, escalated from
 /// `request.config`'s own values (this escalation's *starting* point,
@@ -1839,6 +1902,25 @@ mod tests {
                 RunNestRequest { sheets: vec![square_dto(100.0)], parts: vec![part(square_dto(10.0), 1)], config: cfg };
             assert!(run_nest(request).is_err(), "margin={margin} spacing={spacing} should be rejected");
         }
+    }
+
+    /// A manual repack's whole NFP-cache dedupe rides on `shape_key`: if
+    /// quantity-copies stop collapsing to one source id, every copy pays for
+    /// its own identical NFP again and the button goes back to taking
+    /// minutes. The inequality half matters just as much - over-grouping two
+    /// genuinely different shapes would hand the engine one shape's NFP for
+    /// the other, which is a wrong layout, not a slow one.
+    #[test]
+    fn shape_key_groups_identical_copies_and_separates_different_geometry() {
+        let plain: LayeredPolygon = square_dto(10.0).into();
+        let clone: LayeredPolygon = square_dto(10.0).into();
+        assert_eq!(shape_key(&plain), shape_key(&clone), "quantity-copies of one shape must share a key");
+
+        let bigger: LayeredPolygon = square_dto(20.0).into();
+        assert_ne!(shape_key(&plain), shape_key(&bigger), "a different outline must not be grouped");
+
+        let with_hole = LayeredPolygon { children: vec![square_dto(2.0).into()], ..square_dto(10.0).into() };
+        assert_ne!(shape_key(&plain), shape_key(&with_hole), "a hole changes the obstacle NFP, so it must change the key");
     }
 
     /// Regression test: `repack_sheet` used to only check
@@ -2707,6 +2789,114 @@ mod tests {
         assert_eq!(polygons[0].texts[0].value, "PART-001");
         assert_eq!(polygons[0].texts[0].position.x, 5.0);
         assert_eq!(polygons[0].texts[0].position.y, 5.0);
+    }
+
+    /// **The same part drawn on the diagonal has to import as the same part.**
+    ///
+    /// The rotation grid a nest searches is `k * 360/rotations` from the file's
+    /// own orientation, so before `normalise_orientation` a part saved out of
+    /// CAD at an angle was only ever offered angled placements.
+    /// `nestTest01.dxf` x250 (1500x1500, spacing 5) nests to 11 sheets at 23
+    /// parts a sheet as drawn, and to 13 at 20 when the identical geometry is
+    /// re-saved rotated by 37 degrees. The commercial nester returns 11 either
+    /// way.
+    ///
+    /// Rotating the fixture here rather than committing a second copy of it
+    /// keeps the two provably the same shape.
+    #[test]
+    fn a_part_drawn_at_an_angle_imports_at_the_same_orientation_as_one_drawn_square() {
+        use dxf::entities::{Entity, EntityCommon, EntityType, LwPolyline};
+        use dxf::LwPolylineVertex;
+
+        let square = import_dxf("../tests/fixtures/nestTest01.dxf", 0.3).expect("fixture should parse");
+        let outline = &square[0].points;
+
+        let (sin, cos) = 37.0_f64.to_radians().sin_cos();
+        let mut poly = LwPolyline { vertices: Vec::new(), ..Default::default() };
+        poly.set_is_closed(true);
+        for p in outline {
+            poly.vertices.push(LwPolylineVertex { x: p.x * cos - p.y * sin, y: p.x * sin + p.y * cos, ..Default::default() });
+        }
+        let mut turned = Drawing::new();
+        turned.header.version = dxf::enums::AcadVersion::R2000;
+        turned.add_entity(Entity { common: EntityCommon { layer: "CUT".to_string(), ..Default::default() }, specific: EntityType::LwPolyline(poly) });
+
+        let out_path = std::env::temp_dir().join("rustynesting_import_rotation_test.dxf");
+        turned.save_file(out_path.to_str().unwrap()).expect("should write test fixture");
+        let diagonal = import_dxf(out_path.to_str().unwrap(), 0.3).expect("rotated fixture should parse");
+        let _ = std::fs::remove_file(&out_path);
+
+        let bounds = |pts: &[crate::dto::PointDto]| {
+            let pts: Vec<geometry::point::Point> = pts.iter().map(|q| geometry::point::Point::new(q.x, q.y)).collect();
+            geometry::polygon::get_polygon_bounds(&pts).expect("profile has points")
+        };
+        let (want, got) = (bounds(outline), bounds(&diagonal[0].points));
+        // Either way round: a minimum-area rectangle maps onto itself every
+        // quarter turn, so "square to the axes" is all that is being claimed
+        // here - which of the two the part lands in is the rotation grid's
+        // business and it searches both.
+        assert!(
+            (want.width - got.width).abs() < 0.01 && (want.height - got.height).abs() < 0.01
+                || (want.width - got.height).abs() < 0.01 && (want.height - got.width).abs() < 0.01,
+            "the diagonal copy imported as {:.2}x{:.2} against the square one's {:.2}x{:.2}",
+            got.width,
+            got.height,
+            want.width,
+            want.height
+        );
+    }
+
+    /// **The seed order ranks parts by the sheet they eat, not the metal they
+    /// are.**
+    ///
+    /// It decides which part a sheet gets built around and which are left to
+    /// fill in behind it, and filling with a part that already packs well on
+    /// its own is what wastes sheets. `nestTest03` (280x150 with a quarter-disc
+    /// bite: 32,202mm2 of material in a 42,000mm2 box) is smaller than
+    /// `nestTest02` (a plain 120x300, 36,000mm2 both ways) by material and
+    /// bigger by box, and it is the one that should be spent as filler - it
+    /// nests at 77.3% alone against `nestTest02`'s 89.6%.
+    ///
+    /// Worth a sheet on the four-part mixed benchmark, 32 -> 31: the engine
+    /// stops building sheets around `nestTest02` and starts building them as
+    /// 4x`nestTest04` + 8x`nestTest03` at 80.1%.
+    #[test]
+    fn the_seed_order_puts_the_bigger_box_first_even_when_it_holds_less_material() {
+        let square = |w: f64, h: f64| PolygonDto {
+            points: vec![PointDto { x: 0.0, y: 0.0 }, PointDto { x: w, y: 0.0 }, PointDto { x: w, y: h }, PointDto { x: 0.0, y: h }],
+            layer: "CUT".into(),
+            is_circle: None,
+            children: Vec::new(),
+            texts: Vec::new(),
+            real_boundary: None,
+        };
+        // A 280x150 box holding 32,202mm2, as a triangle - less material than
+        // the 120x300 below, more sheet.
+        let bitten = PolygonDto {
+            points: vec![PointDto { x: 0.0, y: 0.0 }, PointDto { x: 280.0, y: 0.0 }, PointDto { x: 280.0, y: 150.0 }, PointDto { x: 0.0, y: 150.0 }, PointDto { x: 90.0, y: 75.0 }],
+            layer: "CUT".into(),
+            is_circle: None,
+            children: Vec::new(),
+            texts: Vec::new(),
+            real_boundary: None,
+        };
+        let plain = square(120.0, 300.0);
+        assert!(
+            geometry::polygon::polygon_area(&bitten.points.iter().map(|p| geometry::point::Point::new(p.x, p.y)).collect::<Vec<_>>()).abs()
+                < geometry::polygon::polygon_area(&plain.points.iter().map(|p| geometry::point::Point::new(p.x, p.y)).collect::<Vec<_>>()).abs(),
+            "the fixture must actually hold less material, or this proves nothing"
+        );
+
+        let expanded = expand_parts(
+            vec![
+                PartDto { polygon: plain, quantity: 1, allowed_rotations: None, mirror: None },
+                PartDto { polygon: bitten, quantity: 1, allowed_rotations: None, mirror: None },
+            ],
+            false,
+        );
+        let first = expanded.adam[0];
+        let bounds = geometry::polygon::get_polygon_bounds(&expanded.parts_by_id[&first].points).expect("has points");
+        assert!((bounds.width - 280.0).abs() < 1e-9, "the 280x150 part must seed first, got a {}x{} one", bounds.width, bounds.height);
     }
 
     #[test]

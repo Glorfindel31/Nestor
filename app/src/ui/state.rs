@@ -261,31 +261,97 @@ pub struct ConfigForm {
 
 impl Default for ConfigForm {
     fn default() -> Self {
-        // These mirror the web UI's own `index.html` field defaults, not
-        // `NestConfigDto`'s serde defaults - the latter exist to keep old
-        // saved configs behaving unchanged and are deliberately more
-        // conservative (e.g. `runs: 1`).
+        // Not `NestConfigDto`'s serde defaults - those exist to keep old saved
+        // configs behaving unchanged and must not move.
+        //
+        // **Measured, not inherited.** These used to mirror the old web UI's
+        // `index.html` field defaults (`runs: 6, rotations: 2,
+        // population_size: 6, generations: 5, curve_tolerance: 0.1`), and that
+        // combination is unusable on a real job. `runs` escalates every
+        // attempt by +1 rotation, +4 population and +5 generations, so six
+        // runs is 105 generations at up to 26 individuals and 7 angles. On the
+        // four-part 800-piece benchmark (1500x1500, spacing 5), at that base:
+        // one run takes 46.9s, two take 205.6s, three take over ten minutes,
+        // and six never finished. Every attempt after the first returned the
+        // *identical* 31-sheet answer.
+        //
+        // What each knob is actually worth on that job, measured on an idle
+        // machine:
+        //
+        // - `runs`      6 -> 1:   4.4x per extra attempt, zero sheets gained
+        // - `rotations` 2 -> 4:   the only knob that changes the answer (at 1
+        //                         the job needs 32 sheets, at 2 or 4 it needs
+        //                         31 - but 2 is job-specific luck, and 4 is
+        //                         what holds across the whole benchmark board)
+        // - `population` 6 -> 4:  free either way
+        // - `generations` 5 -> 2: free either way (1 generation at population
+        //                         2 finds the same 31 sheets as 3 at 5)
+        // - `curve_tolerance` 0.1 -> 0.3: 2.7x faster with identical sheet
+        //                         counts and marginally better utilisation;
+        //                         the Minkowski sums the band packer runs per
+        //                         shape scale with the tessellated point count
+        //
+        // Result: 31 sheets in 32.6s, from a default that previously did not
+        // finish. Raising these is still there for anyone who wants it - see
+        // `ui::config`'s cost estimate, which exists so the price is visible
+        // before the wait rather than after it.
         Self {
             margin: 0.0,
             spacing: 0.0,
             kerf: 0.0,
-            runs: 6,
+            runs: 1,
             cleanup_threshold: String::new(),
             mirror: false,
             placement_type: PlacementTypeDto::TightFit,
-            rotations: 2,
-            population_size: 6,
+            rotations: 4,
+            population_size: 4,
             mutation_rate: 10.0,
-            generations: 5,
+            generations: 2,
             dominant_threshold: 0.9,
             max_threads: 0,
             seed: 0,
-            curve_tolerance: 0.1,
+            curve_tolerance: 0.3,
         }
     }
 }
 
 impl ConfigForm {
+    /// How expensive this search is against the shipped defaults, as a plain
+    /// multiple.
+    ///
+    /// **The trap this exists to make visible.** `runs` is the one knob the
+    /// basic panel exposes, and every extra attempt raises rotations *and*
+    /// population *and* generations at once
+    /// (`commands::escalated_run_config`), so its cost compounds - measured on
+    /// the 800-part benchmark, one run took 46.9s, two took 205.6s and three
+    /// took over ten minutes, all returning the identical answer. Nothing in
+    /// the UI said so until the operator had already waited.
+    ///
+    /// A count of placements, not a time: an individual's cost is dominated by
+    /// how many angles it has to try, and a generation evaluates a whole
+    /// population, so `rotations x population x generations` summed over the
+    /// escalation tracks the real work closely enough to warn with. It is
+    /// deliberately not shown as seconds - that depends on the parts, and a
+    /// wrong number in seconds is worse than an honest relative one.
+    pub fn search_cost_multiple(&self) -> f64 {
+        fn cost(runs: usize, rotations: u32, population: usize, generations: usize) -> f64 {
+            (0..runs)
+                .map(|i| {
+                    let rotations = f64::from(rotations + i as u32);
+                    let population = (population + i * crate::commands::RUN_POPULATION_STEP) as f64;
+                    let generations = (generations + i * crate::commands::RUN_GENERATIONS_STEP) as f64;
+                    rotations * population * generations
+                })
+                .sum()
+        }
+        let d = Self::default();
+        let baseline = cost(d.runs, d.rotations, d.population_size, d.generations);
+        if baseline <= 0.0 {
+            return 1.0;
+        }
+        cost(self.runs, self.rotations, self.population_size, self.generations) / baseline
+    }
+
     pub fn to_dto(&self) -> NestConfigDto {
         NestConfigDto {
             placement_type: self.placement_type,
@@ -465,5 +531,40 @@ mod tests {
         assert_eq!(f.first_nan_field(), None);
         f.spacing = f64::NAN;
         assert_eq!(f.first_nan_field(), Some("cfg_spacing"));
+    }
+    /// **The estimate has to be 1x at the defaults, or it cries wolf on every
+    /// job.** It is the only thing telling an operator what a setting costs
+    /// before they wait for it, so a baseline that drifts off 1.0 as the
+    /// defaults change would make the warning meaningless.
+    #[test]
+    fn the_cost_estimate_reads_one_at_the_shipped_defaults() {
+        assert!((ConfigForm::default().search_cost_multiple() - 1.0).abs() < 1e-9);
+    }
+
+    /// The old defaults, which is the case this whole estimate exists for:
+    /// six escalating runs from `rotations: 2, population_size: 6,
+    /// generations: 5` measured 46.9s for one run and over ten minutes for
+    /// three on the 800-piece benchmark, all returning the same answer.
+    #[test]
+    fn the_cost_estimate_flags_the_old_defaults_as_expensive() {
+        let old = ConfigForm { runs: 6, rotations: 2, population_size: 6, generations: 5, ..ConfigForm::default() };
+        let cost = old.search_cost_multiple();
+        assert!(cost >= 4.0, "the old defaults must land in the warning band, got {cost:.1}x");
+    }
+
+    /// Every knob it prices has to move it, or a user turning one up sees no
+    /// change and learns to ignore the number.
+    #[test]
+    fn the_cost_estimate_rises_with_every_knob_it_prices() {
+        let base = ConfigForm::default();
+        let baseline = base.search_cost_multiple();
+        for (name, raised) in [
+            ("runs", ConfigForm { runs: base.runs + 1, ..ConfigForm::default() }),
+            ("rotations", ConfigForm { rotations: base.rotations + 1, ..ConfigForm::default() }),
+            ("population", ConfigForm { population_size: base.population_size + 1, ..ConfigForm::default() }),
+            ("generations", ConfigForm { generations: base.generations + 1, ..ConfigForm::default() }),
+        ] {
+            assert!(raised.search_cost_multiple() > baseline, "raising {name} must raise the estimate");
+        }
     }
 }

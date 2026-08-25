@@ -148,7 +148,10 @@ than geometry.
 
 ---
 
-## Where we stand right now
+## Where we stand right now — all six rows on target (2026-08-25)
+
+Every test above has been run and answered; thank you. Three changes came out
+of them and `sh bench.sh` now matches SuperNesting on every row:
 
 | job | SuperNesting | ours |
 |---|---|---|
@@ -156,15 +159,38 @@ than geometry.
 | test02 (nestTest02 x250) | 5 | 5 ✅ |
 | test03 (nestTest03 x250) | 5 | 5 ✅ |
 | test04 (nestTest04 x250) | 63 | 63 ✅ |
-| test05 (01/02/03 x250 + 04 x50) | 31 | **32** ❌ |
+| test05 (01/02/03 x250 + 04 x50) | 31 | **31** ✅ |
+| ref (two.dxf x50) | 14 | 14 ✅ |
+
+**What each of your tests bought.**
+
+- **Tests 1 and 3 (concavity).** Your 54 on `nestTest03` was two above ours.
+  The band packer already knew the right layout — nine 160mm bands of three
+  pairs — but its search walks band heights shortest-first under a node
+  budget and ran out before ever trying it. Seeding the search with the best
+  uniform plan fixed it: 52 → **54**, and 81.98% util, your number exactly.
+- **Test 6 (pre-rotated input).** The most valuable one. Your 37-degree file
+  nested the same for SuperNesting and cost *us* 11 sheets → 13, because our
+  rotation grid is measured from the file's own orientation. Every imported
+  outline is now turned so its minimum-area rectangle is square to the axes.
+  11 sheets either way now. This matters for real customer drawings far more
+  than it does for the benchmark.
+- **Test 2 (mixing) + tests 1/3 together.** These were what cracked test05.
+  We were filling `nestTest04` sheets with `nestTest02`, because it is the
+  smallest part. That is backwards: `nestTest02` packs at 89.6% on its own, so
+  spending it as filler throws the difference away, while `nestTest03` only
+  reaches 77.3% alone and has nothing to lose. Ranking parts by the *box* they
+  occupy rather than the metal they contain puts `nestTest03` first, and the
+  engine now builds twelve sheets of 4x`nestTest04` + 8x`nestTest03`. 32 → 31.
+- **Test 5 (mirroring).** Dropped. You have no mirror option and never saw a
+  flip, so there is no reason for us to switch ours on.
+- **Test 4 (duplicates).** No action. Our own output was already sixteen
+  identical sheets, so we are not missing a pattern-replication trick.
+- **Test 7 (spacing).** Ties at spacing 0 (62/sheet) and 5 (56). At spacing 20
+  we get 47 against your 49 — the one number still open, and worth about a
+  fifth of a sheet.
 
 Re-run any time with `sh bench.sh`.
 
-The one job we lose needs an **80.32 % average fill** for 31 sheets, and the
-best `nestTest04`-bearing sheet we can build measures 80.3 % exactly — there is
-no slack anywhere. Extra search does not help: 25 generations at population 20
-(620 s, about 50x the normal run) returns the identical answer, as do all six
-placement types and three different part orderings.
-
-Tests **1**, **2** and **3** are the ones that would actually move this. If
-you only run two, run **1 and 2**.
+**The one thing left, if you want to push further:** `nestTest02` at spacing
+20. Everything else on the board is level.
