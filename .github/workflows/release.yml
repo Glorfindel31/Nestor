@@ -64,10 +64,10 @@ jobs:
           # Three jobs race here, so the losers must not treat "it already
           # exists" as failure; they just go on and upload their own asset.
           gh release view "$tag" >/dev/null 2>&1 ||
-            gh release create "$tag" --draft --title "RustyNesting $tag" --generate-notes ||
+            gh release create "$tag" --draft --title "Nestor $tag" --generate-notes ||
             true
           # Copy rather than pass `path#label`: gh's `#` syntax sets the
           # asset's *label*, and the file still downloads under its own name.
-          asset="RustyNesting_${tag#v}_${{ matrix.suffix }}"
+          asset="Nestor_${tag#v}_${{ matrix.suffix }}"
           cp "target/release/${{ matrix.bin }}" "$asset"
           gh release upload "$tag" "$asset" --clobber

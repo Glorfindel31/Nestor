@@ -1,4 +1,10 @@
-# RustyNesting
+# Nestor
+
+*The repo, the crate and the binary are still called `rustynesting` — the app
+was renamed in v2.2.0 and those were deliberately left alone, because
+`app/src/paths.rs` resolves an existing user's config and logs through the
+original identifier. Renaming them would strand that data.*
+
 
 Help me pay for tokens
 https://ko-fi.com/glorfindel31
