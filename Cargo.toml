@@ -17,5 +17,5 @@ lto = "fat"
 codegen-units = 1
 
 [workspace.package]
-version = "2.3.1"
+version = "2.4.0"
 edition = "2021"

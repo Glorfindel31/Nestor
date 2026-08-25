@@ -29,6 +29,22 @@ See [`docs/PORT_STATUS.md`](docs/PORT_STATUS.md) for the living, detailed
 breakdown of what's ported, what's deliberately not ported, and what's still
 outstanding — check it before assuming something is or isn't done.
 
+### Nest quality
+
+The engine is measured against a commercial nester (SuperNesting) on six
+jobs, re-runnable with `sh bench.sh`. As of v2.4.0 it matches it on every
+one — same sheet count on all six, including the four-part 800-piece mixed
+job that had been one sheet behind:
+
+| job | commercial | this |
+|---|---|---|
+| single part x250, four different shapes | 11 / 5 / 5 / 63 | 11 / 5 / 5 / 63 |
+| four shapes mixed, 800 pieces | 31 | 31 |
+| interlocking triangles x50 | 14 | 14 |
+
+Sheet count is a coarse measure, so the harness also reports parts on the
+best single sheet, per-sheet utilisation spread, and a pass/fail audit.
+
 ## Features
 
 - **DXF import/export**, layers preserved end to end (cut/etch/drill stay
@@ -40,9 +56,27 @@ outstanding — check it before assuming something is or isn't done.
   recommended default for irregular/interlocking shapes), Gravity, Box,
   Convex Hull, and two Gravity/Tight-Fit hybrids — picked per job, not
   hardcoded
-- **Genetic-algorithm search** with escalating runs: a cheap first pass, then
-  progressively wider rotation grids and larger populations, so you don't
-  need to understand rotations/population/generations for it to work well
+- **Two structurally different packers, run against each other** — a
+  contact-driven greedy pass (good at irregular, interlocking shapes) and a
+  shelf/band packer (good at rectangle-ish ones, and able to give each band
+  its own orientation, which the greedy pass cannot represent). Whichever put
+  more material on a sheet keeps it
+- **Genetic-algorithm search** over part order and rotation, with optional
+  escalating runs. The defaults are set where the search actually pays:
+  raising rotations changes results, raising runs/population/generations
+  mostly costs time, and the app shows an estimated cost beside RUN NEST so
+  the price of a setting is visible before the wait rather than after it
+- **Orientation-independent import** — a part is turned so its
+  minimum-area bounding box is square to the axes, so a drawing saved on the
+  diagonal nests exactly as well as the same part saved straight
+- **Manufacturability audit** on every result — overlapping or off-sheet
+  parts are fatal, clearance shortfalls advisory; recomputed at export time
+  from the geometry actually being written, so it cannot certify a stale
+  layout
+- **Offcut/remnant tracking** — usable remnants come back as stock sheets
+  and are marked consumed once nested onto, with a persistent parts library
+- **PDF job report** — part list, sheet list (identical layouts collapsed
+  into a duplicate count) and remnant info
 - **Sheet repacking** — an already-nested sheet can be manually re-arranged
   in place (or automatically, below a configurable utilisation threshold)
   without touching any other sheet
@@ -68,6 +102,15 @@ cargo test -p geometry         # geometry unit tests
 cargo test -p nesting          # nesting unit tests
 cargo test -p rustynesting     # engine entry points + UI
 cargo test --workspace         # everything
+```
+
+There is also a headless CLI, which runs the same code the window does and
+prints a diffable JSON summary — this is the nest-quality regression harness,
+not a test:
+
+```sh
+cargo run --release --bin nest -- tests/fixtures/two.dxf --qty 50     --sheet 2440x1220 --spacing 6 --json
+sh bench.sh                    # the whole board against the commercial targets
 ```
 
 ## Architecture
