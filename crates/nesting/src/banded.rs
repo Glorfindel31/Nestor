@@ -39,7 +39,7 @@ use geometry::dxf_import::rotate_layered_polygon;
 use geometry::obstacle_nfp::obstacle_nfp;
 use geometry::polygon::{get_polygon_bounds, polygon_area, Bounds};
 
-use crate::placement::{NestPart, Placement, PlacedPart};
+use crate::placement::{NestPart, PartRules, Placement, PlacedPart};
 
 /// One placeable unit: either a single part, or two parts paired into a
 /// tighter composite. A band is filled with units, not parts.
@@ -122,18 +122,18 @@ const ANGLES: [f64; 2] = [0.0, 90.0];
 /// polygon is a valid, maximally-tight placement, and each gives a different
 /// pair box - so this returns the whole Pareto front of those boxes rather
 /// than one winner. See `pareto_front` for why picking one is wrong.
-fn build_units(part: &NestPart, base_rotation: f64, available: usize, curve_tolerance: f64) -> Vec<Unit> {
+fn build_units(part: &NestPart, base_rotation: f64, available: usize, curve_tolerance: f64, rules: &PartRules) -> Vec<Unit> {
     // **Memoised, because none of this depends on the sheet.** A unit
     // catalogue is a property of the shapes alone, but `pack_sheet` is called
     // once per sheet, per individual, per generation - so a 15-sheet job at
     // population 10 over 3 generations rebuilt the identical catalogue 450
     // times, each one a fistful of Minkowski sums and, since `row_step`, a
     // bisection of Clipper intersections per unit on top.
-    let key = unit_cache_key(part, base_rotation, available, curve_tolerance);
+    let key = unit_cache_key(part, base_rotation, available, curve_tolerance, rules);
     if let Some(hit) = UNIT_CACHE.lock().ok().and_then(|c| c.get(&key).cloned()) {
         return hit;
     }
-    let out = build_units_uncached(part, base_rotation, available, curve_tolerance);
+    let out = build_units_uncached(part, base_rotation, available, curve_tolerance, rules);
     if let Ok(mut cache) = UNIT_CACHE.lock() {
         // Same cap policy as `NfpCache`: stop growing, keep what is there.
         if cache.len() < MAX_UNIT_CACHE_ENTRIES {
@@ -147,9 +147,9 @@ fn build_units(part: &NestPart, base_rotation: f64, available: usize, curve_tole
 /// alone would be wrong - ids restart with every job, and a cache that lives
 /// as long as the process would then hand a new job the previous one's
 /// geometry - so the outline's own fingerprint is part of the key.
-type UnitCacheKey = (usize, u64, bool, u64, usize, u64, u64);
+type UnitCacheKey = (usize, u64, bool, u64, usize, u64, u64, u64);
 
-fn unit_cache_key(part: &NestPart, base_rotation: f64, available: usize, curve_tolerance: f64) -> UnitCacheKey {
+fn unit_cache_key(part: &NestPart, base_rotation: f64, available: usize, curve_tolerance: f64, rules: &PartRules) -> UnitCacheKey {
     let first = part.polygon.points.first().copied().unwrap_or(geometry::point::Point::new(0.0, 0.0));
     (
         part.source_id,
@@ -159,7 +159,46 @@ fn unit_cache_key(part: &NestPart, base_rotation: f64, available: usize, curve_t
         part.polygon.points.len(),
         polygon_area(&part.polygon.points).to_bits(),
         (first.x * 1e6 + first.y).to_bits(),
+        // The allowed-angle set is part of what the catalogue depends on: the
+        // same shape constrained to 0/180 has a different unit list from the
+        // same shape free to turn, and this cache outlives a job.
+        allowed_angles(rules, part.id).map_or(0, |angles| {
+            angles.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, a| (h ^ a.to_bits()).wrapping_mul(0x100_0000_01b3))
+        }),
     )
+}
+
+/// This part's allowed angles, or `None` when it is free to turn however it
+/// likes. Mirrors `placement::rotation_steps`' own lookup, including masking
+/// off `MIRROR_ID_BIT` - a mirrored copy's rule is authored against the
+/// un-flipped id.
+fn allowed_angles(rules: &PartRules, part_id: usize) -> Option<&[f64]> {
+    rules.get(&(part_id & !crate::dispatch::MIRROR_ID_BIT)).map(|r| r.angles.as_slice()).filter(|a| !a.is_empty())
+}
+
+/// Whether this part may come to rest at `angle`, absolute.
+///
+/// **The band packer used to ignore rotation rules entirely.** Its base
+/// orientations are 0 and 90 and it pairs at 0/90/180/270, and none of that
+/// consulted `PartRules` - so a grain-locked part could be handed back at an
+/// angle its material does not allow, and `place_parts` accepts a banded
+/// sheet wholesale whenever it holds more material. On a coated or grained
+/// sheet that is a scrapped part, not a cosmetic problem. It stayed hidden
+/// until `uniform_plan` made banded win the sheet in
+/// `placement::tests::place_parts_never_places_a_constrained_part_off_its_allowed_angles`
+/// - and then only on macOS and Linux, where the tie broke the other way.
+///
+/// Compared with a tolerance rather than exactly: the rule's angles arrive
+/// normalised into `[0, 360)`, but the angle tested here is the sum of a
+/// part's carried rotation and a catalogue angle, so it can land a float step
+/// either side of the value in the rule.
+fn angle_is_allowed(rules: &PartRules, part_id: usize, angle: f64) -> bool {
+    let Some(angles) = allowed_angles(rules, part_id) else { return true };
+    let angle = angle.rem_euclid(360.0);
+    angles.iter().any(|a| {
+        let d = (a.rem_euclid(360.0) - angle).abs();
+        d < 1e-6 || (360.0 - d) < 1e-6
+    })
 }
 
 /// A unit list is a handful of small polygons; this cap is memory insurance
@@ -193,7 +232,14 @@ fn into_absolute(mut units: Vec<Unit>, base: f64) -> Vec<Unit> {
     units
 }
 
-fn build_units_uncached(part: &NestPart, base_rotation: f64, available: usize, curve_tolerance: f64) -> Vec<Unit> {
+fn build_units_uncached(part: &NestPart, base_rotation: f64, available: usize, curve_tolerance: f64, rules: &PartRules) -> Vec<Unit> {
+    // `part.polygon` arrives already turned by `part.rotation` and
+    // `into_absolute` adds that back on the way out, so the angle a rotation
+    // rule is about is `part.rotation + <catalogue angle>`, not the catalogue
+    // angle alone.
+    if !angle_is_allowed(rules, part.id, part.rotation + base_rotation) {
+        return Vec::new();
+    }
     let a = rotate_layered_polygon(&part.polygon, base_rotation);
     let Some(ab) = get_polygon_bounds(&a.points) else { return Vec::new() };
     let a_area = polygon_area(&a.points).abs();
@@ -231,6 +277,9 @@ fn build_units_uncached(part: &NestPart, base_rotation: f64, available: usize, c
     let mut pairs: Vec<Unit> = Vec::new();
     for extra in PAIR_ANGLES {
         let rotation = base_rotation + extra;
+        if !angle_is_allowed(rules, part.id, part.rotation + rotation) {
+            continue;
+        }
         let b = rotate_layered_polygon(&part.polygon, rotation);
         let Some(bb) = get_polygon_bounds(&b.points) else { continue };
         let b_hull = shell_of(&b);
@@ -553,7 +602,7 @@ impl Pool {
 /// orientation, and `fill_band` asks for the option list on every single
 /// placement. Rebuilding it there turned a handful of calls into tens of
 /// thousands.
-fn build_catalogue(parts: &[NestPart], curve_tolerance: f64) -> Vec<Unit> {
+fn build_catalogue(parts: &[NestPart], curve_tolerance: f64, rules: &PartRules) -> Vec<Unit> {
     let mut out = Vec::new();
     let mut seen: Vec<usize> = Vec::new();
     let counts = Pool::new(parts);
@@ -564,7 +613,7 @@ fn build_catalogue(parts: &[NestPart], curve_tolerance: f64) -> Vec<Unit> {
         seen.push(part.source_id);
         let available = counts.available(part.source_id);
         for angle in ANGLES {
-            out.extend(build_units(part, angle, available, curve_tolerance));
+            out.extend(build_units(part, angle, available, curve_tolerance, rules));
         }
     }
     out
@@ -620,11 +669,11 @@ const NODE_BUDGET: usize = 20_000;
 /// about that part" - see `placement::place_parts`, which asks for a free
 /// layout first and only re-asks anchored when the free one skips its queue.
 #[must_use]
-pub fn pack_sheet(sheet_bounds: Bounds, parts: &[NestPart], curve_tolerance: f64, anchor: Option<usize>) -> Option<BandedSheet> {
+pub fn pack_sheet(sheet_bounds: Bounds, parts: &[NestPart], curve_tolerance: f64, anchor: Option<usize>, rules: &PartRules) -> Option<BandedSheet> {
     if parts.is_empty() || sheet_bounds.width <= 0.0 || sheet_bounds.height <= 0.0 {
         return None;
     }
-    let mut catalogue = build_catalogue(parts, curve_tolerance);
+    let mut catalogue = build_catalogue(parts, curve_tolerance, rules);
     if let Some(anchor) = anchor {
         catalogue.retain(|u| u.source_id == anchor);
     }
@@ -868,7 +917,7 @@ mod tests {
     use geometry::dxf_import::LayeredPolygon;
 
     fn pack_sheet_t(b: Bounds, parts: &[NestPart]) -> Option<BandedSheet> {
-        pack_sheet(b, parts, 0.3, None)
+        pack_sheet(b, parts, 0.3, None, &PartRules::default())
     }
     use geometry::point::Point;
 
@@ -965,10 +1014,70 @@ mod tests {
 
     /// A shape that cannot tile its own box must stay a single unit rather
     /// than being force-paired into an overlap.
+    /// **A grain-locked part must not come out of the band packer turned.**
+    ///
+    /// The packer's own orientations are 0 and 90, and it pairs at 0/90/180/
+    /// 270, none of which used to consult `PartRules` - so a part restricted
+    /// to 0/180 by its material could be handed back at 90, and `place_parts`
+    /// takes a banded sheet wholesale when it holds more material. That is a
+    /// scrapped part on grained or coated stock.
+    ///
+    /// The rectangle here is deliberately 60x20: at 90 degrees it is 20x60, a
+    /// different box, so a packer ignoring the rule has an obvious reason to
+    /// prefer the turned orientation and the assertion has something to catch.
+    #[test]
+    fn a_grain_locked_part_is_never_offered_a_forbidden_orientation() {
+        let parts: Vec<NestPart> = (0..8)
+            .map(|id| NestPart { id, source_id: 0, polygon: rect_part(id, 0, 60.0, 20.0).polygon, rotation: 0.0 })
+            .collect();
+
+        let mut map = std::collections::HashMap::new();
+        map.insert(0usize, crate::placement::PartRule { angles: vec![0.0, 180.0], mirror: false });
+        // Every copy carries its own entry, exactly as `dto::expand_parts`
+        // writes them - the rule is per part id, not per shape.
+        for id in 1..8 {
+            map.insert(id, crate::placement::PartRule { angles: vec![0.0, 180.0], mirror: false });
+        }
+        let rules: PartRules = std::sync::Arc::new(map);
+
+        // 50 wide: the part is 60 long, so it only fits stood on end. A
+        // packer honouring the 0/180 rule must place nothing here rather than
+        // turn it, which is the sharper half of this test.
+        let narrow = Bounds { x: 0.0, y: 0.0, width: 50.0, height: 300.0 };
+        let bounds = Bounds { x: 0.0, y: 0.0, width: 300.0, height: 300.0 };
+        let packed = pack_sheet(bounds, &parts, 0.3, None, &rules).expect("should pack something");
+        assert!(!packed.placed.is_empty(), "the rule must not make the part unplaceable");
+        for part in &packed.placed {
+            let angle = part.rotation.rem_euclid(360.0);
+            assert!(
+                (angle - 0.0).abs() < 1e-6 || (angle - 180.0).abs() < 1e-6,
+                "part {} came out at {angle} degrees, which its rule forbids",
+                part.id
+            );
+        }
+
+        // On a sheet too narrow to take it lying down, the same shape *does*
+        // turn when nothing forbids it - so the rule is what kept it straight
+        // above, not the geometry.
+        let free = pack_sheet(narrow, &parts, 0.3, None, &PartRules::default()).expect("unconstrained, it should stand on end");
+        assert!(
+            free.placed.iter().all(|p| {
+                let a = p.rotation.rem_euclid(360.0);
+                (a - 90.0).abs() < 1e-6 || (a - 270.0).abs() < 1e-6
+            }),
+            "unconstrained on a narrow sheet the part should turn"
+        );
+        // ...and with the rule, it must decline the sheet instead.
+        assert!(
+            pack_sheet(narrow, &parts, 0.3, None, &rules).is_none_or(|p| p.placed.is_empty()),
+            "a grain-locked part must be left unplaced rather than turned to fit"
+        );
+    }
+
     #[test]
     fn a_shape_that_does_not_pair_is_left_alone() {
         let parts: Vec<NestPart> = (0..4).map(|i| rect_part(i, 0, 100.0, 50.0)).collect();
-        let units = build_catalogue(&parts, 0.3);
+        let units = build_catalogue(&parts, 0.3, &PartRules::default());
         assert!(units.iter().all(|u| u.count() == 1), "a solid rectangle has no room for a partner in its own box");
     }
 

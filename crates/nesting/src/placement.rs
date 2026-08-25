@@ -1960,11 +1960,11 @@ pub fn place_parts(
             let places_anchor = |b: &crate::banded::BandedSheet| {
                 anchor_source_id.is_none_or(|anchor| b.consumed.iter().filter_map(|&i| parts_before_sheet.get(i)).any(|p| p.source_id == anchor))
             };
-            let banded = crate::banded::pack_sheet(usable, &parts_before_sheet, config.curve_tolerance, None).and_then(|free| {
+            let banded = crate::banded::pack_sheet(usable, &parts_before_sheet, config.curve_tolerance, None, &config.part_rules).and_then(|free| {
                 if places_anchor(&free) {
                     Some(free)
                 } else {
-                    crate::banded::pack_sheet(usable, &parts_before_sheet, config.curve_tolerance, anchor_source_id)
+                    crate::banded::pack_sheet(usable, &parts_before_sheet, config.curve_tolerance, anchor_source_id, &config.part_rules)
                 }
             });
             if let Some(banded) = banded {

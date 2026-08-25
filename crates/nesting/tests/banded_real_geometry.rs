@@ -69,7 +69,7 @@ fn band_packed_real_parts_do_not_overlap_each_other() {
     let parts = real_parts(12);
     let sheet = usable_sheet();
     let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
-    let Some(result) = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None) else {
+    let Some(result) = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None, &Default::default()) else {
         panic!("the band packer placed nothing on a 2440x1220 sheet");
     };
     assert!(!result.placed.is_empty());
@@ -95,7 +95,7 @@ fn band_packed_real_parts_stay_on_the_sheet() {
     let parts = real_parts(12);
     let sheet = usable_sheet();
     let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
-    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None).expect("should place something");
+    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None, &Default::default()).expect("should place something");
 
     for (placed, meta) in materialise(&parts, &result).iter().zip(result.placed.iter()) {
         assert!(
@@ -133,7 +133,7 @@ fn band_packing_beats_the_greedy_ceiling_on_pairable_parts() {
     let parts = real_parts(12);
     let sheet = usable_sheet();
     let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
-    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None).expect("should place something");
+    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None, &Default::default()).expect("should place something");
 
     let sheet_area = polygon_area(&sheet.points).abs();
     let utilisation = result.area / sheet_area * 100.0;
@@ -165,7 +165,7 @@ fn a_row_advances_by_the_lattice_step_not_the_box_width() {
     assert!(!parts.is_empty(), "two.dxf should have a second profile");
     let sheet = usable_sheet();
     let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
-    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None).expect("should place something");
+    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None, &Default::default()).expect("should place something");
 
     let utilisation = result.area / polygon_area(&sheet.points).abs() * 100.0;
     assert!(result.placed.len() >= 16, "expected 16 parts on the sheet, got {} at {utilisation:.1}%", result.placed.len());
@@ -211,7 +211,7 @@ fn report_how_much_padding_costs_the_pairing() {
             NestPart { id: 1, source_id: 0, polygon: poly, rotation: 0.0 },
         ];
         let bounds = get_polygon_bounds(&rect(5000.0, 5000.0)).expect("has points");
-        if let Some(r) = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None) {
+        if let Some(r) = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None, &Default::default()) {
             println!("{label}: packed {} parts, area {:.0}", r.placed.len(), r.area);
         }
     }
@@ -250,7 +250,7 @@ fn report_whether_the_bare_shape_pairs() {
             NestPart { id: 1, source_id: 0, polygon: poly, rotation: 0.0 },
         ];
         let big = get_polygon_bounds(&rect(6000.0, 6000.0)).expect("has points");
-        if let Some(r) = pack_sheet(big, &parts, CURVE_TOLERANCE, None) {
+        if let Some(r) = pack_sheet(big, &parts, CURVE_TOLERANCE, None, &Default::default()) {
             println!("   bare pair -> {} parts placed", r.placed.len());
         }
     }
@@ -306,7 +306,7 @@ fn placements_are_reported_at_an_absolute_rotation() {
 
     let sheet = usable_sheet();
     let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
-    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None).expect("should place something");
+    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None, &Default::default()).expect("should place something");
     assert!(!result.placed.is_empty());
 
     let placed: Vec<LayeredPolygon> = result
@@ -366,7 +366,7 @@ fn a_concave_part_pairs_on_its_outline_not_its_hull() {
     let points = prepare_sheet(&rect(1500.0, 1500.0), 0.0, JOB_SPACING).expect("sheet should offset");
     let sheet = LayeredPolygon { points, layer: "sheet".into(), is_circle: None, children: Vec::new(), texts: Vec::new(), real_boundary: None };
     let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
-    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None).expect("should place something");
+    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None, &Default::default()).expect("should place something");
 
     // The bounding-box ceiling is 48 - see the doc comment. Anything at or
     // below it means the interlock was thrown away, whatever the cause.
@@ -546,7 +546,7 @@ fn the_last_copy_of_a_shape_is_reported_at_an_absolute_rotation() {
 
     let sheet = usable_sheet();
     let bounds = get_polygon_bounds(&sheet.points).expect("sheet has points");
-    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None).expect("should place something");
+    let result = pack_sheet(bounds, &parts, CURVE_TOLERANCE, None, &Default::default()).expect("should place something");
     assert!(!result.placed.is_empty());
 
     for p in &result.placed {
