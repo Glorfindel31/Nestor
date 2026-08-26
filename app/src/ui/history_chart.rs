@@ -101,14 +101,14 @@ pub fn chart(app: &App, ui: &mut egui::Ui) -> Option<usize> {
     let lang = app.prefs.lang;
 
     ui.add_space(4.0);
-    ui.label(RichText::new(super::i18n::t(lang, "chart_label")).color(theme::DIM).small());
+    ui.label(RichText::new(super::i18n::t(lang, "chart_label")).color(theme::DIM()).small());
 
     let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), PLOT_HEIGHT), Sense::click());
     if !ui.is_rect_visible(rect) {
         return None;
     }
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, theme::WELL);
+    painter.rect_filled(rect, 0.0, theme::WELL());
 
     // Inset so a point at exactly 0% or 100% still draws its full marker
     // inside the well instead of being clipped in half by its edge.
@@ -118,30 +118,30 @@ pub fn chart(app: &App, ui: &mut egui::Ui) -> Option<usize> {
     // off by eye, few enough not to compete with the data.
     for percent in [0.0, 25.0, 50.0, 75.0, 100.0] {
         let y = plot.y(percent);
-        theme::hairline(&painter, Rect::from_min_max(Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)), theme::LINE, 1.0);
+        theme::hairline(&painter, Rect::from_min_max(Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)), theme::LINE(), 1.0);
     }
 
     let scale = unplaced_scale(&app.history);
     if let Some(peak) = scale {
         let points: Vec<Pos2> = app.history.iter().enumerate().map(|(i, h)| Pos2::new(plot.x(i), plot.y(h.unplaced_count as f64 / peak * 100.0))).collect();
-        painter.add(egui::Shape::line(points, Stroke::new(1.0_f32, theme::ERROR)));
+        painter.add(egui::Shape::line(points, Stroke::new(1.0_f32, theme::ERROR())));
     }
 
     let utilisation: Vec<Pos2> = app.history.iter().enumerate().map(|(i, h)| Pos2::new(plot.x(i), plot.y(h.utilisation))).collect();
-    painter.add(egui::Shape::line(utilisation.clone(), Stroke::new(1.6_f32, theme::ACCENT)));
+    painter.add(egui::Shape::line(utilisation.clone(), Stroke::new(1.6_f32, theme::ACCENT())));
 
     // The attempt currently being displayed, so the chart and the canvas
     // below it can't disagree about what is on screen.
     if let Some(&at) = utilisation.get(app.history_index) {
-        painter.circle_filled(at, MARKER_RADIUS, theme::ACCENT);
+        painter.circle_filled(at, MARKER_RADIUS, theme::ACCENT());
     }
 
     let hovered = response.hover_pos().map(|p| plot.index_at(p.x));
     if let Some(i) = hovered {
         if let (Some(h), Some(&at)) = (app.history.get(i), utilisation.get(i)) {
             let x = plot.x(i);
-            theme::hairline(&painter, Rect::from_min_max(Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())), theme::LINE_STRONG, 1.0);
-            painter.circle_stroke(at, MARKER_RADIUS, Stroke::new(1.0_f32, theme::TEXT));
+            theme::hairline(&painter, Rect::from_min_max(Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())), theme::LINE_STRONG(), 1.0);
+            painter.circle_stroke(at, MARKER_RADIUS, Stroke::new(1.0_f32, theme::TEXT()));
             response.clone().on_hover_text(readout(app, i, h));
         }
     }
@@ -173,15 +173,15 @@ fn readout(app: &App, index: usize, h: &NestSnapshotDto) -> String {
 fn caption(app: &App, ui: &mut egui::Ui, scale: Option<f64>) {
     let lang = app.prefs.lang;
     ui.horizontal(|ui| {
-        swatch(ui, theme::ACCENT);
-        ui.label(RichText::new(super::i18n::t(lang, "chart_series_util")).color(theme::DIM).small());
+        swatch(ui, theme::ACCENT());
+        ui.label(RichText::new(super::i18n::t(lang, "chart_series_util")).color(theme::DIM()).small());
         if let Some(peak) = scale {
             ui.add_space(10.0);
-            swatch(ui, theme::ERROR);
-            ui.label(RichText::new(super::i18n::tv(lang, "chart_series_unplaced", &[("peak", &format!("{peak:.0}"))])).color(theme::DIM).small());
+            swatch(ui, theme::ERROR());
+            ui.label(RichText::new(super::i18n::tv(lang, "chart_series_unplaced", &[("peak", &format!("{peak:.0}"))])).color(theme::DIM()).small());
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(super::i18n::t(lang, "chart_hint")).color(theme::DIM).small());
+            ui.label(RichText::new(super::i18n::t(lang, "chart_hint")).color(theme::DIM()).small());
         });
     });
 }

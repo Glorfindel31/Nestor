@@ -36,13 +36,13 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         // See `shell::help_bubble`.
         let cleanup_row = ui
             .horizontal(|ui| {
-                let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("cleanup_label")).color(theme::DIM)));
+                let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("cleanup_label")).color(theme::DIM())));
                 let field = ui.add(egui::TextEdit::singleline(&mut app.cfg.cleanup_threshold).desired_width(70.0).hint_text(t("cleanup_placeholder")));
                 name.union(field)
             })
             .inner;
         shell::help_bubble(cleanup_row, t("cleanup_label"), t("cleanup_tooltip"));
-        ui.label(RichText::new(t("cleanup_hint")).color(theme::DIM).small());
+        ui.label(RichText::new(t("cleanup_hint")).color(theme::DIM()).small());
 
         ui.add_space(6.0);
         // Mirroring is deliberately loud. A flipped part is only the same
@@ -52,11 +52,11 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             shell::help_bubble(ui.checkbox(&mut app.cfg.mirror, t("mirror_label")), t("mirror_label"), t("mirror_tooltip"));
             if app.cfg.mirror {
-                ui.label(RichText::new(t("mirror_on_badge")).color(theme::ERROR).strong().family(theme::heavy()));
+                ui.label(RichText::new(t("mirror_on_badge")).color(theme::ERROR()).strong().family(theme::heavy()));
             }
         });
         if app.cfg.mirror {
-            ui.label(RichText::new(t("mirror_hint")).color(theme::ERROR).small());
+            ui.label(RichText::new(t("mirror_hint")).color(theme::ERROR()).small());
         }
 
         ui.add_space(8.0);
@@ -79,7 +79,7 @@ fn advanced(app: &mut App, ui: &mut egui::Ui) {
 
     let placement_row = ui
         .horizontal(|ui| {
-            let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("placement_label")).color(theme::DIM)));
+            let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("placement_label")).color(theme::DIM())));
             let options: Vec<PlacementTypeDto> = PLACEMENT_TYPES.iter().map(|(v, _)| *v).collect();
             let combo = shell::choice(ui, "placement", &mut app.cfg.placement_type, &options, |v| {
                 PLACEMENT_TYPES.iter().find(|(o, _)| *o == v).map(|(_, k)| t(k).to_string()).unwrap_or_default()
@@ -88,7 +88,7 @@ fn advanced(app: &mut App, ui: &mut egui::Ui) {
         })
         .inner;
     shell::help_bubble(placement_row, t("placement_label"), t("placement_tooltip"));
-    ui.label(RichText::new(t("placement_hint")).color(theme::DIM).small());
+    ui.label(RichText::new(t("placement_hint")).color(theme::DIM()).small());
 
     // The rotation grid is left exactly as the engine takes it, including the
     // known quirk that `rotations = 6` produces poor angles for rectangular
@@ -98,18 +98,18 @@ fn advanced(app: &mut App, ui: &mut egui::Ui) {
     shell::number_row(ui, t("rotations_label"), t("rotations_tooltip"), &mut app.cfg.rotations, 0.1, 1..=64);
     shell::number_row(ui, t("population_label"), t("population_tooltip"), &mut app.cfg.population_size, 0.1, 2..=1000);
     shell::number_row(ui, t("mutation_label"), t("mutation_tooltip"), &mut app.cfg.mutation_rate, 0.5, 0.0..=100.0);
-    ui.label(RichText::new(t("mutation_hint")).color(theme::DIM).small());
+    ui.label(RichText::new(t("mutation_hint")).color(theme::DIM()).small());
     shell::number_row(ui, t("generations_label"), t("generations_tooltip"), &mut app.cfg.generations, 0.2, 1..=10_000);
 
     let dominant_row = ui
         .horizontal(|ui| {
-            let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("dominant_label")).color(theme::DIM)));
+            let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("dominant_label")).color(theme::DIM())));
             let slider = ui.add(egui::Slider::new(&mut app.cfg.dominant_threshold, 0.01..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
             name.union(slider)
         })
         .inner;
     shell::help_bubble(dominant_row, t("dominant_label"), t("dominant_tooltip"));
-    ui.label(RichText::new(t("dominant_hint")).color(theme::DIM).small());
+    ui.label(RichText::new(t("dominant_hint")).color(theme::DIM()).small());
 
     // Capped at what this machine actually has, so the knob is monotonic:
     // more threads is never slower, and the top of the range means "all of
@@ -118,6 +118,6 @@ fn advanced(app: &mut App, ui: &mut egui::Ui) {
     // saved before this cap existed.
     let cores = std::thread::available_parallelism().map_or(256, std::num::NonZeroUsize::get);
     shell::number_row(ui, t("max_threads_label"), t("max_threads_tooltip"), &mut app.cfg.max_threads, 0.1, 0..=cores);
-    ui.label(RichText::new(super::i18n::tv(lang, "max_threads_hint", &[("cores", &cores.to_string())])).color(theme::DIM).small());
+    ui.label(RichText::new(super::i18n::tv(lang, "max_threads_hint", &[("cores", &cores.to_string())])).color(theme::DIM()).small());
     shell::number_row(ui, t("seed_label"), t("seed_tooltip"), &mut app.cfg.seed, 1.0, 0..=u64::MAX);
 }

@@ -33,23 +33,33 @@ pub struct Drag {
 }
 
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {
-    if app.snapshot.is_none() {
+    if app.shown().is_none() {
+
         shell::panel_frame(ui, |ui| {
             shell::heading(app, ui, "03", "heading_result_text");
             shell::heading_rule(ui);
-            ui.label(RichText::new(app.t("result_empty")).color(theme::DIM));
+            ui.label(RichText::new(app.t("result_empty")).color(theme::DIM()));
         });
         return;
     }
     shell::panel_frame(ui, |ui| {
         shell::heading(app, ui, "03", "heading_result_text");
         shell::heading_rule(ui);
-        history_selector(app, ui);
-        stats(app, ui);
-        unplaced(app, ui);
-        ui.add_space(8.0);
-        ui.label(RichText::new(app.t("drag_hint")).color(theme::DIM).small());
+        // A layout still being built has no honest stats (utilisation of a
+        // half-filled sheet, "unplaced" counting every part not reached yet)
+        // and nothing to select between or drag, so the whole result apparatus
+        // is replaced by one line saying what is on screen.
+        if app.showing_live() {
+            ui.label(RichText::new(app.t("live_building")).color(theme::ACCENT()));
+        } else {
+            history_selector(app, ui);
+            stats(app, ui);
+            unplaced(app, ui);
+            ui.add_space(8.0);
+            ui.label(RichText::new(app.t("drag_hint")).color(theme::DIM()).small());
+        }
         sheets(app, ui);
+
         super::library::offcut_controls(app, ui);
         ui.add_space(8.0);
         export_controls(app, ui);
@@ -82,7 +92,7 @@ fn history_selector(app: &mut App, ui: &mut egui::Ui) {
         )
     };
     ui.horizontal(|ui| {
-        ui.label(RichText::new(app.t("view_attempt_label")).color(theme::DIM));
+        ui.label(RichText::new(app.t("view_attempt_label")).color(theme::DIM()));
         let mut chosen = app.history_index;
         egui::ComboBox::from_id_salt("history").width(400.0).selected_text(label_for(chosen, &app.history[chosen])).show_ui(ui, |ui| {
             for (i, h) in app.history.iter().enumerate() {
@@ -116,7 +126,7 @@ fn stats(app: &App, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         let mut stat = |key: &str, value: String| {
             ui.vertical(|ui| {
-                ui.label(RichText::new(app.t(key)).color(theme::DIM).small());
+                ui.label(RichText::new(app.t(key)).color(theme::DIM()).small());
                 ui.label(RichText::new(value).strong().family(theme::heavy()));
             });
             ui.add_space(20.0);
@@ -135,8 +145,8 @@ fn stats(app: &App, ui: &mut egui::Ui) {
         // told them the wrong thing was the point. Kept because it is how you
         // tell two attempts apart when their utilisation ties.
         ui.vertical(|ui| {
-            ui.label(RichText::new(app.t("stat_fitness")).color(theme::DIM).small());
-            ui.label(RichText::new(format!("{:.0}", snap.fitness)).color(theme::DIM).small());
+            ui.label(RichText::new(app.t("stat_fitness")).color(theme::DIM()).small());
+            ui.label(RichText::new(format!("{:.0}", snap.fitness)).color(theme::DIM()).small());
         });
     });
 }
@@ -175,7 +185,7 @@ fn audit_badge(app: &App, ui: &mut egui::Ui) {
         (Some(_), false) => ("audit_passed", "audit_passed_tooltip"),
     };
     ui.vertical(|ui| {
-        ui.label(RichText::new(super::i18n::t(lang, "stat_audit")).color(theme::DIM).small());
+        ui.label(RichText::new(super::i18n::t(lang, "stat_audit")).color(theme::DIM()).small());
         let text = match &app.audit {
             // The counts are the actionable part - "3 ISSUES" sends someone
             // looking, "FAILED" only makes them wonder.
@@ -188,20 +198,20 @@ fn audit_badge(app: &App, ui: &mut egui::Ui) {
             // Fatal: the only filled badge anywhere in this app. Dark text on
             // the halt colour, so it reads as a stamped verdict rather than
             // another coloured word in a row of coloured words.
-            (Some(r), false) if !r.passed => egui::Frame::new().fill(theme::ERROR).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| ui.label(label.color(theme::BG))).inner,
+            (Some(r), false) if !r.passed => egui::Frame::new().fill(theme::ERROR()).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| ui.label(label.color(theme::BG()))).inner,
             // Advisory: outlined, not filled. Same accent the rest of the app
             // uses for "forward progress", but a box around it says this one
             // is a verdict.
             (Some(r), false) if r.warning_count > 0 => {
-                let inner = egui::Frame::new().stroke(egui::Stroke::new(1.0_f32, theme::ACCENT)).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| ui.label(label.color(theme::ACCENT)));
+                let inner = egui::Frame::new().stroke(egui::Stroke::new(1.0_f32, theme::ACCENT())).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| ui.label(label.color(theme::ACCENT())));
                 inner.inner
             }
             // Clean: quiet. It is the expected outcome, and a result that
             // needs no attention should not compete with the two that do.
-            (Some(_), false) => ui.label(label.color(if AUDIT_SIXTH_COLOUR { VERIFIED } else { theme::TEXT })),
+            (Some(_), false) => ui.label(label.color(if AUDIT_SIXTH_COLOUR { VERIFIED } else { theme::TEXT() })),
             // Unknown / in flight: dimmer than ordinary text, because it is
             // an absence of information rather than a verdict.
-            _ => ui.label(label.color(theme::DIM)),
+            _ => ui.label(label.color(theme::DIM())),
         };
         response.on_hover_text(audit_detail(app, super::i18n::t(lang, detail)));
     });
@@ -249,7 +259,7 @@ fn unplaced(app: &App, ui: &mut egui::Ui) {
         return;
     }
     ui.add_space(6.0);
-    ui.label(RichText::new(app.t("unplaced_hint")).color(theme::ERROR));
+    ui.label(RichText::new(app.t("unplaced_hint")).color(theme::ERROR()));
     egui::ScrollArea::horizontal().id_salt("unplaced").max_height(190.0).show(ui, |ui| {
         ui.horizontal(|ui| {
             for id in &snap.unplaced_ids {
@@ -258,9 +268,9 @@ fn unplaced(app: &App, ui: &mut egui::Ui) {
                 let (label, detail) = if too_large { ("unplaced_label_too_large", "unplaced_detail_too_large") } else { ("unplaced_label_no_room", "unplaced_detail_no_room") };
                 ui.allocate_ui(egui::vec2(136.0, 124.0), |ui| {
                     ui.vertical(|ui| {
-                        canvas::thumbnail(ui, poly, 80.0, Some(canvas::UNPLACED));
-                        ui.label(RichText::new(format!("#{id}")).color(theme::DIM).small());
-                        ui.label(RichText::new(app.t(label)).color(theme::ERROR).small());
+                        canvas::thumbnail(ui, poly, 80.0, Some(canvas::unplaced()));
+                        ui.label(RichText::new(format!("#{id}")).color(theme::DIM()).small());
+                        ui.label(RichText::new(app.t(label)).color(theme::ERROR()).small());
                     });
                 })
                 .response
@@ -287,15 +297,17 @@ fn fits_any_sheet(part: &PolygonDto, sheets: &[PolygonDto]) -> bool {
 }
 
 fn sheets(app: &mut App, ui: &mut egui::Ui) {
-    let Some(snap) = &app.snapshot else { return };
+    let Some(snap) = app.shown() else { return };
     let count = snap.placements.len();
+
     for index in 0..count {
         sheet_card(app, ui, index);
     }
 }
 
 fn sheet_card(app: &mut App, ui: &mut egui::Ui, index: usize) {
-    let Some(snap) = &app.snapshot else { return };
+    let Some(snap) = app.shown() else { return };
+
     let Some(placement) = snap.placements.get(index) else { return };
     let Some(sheet) = app.result_sheets.get(placement.sheet_index).or_else(|| app.result_sheets.first()) else { return };
 
@@ -306,11 +318,11 @@ fn sheet_card(app: &mut App, ui: &mut egui::Ui, index: usize) {
     // the bands are untuned - they exist to make a bad sheet obvious at a
     // glance, not to be a number anyone quotes.
     let band = if util >= 75.0 {
-        theme::OK
+        theme::OK()
     } else if util >= 45.0 {
-        theme::ACCENT
+        theme::ACCENT()
     } else {
-        theme::ERROR
+        theme::ERROR()
     };
 
     let caption = super::i18n::tv(
@@ -326,7 +338,7 @@ fn sheet_card(app: &mut App, ui: &mut egui::Ui, index: usize) {
             start_repack(app, index);
         }
         if !can_edit && app.result_config.is_none() {
-            ui.label(RichText::new(app.t("repack_needs_config")).color(theme::DIM).small());
+            ui.label(RichText::new(app.t("repack_needs_config")).color(theme::DIM()).small());
         }
         // Only once this sheet is actually zoomed: a FIT button on a fitted
         // sheet is a button that does nothing, on every card, forever. It
@@ -348,12 +360,61 @@ fn sheet_card(app: &mut App, ui: &mut egui::Ui, index: usize) {
 /// introduced here: the web version set `pointer-events="bounding-box"` on
 /// each part group for exactly the same reason (a `fill:none` outline has
 /// nothing to hit), so this is the same behaviour, not a simplification of it.
+/// The positions the engine scored for the part it is choosing a place for,
+/// as outlines under the committed parts. Nothing at all outside a live run.
+///
+/// The winner is drawn in the accent at full weight and the rejected ones
+/// dimmed, so what the search *considered* and what it *chose* read as two
+/// different things rather than one flickering cloud. `place_parts` records
+/// only candidates that already survived the "does this even land on the
+/// sheet" filter, so every outline here was a real option.
+fn draw_ghosts(app: &App, painter: &egui::Painter, view: &canvas::View, index: usize) {
+    let Some(ghost) = &app.live_ghost else { return };
+    if ghost.sheet != index {
+        return;
+    }
+    let Some(poly) = app.parts_by_id.get(&ghost.part_id) else { return };
+
+    // A rotation search can score hundreds of positions for one part. Drawing
+    // every one costs a tessellation each and turns the sheet into noise, so
+    // the rejected ones are sampled down to a readable handful; the accepted
+    // one is never sampled away.
+    const MAX_REJECTED: usize = 24;
+    let rejected = ghost.positions.iter().filter(|g| !g.accepted).count();
+    let step = rejected.div_ceil(MAX_REJECTED).max(1);
+
+    let mut seen = 0usize;
+    for g in &ghost.positions {
+        if !g.accepted {
+            let skip = seen % step != 0;
+            seen += 1;
+            if skip {
+                continue;
+            }
+        }
+        let colour = if g.accepted { theme::ACCENT() } else { theme::DIM().gamma_multiply(0.45) };
+        let map = |p: PointDto| {
+            let r = canvas::rotated_translated(std::slice::from_ref(&p), g.rotation, g.x, g.y);
+            view.model_to_screen(r[0])
+        };
+        // `is_root: false` - the thinner stroke. A ghost is a hint, not a
+        // part, and at this count the heavier outline reads as clutter.
+        canvas::draw_shape(painter, poly, &map, false, Some(colour));
+    }
+}
+
 fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
-    let Some(snap) = &app.snapshot else { return };
-    let Some(placement) = snap.placements.get(index) else { return };
-    let Some(sheet) = app.result_sheets.get(placement.sheet_index).or_else(|| app.result_sheets.first()) else { return };
+    // Only the sheet *index* is taken here, so this borrow of `app` ends
+    // before `pan_zoom` needs `&mut app.sheet_views` below. The placement
+    // itself is re-borrowed after that, once the view is settled - taking it
+    // up front would hold an immutable borrow of the whole `App` across the
+    // mutable one (`shown()` borrows the struct, where the old
+    // `&app.snapshot` borrowed one disjoint field).
+    let Some(sheet_index) = app.shown().and_then(|snap| snap.placements.get(index)).map(|p| p.sheet_index) else { return };
+    let Some(sheet) = app.result_sheets.get(sheet_index).or_else(|| app.result_sheets.first()) else { return };
 
     let sheet_bounds = bounds_of(&sheet.points);
+
     // Fit-to-box, matching the web UI's own 700x500 budget, then zoomed and
     // panned on top. A 3000x1500 sheet fitted into 700x500 draws its parts a
     // few pixels across, which is neither readable nor grabbable.
@@ -370,7 +431,7 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
     let view = canvas::View::fit(sheet_bounds, rect).zoomed(rect.center(), vs.zoom, vs.pan);
 
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, theme::WELL);
+    painter.rect_filled(rect, 0.0, theme::WELL());
     painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0_f32, band), egui::StrokeKind::Inside);
 
     // A scrolled-past sheet costs nothing. The space is already allocated, so
@@ -383,7 +444,16 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
         return;
     }
 
+    // Under the parts: the positions the engine scored for the part it is
+    // placing right now. Drawn first so a committed part always wins the
+    // pixel.
+    draw_ghosts(app, &painter, &view, index);
+
+    let Some(snap) = app.shown() else { return };
+    let Some(placement) = snap.placements.get(index) else { return };
+
     let editable = app.result_config.is_some() && !app.controls_locked();
+
     let mut click_to_toggle = None;
     let mut hovered_part = None;
     let mut drag_started = None;
@@ -406,7 +476,7 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
         let mut color = None;
         if let Some(d) = &app.drag {
             if d.sheet == index && d.part_id == part.id {
-                color = Some(if d.clear { theme::OK } else { theme::ERROR });
+                color = Some(if d.clear { theme::OK() } else { theme::ERROR() });
             }
         }
 
@@ -419,7 +489,7 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
             // Pinned parts get a visible frame - the state has to be
             // readable without hovering, or "why won't this move" is a
             // guessing game.
-            painter.rect_stroke(part_rect, 0.0, egui::Stroke::new(1.0_f32, theme::ACCENT), egui::StrokeKind::Outside);
+            painter.rect_stroke(part_rect, 0.0, egui::Stroke::new(1.0_f32, theme::ACCENT()), egui::StrokeKind::Outside);
         }
 
         if editable {
@@ -845,15 +915,15 @@ fn start_repack(app: &mut App, index: usize) {
 
 fn export_controls(app: &mut App, ui: &mut egui::Ui) {
     ui.separator();
-    ui.label(RichText::new(app.t("export_hint")).color(theme::DIM).small());
+    ui.label(RichText::new(app.t("export_hint")).color(theme::DIM()).small());
     let lang = app.prefs.lang;
     ui.horizontal(|ui| {
-        ui.label(RichText::new(app.t("export_format_label")).color(theme::DIM));
+        ui.label(RichText::new(app.t("export_format_label")).color(theme::DIM()));
         shell::choice(ui, "export_format", &mut app.export_format, &ExportFormat::ALL, |f| match f {
             ExportFormat::Pdf => super::i18n::t(lang, "export_format_pdf").to_string(),
             other => other.label().to_string(),
         });
-        ui.label(RichText::new(app.t("export_spacing_label")).color(theme::DIM));
+        ui.label(RichText::new(app.t("export_spacing_label")).color(theme::DIM()));
         ui.add(egui::DragValue::new(&mut app.export_spacing).speed(1.0).range(0.0..=10_000.0)).on_hover_text(app.t("export_spacing_tooltip"));
         // Labels resolved before the `&mut` borrows, or the checkbox's
         // mutable field borrow and `app.t`'s shared one collide.

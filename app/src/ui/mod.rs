@@ -24,6 +24,8 @@
 mod canvas;
 mod config;
 mod console;
+mod effects;
+
 mod history_chart;
 mod i18n;
 mod import;
@@ -197,6 +199,19 @@ pub struct App {
 
     // ---- run ----
     running: bool,
+    /// The layout the engine is building right now, replaced wholesale every
+    /// time a `Msg::Live` frame arrives and cleared when the run ends.
+    ///
+    /// Separate from `snapshot` rather than writing into it: `snapshot` is
+    /// the result the user can drag, pin, repack and export, and a live
+    /// frame is none of those things. Keeping them apart means a cancelled
+    /// run leaves the previous *finished* result on screen untouched.
+    live: Option<Snapshot>,
+    /// The part the engine is choosing a position for, and every position it
+    /// scored for it. Drawn as outlines under the committed parts.
+    live_ghost: Option<crate::worker::GhostSet>,
+
+
     progress: f32,
     run_status: Status,
     /// Generation budget of the run in flight, re-set per escalating attempt
@@ -277,7 +292,10 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let prefs: prefs::Prefs = cc.storage.and_then(|s| eframe::get_value(s, PREFS_KEY)).unwrap_or_default();
+        // Before `apply`, which reads the palette it selects.
+        theme::set(prefs.theme);
         theme::apply(&cc.egui_ctx, prefs.scale.factor(), false);
+
         // Once, here - not inside `apply`, which reruns on every TEXT SIZE
         // change. See `install_fonts`.
         theme::install_fonts(&cc.egui_ctx);
@@ -287,7 +305,11 @@ impl App {
         cc.egui_ctx.set_zoom_factor(1.0);
 
         let worker = Worker::new(cc.egui_ctx.clone());
+        // The engine reads this flag, not `prefs` - carry the saved
+        // preference across before any run can start.
+        worker.live.store(prefs.live_view, std::sync::atomic::Ordering::Relaxed);
         worker.load_saved();
+
 
         let mut app = Self {
             help_open: !prefs.help_dismissed,
@@ -318,6 +340,10 @@ impl App {
             redo_stack: Vec::new(),
             advanced_open: false,
             running: false,
+            live: None,
+            live_ghost: None,
+
+
             progress: 0.0,
             run_status: Default::default(),
             current_generations: 1,
@@ -431,12 +457,48 @@ impl App {
                 let within = individuals_done as f32 / individuals_total.max(1) as f32;
                 self.progress = ((generation.saturating_sub(1)) as f32 + within) / self.current_generations.max(1) as f32;
             }
+            Msg::PartsReady(parts) => {
+                // Only useful while a run is live; `adopt_response` replaces
+                // this wholesale with the finished run's own map.
+                self.parts_by_id = parts;
+            }
+            Msg::Live { placements, ghost } => {
+
+                // A frame that arrives after the run finished (the last one
+                // can still be in the channel behind `NestDone`) must not
+                // resurrect the live view over the real result.
+                if !self.running {
+                    return;
+                }
+                // fitness/utilisation/unplaced are left at zero and never
+                // shown: a partial layout has no honest value for any of
+                // them (utilisation of a sheet still being filled means
+                // nothing, and every part not yet placed would count as
+                // unplaced). `result::panel` skips the stats row while the
+                // live view is what's on screen - see its own comment.
+                self.live = Some(Snapshot {
+                    placements,
+                    fitness: 0.0,
+                    utilisation: 0.0,
+
+                    unplaced_count: 0,
+                    unplaced_ids: Vec::new(),
+                    locked: Default::default(),
+                });
+                self.live_ghost = ghost;
+            }
+
             Msg::RunComplete(c) => {
+
                 self.console.log(console::Kind::Run, format!("run {}/{} done: {} sheet(s), {} unplaced, {:.1}% used{}", c.run, c.total_runs, c.sheets_used, c.unplaced_count, c.utilisation, if c.improved { " (new best)" } else { "" }));
             }
             Msg::NestDone(result) => {
                 self.running = false;
                 self.progress = 0.0;
+                self.live = None;
+                self.live_ghost = None;
+
+
                 match *result {
                     Ok(response) => {
                         let cancelled = response.cancelled;
@@ -600,6 +662,62 @@ impl App {
     /// claims a part closes a sheet when it doesn't.
     fn largest_sheet_area(&self) -> f64 {
         self.shapes.iter().filter(|s| s.role == state::Role::Sheet).map(|s| s.area).fold(0.0, f64::max)
+    }
+
+    /// Switches the visual world.
+    ///
+    /// Two calls rather than one because they cost very different things:
+    /// `apply` clones and stores a `Style`, while `install_fonts` throws away
+    /// and rebuilds the entire glyph atlas. Only the second is expensive, and
+    /// only a theme change needs it - which is why TEXT SIZE, next to this in
+    /// the menu, calls `apply` alone.
+    pub fn set_theme(&mut self, ctx: &egui::Context, theme: theme::Theme) {
+        if self.prefs.theme == theme {
+            return;
+        }
+        self.prefs.theme = theme;
+        theme::set(theme);
+        theme::install_fonts(ctx);
+        theme::apply(ctx, self.prefs.scale.factor(), true);
+        self.console.log(console::Kind::Plain, format!("theme: {}", theme.label()));
+    }
+
+    /// Turns the live view on or off, including part way through a run.
+    ///
+    /// The flag the engine actually reads lives on the worker and is shared
+    /// with the running job, so this takes effect on the next part placed
+    /// rather than the next run. Switching off also drops the partial layout
+    /// immediately - leaving it on screen frozen at whatever part it had
+    /// reached would read as the run having stalled there.
+    pub fn set_live_view(&mut self, on: bool) {
+        self.prefs.live_view = on;
+        self.worker.live.store(on, std::sync::atomic::Ordering::Relaxed);
+        if !on {
+            self.live = None;
+            self.live_ghost = None;
+        }
+    }
+
+    /// The snapshot the RESULT panel is currently drawing.
+    ///
+    /// While a nest runs with the live view on, that is the partial layout
+    /// the engine is building; otherwise it is the finished result. The
+    /// fallback to `snapshot` matters: with the live view off, a run must
+    /// leave the *previous* result on screen rather than blanking the panel
+    /// for the duration.
+    pub fn shown(&self) -> Option<&Snapshot> {
+        if self.running {
+            self.live.as_ref().or(self.snapshot.as_ref())
+        } else {
+            self.snapshot.as_ref()
+        }
+    }
+
+    /// True when what's on screen is a nest in progress, not a result. The
+    /// stats row, the history selector and every editing affordance are
+    /// meaningless against a half-built layout.
+    pub fn showing_live(&self) -> bool {
+        self.running && self.live.is_some()
     }
 
     fn adopt_response(&mut self, response: crate::dto::RunNestResponse) {
@@ -800,6 +918,11 @@ impl App {
             Ok(()) => {
                 self.running = true;
                 self.progress = 0.0;
+                // Nothing from a previous run may show through under the
+                // first frames of this one.
+                self.live = None;
+                self.live_ghost = None;
+
                 self.export_status.clear();
                 self.run_status.ok(self.t("run_status_running"));
                 // Collapse everything so the result has room the moment it
@@ -869,7 +992,13 @@ impl eframe::App for App {
         import::handle_dropped_files(self, ctx);
         keys::handle(self, ctx);
 
+        // Behind every panel, then over everything: the active theme's own
+        // motion. Both take no layout space and accept no input - see
+        // `effects`'s own module comment.
+        effects::background(ctx);
+
         shell::header(self, ctx);
+
         shell::bottom_bar(self, ctx);
         // Side panels before the central one, as egui requires: they claim
         // their width first and the central column gets what is left.
@@ -890,7 +1019,9 @@ impl eframe::App for App {
             });
         });
 
+        effects::foreground(ctx);
         shell::dialogs(self, ctx);
+
     }
 }
 

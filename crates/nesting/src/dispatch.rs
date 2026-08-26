@@ -32,7 +32,8 @@ use geometry::dxf_import::LayeredPolygon;
 
 use crate::cache::NfpCache;
 use crate::ga::{is_better_nest, GeneticAlgorithm};
-use crate::placement::{place_parts, NestPart, PlaceResult, PlacementConfig};
+use crate::placement::{place_parts, LiveEvent, NestPart, PlaceResult, PlacementConfig};
+
 
 /// Set in a part id to mean "the mirrored (flipped-over) copy of this part".
 /// `app`'s `expand_parts` registers both variants in `parts_by_id`/
@@ -124,6 +125,19 @@ pub struct EvaluatedIndividual {
 /// individual, every generation) - see `place_parts`'s own doc comment for
 /// why. Every individual in a generation shares the one cache (behind its
 /// own internal `Mutex`, safe across `par_iter`'s parallel threads).
+/// `on_live` observes one individual's placement part by part, for a caller
+/// drawing a nest as it happens (`app`'s live view). It is deliberately fed
+/// by **one** individual and not the whole population: `par_iter` below has
+/// every individual placing at the same moment on different threads, so an
+/// unfiltered stream is N interleaved layouts rather than one nest being
+/// built. The watched individual is the lowest-indexed one this call will
+/// actually evaluate - not simply index 0, which after generation 1 is the
+/// carried-over elite that already has a fitness and is never re-placed, so
+/// keying on it would go silent for the entire rest of the run.
+///
+/// Every other individual passes the same closure with a `false` guard, so
+/// an observer that isn't watching costs one bool test per part. Pass
+/// `&|_| {}` to opt out entirely.
 #[must_use]
 pub fn run_generation(
     ga: &mut GeneticAlgorithm,
@@ -133,11 +147,13 @@ pub fn run_generation(
     placement_config: &PlacementConfig,
     should_cancel: &(impl Fn() -> bool + Sync),
     on_individual_placed: &(impl Fn(usize, usize) + Sync),
+    on_live: &(impl Fn(LiveEvent) + Sync),
     cache: &NfpCache,
 ) -> Vec<EvaluatedIndividual> {
     let total = ga.population.iter().filter(|ind| ind.fitness.is_none()).count();
     on_individual_placed(0, total);
     let completed = AtomicUsize::new(0);
+    let watched = ga.population.iter().position(|ind| ind.fitness.is_none());
 
     let evaluated: Vec<(usize, EvaluatedIndividual)> = ga
         .population
@@ -176,7 +192,32 @@ pub fn run_generation(
             // hadn't started yet: `place_parts` itself bails out of its
             // per-part loop within a fraction of a second of the flag
             // flipping, instead of running to completion regardless.
-            let result = place_parts(sheets, nest_parts, placement_config, cache, should_cancel, &|_, _| {}, &|_, _, _| {})?;
+            // One closure per hook whichever individual this is, because
+            // both branches have to be the same concrete type - the guard
+            // goes inside, not around the call.
+            let watching = watched == Some(idx);
+            if watching {
+                on_live(LiveEvent::Begin);
+            }
+
+            let result = place_parts(
+                sheets,
+                nest_parts,
+                placement_config,
+                cache,
+                should_cancel,
+                &|sheet, part| {
+                    if watching {
+                        on_live(LiveEvent::Part { sheet, part });
+                    }
+                },
+                &|sheet, part_id, traces| {
+                    if watching {
+                        on_live(LiveEvent::Candidates { sheet, part_id, traces });
+                    }
+                },
+            )?;
+
             let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
             on_individual_placed(done, total);
             Some((idx, EvaluatedIndividual { placement: individual.placement.clone(), rotation: individual.rotation.clone(), result }))
@@ -217,7 +258,9 @@ pub fn run(
     generations: usize,
     should_cancel: &(impl Fn() -> bool + Sync),
     on_individual_placed: &(impl Fn(usize, usize) + Sync),
+    on_live: &(impl Fn(LiveEvent) + Sync),
 ) -> Option<PlaceResult> {
+
     // Fresh cache for this call - `run` (unlike `run_generation`) is a
     // whole self-contained nest attempt, so there's no longer-lived run for
     // it to share a cache with (matches `place_parts`'s own doc comment:
@@ -228,7 +271,8 @@ pub fn run(
         if should_cancel() {
             break;
         }
-        let results = run_generation(ga, sheets, parts_by_id, shape_ids, placement_config, should_cancel, on_individual_placed, &cache);
+        let results = run_generation(ga, sheets, parts_by_id, shape_ids, placement_config, should_cancel, on_individual_placed, on_live, &cache);
+
         for evaluated in results {
             if best.as_ref().is_none_or(|b| is_better_nest(&evaluated.result, b)) {
                 best = Some(evaluated.result);
@@ -294,7 +338,7 @@ mod tests {
         // first call: every individual is freshly constructed with no
         // fitness yet, so all of them get placed.
         let cache = NfpCache::new();
-        let results = run_generation(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &cfg, &|| false, &|_, _| {}, &cache);
+        let results = run_generation(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &cfg, &|| false, &|_, _| {}, &|_| {}, &cache);
         assert_eq!(results.len(), 6);
         for evaluated in &results {
             assert_eq!(evaluated.result.unplaced_count, 0, "4 small squares should all fit on one 100x100 sheet");
@@ -315,7 +359,7 @@ mod tests {
 
         // second call: the carried-over elite must NOT be re-placed - only
         // population_size - 1 fresh results this time.
-        let results2 = run_generation(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &cfg, &|| false, &|_, _| {}, &cache);
+        let results2 = run_generation(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &cfg, &|| false, &|_, _| {}, &|_| {}, &cache);
         assert_eq!(results2.len(), 5, "the elite survivor should be skipped, not re-placed");
     }
 
@@ -325,7 +369,7 @@ mod tests {
         let cfg = placement_config();
 
         let population_before = ga.population.clone();
-        let results = run_generation(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &cfg, &|| true, &|_, _| {}, &NfpCache::new());
+        let results = run_generation(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &cfg, &|| true, &|_, _| {}, &|_| {}, &NfpCache::new());
 
         assert!(results.is_empty(), "cancelling before any individual starts should place none of them");
         assert!(
@@ -345,7 +389,8 @@ mod tests {
         let ticks = std::sync::Mutex::new(Vec::new());
         let results = run_generation(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &cfg, &|| false, &|done, total| {
             ticks.lock().unwrap().push((done, total));
-        }, &NfpCache::new());
+        }, &|_| {}, &NfpCache::new());
+
 
         let ticks = ticks.into_inner().unwrap();
         // one upfront (0, total) call before any placement, then one per
@@ -367,7 +412,7 @@ mod tests {
         let (mut ga, sheets, parts_by_id) = setup(5);
         let cfg = placement_config();
 
-        let best = run(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &cfg, 3, &|| false, &|_, _| {}).expect("3 generations should produce a best result");
+        let best = run(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &cfg, 3, &|| false, &|_, _| {}, &|_| {}).expect("3 generations should produce a best result");
 
         assert_eq!(best.unplaced_count, 0);
         assert!(best.fitness.is_finite());
@@ -377,7 +422,7 @@ mod tests {
     fn run_returns_none_for_zero_generations() {
         let (mut ga, sheets, parts_by_id) = setup(3);
         let cfg = placement_config();
-        assert!(run(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &cfg, 0, &|| false, &|_, _| {}).is_none());
+        assert!(run(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &cfg, 0, &|| false, &|_, _| {}, &|_| {}).is_none());
     }
 
     /// Regression test: `run()` used to hardcode `&|| false` internally, so
@@ -393,7 +438,7 @@ mod tests {
 
         // Cancel immediately - if `run()` ignored this (as it used to),
         // `generations: 1000` would still run to completion.
-        let best = run(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &cfg, 1000, &|| true, &|_, _| {});
+        let best = run(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &cfg, 1000, &|| true, &|_, _| {}, &|_| {});
 
         assert!(best.is_none(), "an immediate cancel should stop run() before any generation produces a result");
     }
@@ -407,7 +452,7 @@ mod tests {
         let (_, sheets, parts_by_id) = setup(3);
         let adam: Vec<usize> = (0..3).collect();
         let mut ga = GeneticAlgorithm::new(adam, GaConfig { population_size: 6, mutation_rate: 20.0, rotations: 1, mirror: true, part_rules: Default::default() }, Vec::new(), 0);
-        let results = run_generation(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &placement_config(), &|| false, &|_, _| {}, &NfpCache::new());
+        let results = run_generation(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &placement_config(), &|| false, &|_, _| {}, &|_| {}, &NfpCache::new());
         assert!(!results.is_empty());
         for r in &results {
             assert!(r.rotation.iter().any(|&a| a >= 360.0), "the mirror-widened grid must actually produce mirrored genes");

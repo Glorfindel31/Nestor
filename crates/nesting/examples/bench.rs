@@ -224,7 +224,7 @@ fn main() {
 
         while run_start.elapsed() < deadline {
             let gen_start = Instant::now();
-            let results = dispatch::run_generation(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &placement_config, &|| false, &|_, _| {}, &cache);
+            let results = dispatch::run_generation(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &placement_config, &|| false, &|_, _| {}, &|_| {}, &cache);
             let gen_ms = gen_start.elapsed().as_millis();
             generation += 1;
             gen_times_ms.push(gen_ms);
@@ -345,7 +345,7 @@ fn run_grid() {
                     let combo_start = Instant::now();
                     for _ in 0..GENERATIONS {
                         let gen_start = Instant::now();
-                        let results = dispatch::run_generation(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &placement_config, &|| false, &|_, _| {}, &cache);
+                        let results = dispatch::run_generation(&mut ga, &sheets, &parts_by_id, &HashMap::new(), &placement_config, &|| false, &|_, _| {}, &|_| {}, &cache);
                         gen_times_ms.push(gen_start.elapsed().as_millis());
 
                         for evaluated in &results {

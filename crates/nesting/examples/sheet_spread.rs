@@ -246,7 +246,7 @@ fn run(scenario: &Scenario, generations: usize, rotations: u32) {
     let started = Instant::now();
     let result = {
         let mut ga = GeneticAlgorithm::new(adam, ga_config, Vec::new(), SEED);
-        dispatch::run(&mut ga, &sheets, &parts_by_id, &shape_ids, &placement_config, generations, &|| false, &|_, _| {})
+        dispatch::run(&mut ga, &sheets, &parts_by_id, &shape_ids, &placement_config, generations, &|| false, &|_, _| {}, &|_| {})
     };
     let elapsed = started.elapsed();
 

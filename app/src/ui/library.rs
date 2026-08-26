@@ -54,7 +54,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
                             ("remnants", &app.store.available(StoredKind::Remnant).len().to_string()),
                         ],
                     ))
-                    .color(theme::DIM)
+                    .color(theme::DIM())
                     .small(),
                 );
             });
@@ -63,7 +63,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
             return;
         }
         shell::heading_rule(ui);
-        ui.label(RichText::new(app.t("library_hint")).color(theme::DIM).small());
+        ui.label(RichText::new(app.t("library_hint")).color(theme::DIM()).small());
         ui.add_space(6.0);
         section(app, ui, StoredKind::Part);
         section(app, ui, StoredKind::Remnant);
@@ -76,7 +76,7 @@ fn section(app: &mut App, ui: &mut egui::Ui, kind: StoredKind) {
         StoredKind::Part => ("library_parts_heading", "library_no_parts"),
         StoredKind::Remnant => ("library_remnants_heading", "library_no_remnants"),
     };
-    ui.label(RichText::new(super::i18n::t(lang, heading)).color(theme::ACCENT).small());
+    ui.label(RichText::new(super::i18n::t(lang, heading)).color(theme::ACCENT()).small());
 
     // Ids and labels are collected first so the row loop doesn't hold a
     // borrow of `app.store` while the buttons want `&mut app`.
@@ -89,7 +89,7 @@ fn section(app: &mut App, ui: &mut egui::Ui, kind: StoredKind) {
         .collect();
 
     if entries.is_empty() {
-        ui.label(RichText::new(super::i18n::t(lang, empty)).color(theme::DIM).small());
+        ui.label(RichText::new(super::i18n::t(lang, empty)).color(theme::DIM()).small());
         ui.add_space(6.0);
         return;
     }
@@ -107,13 +107,13 @@ fn section(app: &mut App, ui: &mut egui::Ui, kind: StoredKind) {
                     ui.vertical(|ui| {
                         canvas::thumbnail(ui, polygon, 80.0, None);
                         ui.label(RichText::new(name).small());
-                        ui.label(RichText::new(format!("{:.0} x {:.0} mm", b.w(), b.h())).color(theme::DIM).small());
+                        ui.label(RichText::new(format!("{:.0} x {:.0} mm", b.w(), b.h())).color(theme::DIM()).small());
                         ui.horizontal(|ui| {
                             if ui.add_enabled(!locked, egui::Button::new(super::i18n::t(lang, "library_add"))).clicked() {
                                 add = Some((*id, polygon.clone(), name.clone(), *qty, angles.clone(), *mirror));
                             }
                             if ui
-                                .add_enabled(!locked, egui::Button::new(RichText::new(super::i18n::t(lang, "library_delete")).color(theme::ERROR)))
+                                .add_enabled(!locked, egui::Button::new(RichText::new(super::i18n::t(lang, "library_delete")).color(theme::ERROR())))
                                 .on_hover_text(super::i18n::t(lang, "library_delete_tooltip"))
                                 .clicked()
                             {
@@ -171,7 +171,7 @@ pub fn offcut_controls(app: &mut App, ui: &mut egui::Ui) {
             scan(app);
         }
         if app.harvesting {
-            ui.label(RichText::new(app.t("offcut_scanning")).color(theme::DIM).small());
+            ui.label(RichText::new(app.t("offcut_scanning")).color(theme::DIM()).small());
         }
         if !app.remnants.is_empty() {
             let total: f64 = app.remnants.iter().map(|r| r.area).sum();
@@ -181,7 +181,7 @@ pub fn offcut_controls(app: &mut App, ui: &mut egui::Ui) {
                     "offcut_found",
                     &[("n", &app.remnants.len().to_string()), ("area", &format!("{:.2}", total / 1_000_000.0))],
                 ))
-                .color(theme::DIM)
+                .color(theme::DIM())
                 .small(),
             );
             if ui.button(app.t("offcut_keep")).on_hover_text(app.t("offcut_keep_tooltip")).clicked() {

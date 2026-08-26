@@ -136,9 +136,9 @@ pub fn panel(app: &mut super::App, ctx: &egui::Context) {
     if !app.console_open {
         return;
     }
-    let accent = super::theme::ACCENT;
+    let accent = super::theme::ACCENT();
     egui::SidePanel::left("console")
-        .frame(egui::Frame::new().fill(super::theme::PANEL).inner_margin(8.0))
+        .frame(egui::Frame::new().fill(super::theme::PANEL()).inner_margin(8.0))
         .default_width(380.0)
         .width_range(280.0..=680.0)
         .show(ctx, |ui| {
@@ -154,10 +154,10 @@ pub fn panel(app: &mut super::App, ctx: &egui::Context) {
             egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                 for line in app.console.iter() {
                     let color = match line.kind {
-                        Kind::Plain => super::theme::TEXT,
+                        Kind::Plain => super::theme::TEXT(),
                         Kind::Run => accent,
-                        Kind::Best => super::theme::OK,
-                        Kind::Error => super::theme::ERROR,
+                        Kind::Best => super::theme::OK(),
+                        Kind::Error => super::theme::ERROR(),
                     };
                     ui.label(egui::RichText::new(format!("[{}] {}", line.stamp, line.text)).color(color).small().monospace());
                 }

@@ -118,7 +118,7 @@ fn run_job(label: &str, hat: LayeredPolygon, part_count: usize, run_seconds: u64
 
     while !should_cancel() {
         generation += 1;
-        let results = dispatch::run_generation(&mut ga, &sheets, &parts_by_id, &shape_ids, &placement_config, &should_cancel, &|_, _| {}, &cache);
+        let results = dispatch::run_generation(&mut ga, &sheets, &parts_by_id, &shape_ids, &placement_config, &should_cancel, &|_, _| {}, &|_| {}, &cache);
         for evaluated in results {
             let result = evaluated.result;
             if best.as_ref().is_none_or(|b| is_better_nest(&result, b)) {

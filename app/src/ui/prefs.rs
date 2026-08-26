@@ -3,7 +3,7 @@
 //!
 //! The accent colour used to live here too, as a `#rrggbb` string with five
 //! quick-pick swatches and a free hex field behind it. It is now a constant
-//! (`theme::ACCENT`) - see that module's own doc comment for why the app
+//! (`theme::ACCENT()`) - see that module's own doc comment for why the app
 //! having one colour of its own beat letting every install pick a different
 //! one.
 //!
@@ -24,12 +24,24 @@
 pub struct Prefs {
     pub lang: super::i18n::Lang,
     pub scale: Scale,
+    /// Which visual world the app wears. See `theme::Theme`.
+    pub theme: super::theme::Theme,
+
     pub help_dismissed: bool,
+    /// Draw the nest as the engine builds it, part by part.
+    ///
+    /// Off by default: it costs real time on a job of any size (a message
+    /// and a repaint every 33ms for the whole run), and the operator who
+    /// just wants the layout should not pay for the show without asking.
+    pub live_view: bool,
 }
+
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { lang: Default::default(), scale: Scale::Normal, help_dismissed: false }
+        Self { lang: Default::default(), scale: Scale::Normal, theme: Default::default(), help_dismissed: false, live_view: false }
+
+
     }
 }
 

@@ -126,7 +126,7 @@ pub fn repack_sheet(
     // crossover a worse starting diversity than a random one for this
     // search, not a better one - keep the random init.
     let mut ga = GeneticAlgorithm::new(adam, ga_config.clone(), Vec::new(), seed);
-    let candidate = dispatch::run(&mut ga, sheets, parts_by_id, shape_ids, placement_config, generations, should_cancel, &|_, _| {})?;
+    let candidate = dispatch::run(&mut ga, sheets, parts_by_id, shape_ids, placement_config, generations, should_cancel, &|_, _| {}, &|_| {})?;
 
     if !is_better_sheet(&candidate, &original) {
         return None;

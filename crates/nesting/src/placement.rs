@@ -395,6 +395,40 @@ pub struct CandidateTrace {
     pub accepted: bool,
 }
 
+/// One observable moment during placement, for a caller watching a nest
+/// happen rather than waiting for it.
+///
+/// `place_parts` already exposes this as two separate hooks
+/// (`on_part_placed`/`on_candidates`). This bundles them into one so a
+/// caller further up - `dispatch::run_generation`, which is already at
+/// eight parameters - can forward a single observer instead of two, and so
+/// the two streams arrive in the order they actually happened: the
+/// `Candidates` for a part, then the `Part` that won.
+///
+/// Borrowed, not owned: every variant is handed a reference into
+/// `place_parts`'s own working state, so an observer that doesn't care
+/// costs nothing. A consumer that wants to keep any of it must copy it out.
+#[derive(Clone, Copy, Debug)]
+pub enum LiveEvent<'a> {
+    /// A fresh nest is starting from an empty sheet - discard whatever the
+    /// previous events built up.
+    ///
+    /// Emitted by `dispatch::run_generation`, not by `place_parts`: only the
+    /// dispatcher knows that the individual it is about to place replaces
+    /// the one before it. Without it an observer has no way to tell "part 1
+    /// of a new attempt" from "another part on sheet 0", and every
+    /// individual's layout would pile up on top of the last.
+    Begin,
+    /// A part just landed. Fires from both the first-part fast path and the
+    /// general `try_place_part_on_sheet` path.
+    Part { sheet: usize, part: &'a PlacedPart },
+
+    /// Every position scored for one part, the winner flagged `accepted`.
+    /// Fires immediately before the `Part` that resolved it - except where
+    /// placement failed, in which case no `Part` follows.
+    Candidates { sheet: usize, part_id: usize, traces: &'a [CandidateTrace] },
+}
+
 fn shift_points(points: &[Point], dx: f64, dy: f64) -> Vec<Point> {
     points.iter().map(|p| Point::new(p.x + dx, p.y + dy)).collect()
 }

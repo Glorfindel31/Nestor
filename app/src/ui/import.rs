@@ -14,7 +14,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         shell::heading_rule(ui);
 
         ui.horizontal(|ui| {
-            ui.label(RichText::new(app.t("tolerance_label")).color(theme::DIM));
+            ui.label(RichText::new(app.t("tolerance_label")).color(theme::DIM()));
             ui.add(egui::DragValue::new(&mut app.cfg.curve_tolerance).speed(0.05).range(0.01..=10.0));
 
             let enabled = !app.importing && !app.controls_locked();
@@ -23,7 +23,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
             }
             if app.importing {
                 ui.spinner();
-                ui.label(RichText::new(app.t("import_importing")).color(theme::DIM));
+                ui.label(RichText::new(app.t("import_importing")).color(theme::DIM()));
             }
         })
         .response
@@ -36,24 +36,24 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
         let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 48.0), egui::Sense::hover());
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, if hovering { theme::ACCENT.gamma_multiply(0.25) } else { theme::WELL });
-        theme::hairline(&painter, rect, if hovering { theme::ACCENT } else { theme::LINE }, if hovering { 2.0 } else { 1.0 });
+        painter.rect_filled(rect, 0.0, if hovering { theme::ACCENT().gamma_multiply(0.25) } else { theme::WELL() });
+        theme::hairline(&painter, rect, if hovering { theme::ACCENT() } else { theme::LINE() }, if hovering { 2.0 } else { 1.0 });
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             app.t("dropzone_text"),
             egui::TextStyle::Body.resolve(ui.style()),
-            if hovering { theme::ACCENT } else { theme::DIM },
+            if hovering { theme::ACCENT() } else { theme::DIM() },
         );
 
         ui.add_space(8.0);
-        ui.label(RichText::new(app.t("rect_hint")).color(theme::DIM).small());
+        ui.label(RichText::new(app.t("rect_hint")).color(theme::DIM()).small());
         ui.horizontal(|ui| {
-            ui.label(RichText::new(app.t("rect_width_label")).color(theme::DIM));
+            ui.label(RichText::new(app.t("rect_width_label")).color(theme::DIM()));
             ui.add(egui::DragValue::new(&mut app.rect_w).speed(10.0).range(0.0..=1e6));
-            ui.label(RichText::new(app.t("rect_height_label")).color(theme::DIM));
+            ui.label(RichText::new(app.t("rect_height_label")).color(theme::DIM()));
             ui.add(egui::DragValue::new(&mut app.rect_h).speed(10.0).range(0.0..=1e6));
-            ui.label(RichText::new(app.t("rect_layer_label")).color(theme::DIM));
+            ui.label(RichText::new(app.t("rect_layer_label")).color(theme::DIM()));
             ui.add(egui::TextEdit::singleline(&mut app.rect_layer).desired_width(110.0));
             if ui.add_enabled(!app.controls_locked(), egui::Button::new(app.t("btn_add_rect"))).clicked() {
                 add_rectangle(app);
@@ -128,7 +128,7 @@ pub fn svg_unit_dialog(app: &mut App, ctx: &egui::Context) {
         ui.label(app.t("svg_unit_intro"));
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(app.t("svg_unit_label")).color(theme::DIM));
+            ui.label(RichText::new(app.t("svg_unit_label")).color(theme::DIM()));
             let current = app.svg_unit_choice.clone().unwrap_or_default();
             let label = SVG_UNITS.iter().find(|(v, _)| *v == current).map(|(_, k)| app.t(k)).unwrap_or("");
             egui::ComboBox::from_id_salt("svg_unit").selected_text(label).show_ui(ui, |ui| {

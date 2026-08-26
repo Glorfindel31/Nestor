@@ -20,7 +20,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         shell::panel_frame(ui, |ui| {
             shell::heading(app, ui, "02", "heading_roles_text");
             shell::heading_rule(ui);
-            ui.label(RichText::new(app.t("roles_empty")).color(theme::DIM));
+            ui.label(RichText::new(app.t("roles_empty")).color(theme::DIM()));
         });
         return;
     }
@@ -40,7 +40,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
                     super::library::save_selected_parts(app);
                 }
                 if ui
-                    .add_enabled(any_selected && !app.controls_locked(), egui::Button::new(RichText::new(app.t("btn_remove_selected")).color(theme::ERROR)))
+                    .add_enabled(any_selected && !app.controls_locked(), egui::Button::new(RichText::new(app.t("btn_remove_selected")).color(theme::ERROR())))
                     .on_hover_text(app.t("btn_remove_selected_tooltip"))
                     .clicked()
                 {
@@ -55,7 +55,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
             });
         });
         shell::heading_rule(ui);
-        ui.label(RichText::new(app.t("roles_hint")).color(theme::DIM).small());
+        ui.label(RichText::new(app.t("roles_hint")).color(theme::DIM()).small());
 
         if app.shapes_collapsed {
             return;
@@ -84,7 +84,7 @@ fn bulk_row(app: &mut App, ui: &mut egui::Ui) {
     let enabled = selected > 0 && !app.controls_locked();
 
     ui.horizontal(|ui| {
-        ui.label(RichText::new(super::i18n::t(lang, "bulk_label")).color(theme::DIM).small()).on_hover_text(super::i18n::t(lang, "bulk_tooltip"));
+        ui.label(RichText::new(super::i18n::t(lang, "bulk_label")).color(theme::DIM()).small()).on_hover_text(super::i18n::t(lang, "bulk_tooltip"));
 
         let mut applied = false;
         ui.add_enabled_ui(enabled, |ui| {
@@ -136,7 +136,7 @@ fn find_row(app: &mut App, ui: &mut egui::Ui) {
     let lang = app.prefs.lang;
     let locked = app.controls_locked();
     ui.horizontal(|ui| {
-        ui.label(RichText::new(super::i18n::t(lang, "filter_label")).color(theme::DIM).small());
+        ui.label(RichText::new(super::i18n::t(lang, "filter_label")).color(theme::DIM()).small());
         let before = app.shape_filter.clone();
         ui.add(egui::TextEdit::singleline(&mut app.shape_filter).desired_width(160.0).hint_text(super::i18n::t(lang, "filter_hint")))
             .on_hover_text(super::i18n::t(lang, "filter_tooltip"));
@@ -149,13 +149,13 @@ fn find_row(app: &mut App, ui: &mut egui::Ui) {
             let shown = app.shapes.iter().filter(|r| matches_filter(r, &app.shape_filter.to_lowercase())).count();
             ui.label(
                 RichText::new(super::i18n::tv(lang, "filter_count", &[("shown", &shown.to_string()), ("total", &app.shapes.len().to_string())]))
-                    .color(theme::DIM)
+                    .color(theme::DIM())
                     .small(),
             );
         }
 
         ui.add_enabled_ui(!locked, |ui| {
-            ui.label(RichText::new(super::i18n::t(lang, "sort_label")).color(theme::DIM).small());
+            ui.label(RichText::new(super::i18n::t(lang, "sort_label")).color(theme::DIM()).small());
             if ui.button(super::i18n::t(lang, "sort_name")).on_hover_text(super::i18n::t(lang, "sort_tooltip")).clicked() {
                 app.shapes.sort_by(|a, b| a.file.to_lowercase().cmp(&b.file.to_lowercase()));
             }
@@ -202,7 +202,7 @@ fn cell<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
 fn table(app: &mut App, ui: &mut egui::Ui) {
     let locked = app.controls_locked();
     let lang = app.prefs.lang;
-    let accent = theme::ACCENT;
+    let accent = theme::ACCENT();
     // Which parts count as "closes the sheet" - computed once for the whole
     // table rather than per row, since the reference sheet is job-wide.
     let sheet_area = app.largest_sheet_area();
@@ -232,19 +232,19 @@ fn table(app: &mut App, ui: &mut egui::Ui) {
                 app.shapes.iter_mut().filter(|r| matches_filter(r, &needle)).for_each(|s| s.selected = select_all);
             }
             for key in ["th_index", "th_name", "th_bbox", "th_preview", "th_role", "th_qty"] {
-                cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, key)).color(theme::DIM).small()));
+                cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, key)).color(theme::DIM()).small()));
             }
-            cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, "th_grain")).color(theme::DIM).small()).on_hover_text(super::i18n::t(lang, "th_grain_tooltip")));
-            cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, "th_part_mirror")).color(theme::DIM).small()).on_hover_text(super::i18n::t(lang, "th_part_mirror_tooltip")));
-            cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, "th_dominant")).color(theme::DIM).small()).on_hover_text(super::i18n::t(lang, "th_dominant_tooltip")));
+            cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, "th_grain")).color(theme::DIM()).small()).on_hover_text(super::i18n::t(lang, "th_grain_tooltip")));
+            cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, "th_part_mirror")).color(theme::DIM()).small()).on_hover_text(super::i18n::t(lang, "th_part_mirror_tooltip")));
+            cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, "th_dominant")).color(theme::DIM()).small()).on_hover_text(super::i18n::t(lang, "th_dominant_tooltip")));
             ui.end_row();
 
             for (index, row) in app.shapes.iter_mut().enumerate().filter(|(_, r)| matches_filter(r, &needle)) {
                 cell(ui, |ui| ui.add_enabled_ui(!locked, |ui| ui.checkbox(&mut row.selected, "")));
-                cell(ui, |ui| ui.label(RichText::new((index + 1).to_string()).color(theme::DIM)));
+                cell(ui, |ui| ui.label(RichText::new((index + 1).to_string()).color(theme::DIM())));
                 cell(ui, |ui| ui.label(format!("{}-{}", row.file, index + 1)));
                 let b = bounds_of(&row.poly.points);
-                cell(ui, |ui| ui.label(RichText::new(format!("{:.1} x {:.1}", b.w(), b.h())).color(theme::DIM)));
+                cell(ui, |ui| ui.label(RichText::new(format!("{:.1} x {:.1}", b.w(), b.h())).color(theme::DIM())));
                 canvas::thumbnail(ui, &row.poly, THUMBNAIL, None);
 
                 cell(ui, |ui| {

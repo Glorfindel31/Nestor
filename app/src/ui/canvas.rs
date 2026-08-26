@@ -22,7 +22,13 @@ use crate::dto::{PointDto, PolygonDto};
 
 /// Unplaced parts are drawn entirely in the error colour regardless of their
 /// real layer, so they read as "this one's a problem" at a glance.
-pub const UNPLACED: Color32 = theme::ERROR;
+/// A function rather than a const because the palette is now chosen at
+/// runtime - the danger colour is not the same in all six worlds.
+#[must_use]
+pub fn unplaced() -> Color32 {
+    theme::ERROR()
+}
+
 
 /// Maps model coordinates (Y-up, millimetres) onto a screen rectangle
 /// (Y-down, points), preserving aspect ratio and centring the content.
@@ -94,12 +100,41 @@ pub fn rotated_translated(points: &[PointDto], rotation_deg: f64, dx: f64, dy: f
     points.iter().map(|p| PointDto { x: p.x * cos - p.y * sin + dx, y: p.x * sin + p.y * cos + dy }).collect()
 }
 
-/// The hue band the chrome owns, in degrees: `ACCENT` sits at 22.5 and
-/// `ERROR` at 11.4, and those two are the only colours in this app that mean
-/// "press this" and "this is wrong". A generated layer hue landing in here
-/// would say one of those things about a part outline, on the largest painted
-/// surface in the window. Nothing drawn from data is allowed inside it.
-const RESERVED_HUE: std::ops::RangeInclusive<f32> = 4.0..=40.0;
+/// The three operations this product names, as (matching substrings, hue,
+/// saturation, value) for a `Hue` world and as a brightness rank for a
+/// `Mono` one.
+///
+/// Substring rather than equality: real files ship `CUT`, `Cut Layer`,
+/// `OUTER_CUT`, `DRILLING`. First match wins, so the order matters only where
+/// one name contains another.
+const KNOWN: [(&[&str], f32, f32, f32); 3] = [
+    // The profile - the edge the machine actually follows, so it is the
+    // brightest and coolest thing on the sheet.
+    (&["cut", "profile", "outline", "contour"], 193.0, 0.62, 1.0),
+    // Holes: their own hue, because an operator scanning for them is usually
+    // counting them.
+    (&["drill", "hole", "bore"], 142.0, 0.60, 0.95),
+    // Surface work - never a through-cut, so it is deliberately the quietest
+    // of the three.
+    (&["etch", "engrave", "mark", "score", "raster"], 272.0, 0.52, 0.98),
+];
+
+/// Where a layer name ranks among the known operations, or `None` for one
+/// this product does not name.
+fn known_index(layer: &str) -> Option<usize> {
+    let name = layer.trim().to_ascii_lowercase();
+    KNOWN.iter().position(|(names, ..)| names.iter().any(|n| name.contains(n)))
+}
+
+/// A stable hash of the name, so the same layer draws the same colour in
+/// every file, thumbnail and sheet, with no legend and no per-job setting.
+fn name_hash(layer: &str) -> u32 {
+    let mut hash: u32 = 0;
+    for b in layer.bytes() {
+        hash = hash.wrapping_mul(31).wrapping_add(u32::from(b));
+    }
+    hash
+}
 
 /// Colour per layer name: the operations this product names get a fixed one,
 /// everything else gets a stable generated one.
@@ -110,52 +145,73 @@ const RESERVED_HUE: std::ops::RangeInclusive<f32> = 4.0..=40.0;
 /// hashing meant the same physical operation drew in a different colour in
 /// two files, while nothing stopped a hash landing on the accent.
 ///
-/// So: the known operations are pinned, cool and clear of the chrome's warm
-/// band, and anything unrecognised still hashes - just never into
-/// `RESERVED_HUE`. Same-name-same-colour still holds, in thumbnails and in
-/// the nested result alike, with no legend and no per-job configuration.
+/// **The strategy is the theme's**, because the six palettes do not all have
+/// room for three unrelated hues. MATRIX, TERMINATOR and FALLOUT are built
+/// from a single phosphor, and a cyan profile line on an amber CRT is a
+/// foreign object rather than a colour code; those worlds separate the same
+/// three operations by *brightness* instead. Nothing is lost by it: the
+/// operations stay distinguishable, consistently, which is the whole
+/// requirement.
 pub fn color_for_layer(layer: &str) -> Color32 {
-    let name = layer.trim().to_ascii_lowercase();
-    // Substring rather than equality: real files ship `CUT`, `Cut Layer`,
-    // `OUTER_CUT`, `DRILLING`. First match wins, so the order matters only
-    // where one name contains another.
-    let known = [
-        // The profile - the edge the machine actually follows, so it is the
-        // brightest and coolest thing on the sheet.
-        (["cut", "profile", "outline", "contour"].as_slice(), 193.0_f32, 0.62_f32, 1.0_f32),
-        // Holes: their own hue, because an operator scanning for them is
-        // usually counting them.
-        (["drill", "hole", "bore"].as_slice(), 142.0, 0.60, 0.95),
-        // Surface work - never a through-cut, so it is deliberately the
-        // quietest of the three.
-        (["etch", "engrave", "mark", "score", "raster"].as_slice(), 272.0, 0.52, 0.98),
-    ];
-    if let Some((_, h, s, v)) = known.iter().find(|(names, ..)| names.iter().any(|n| name.contains(n))) {
-        return egui::ecolor::Hsva::new(h / 360.0, *s, *v, 1.0).into();
+    match theme::palette().canvas {
+        theme::CanvasStyle::Hue { reserved, sat, val } => {
+            if let Some(i) = known_index(layer) {
+                let (_, h, s, v) = KNOWN[i];
+                // The theme scales the pinned operations rather than
+                // overriding them, so a light-ground world darkens all three
+                // together and they keep their relationship to each other.
+                return egui::ecolor::Hsva::new(h / 360.0, s * (sat / 0.78), v * val, 1.0).into();
+            }
+            let hue = spread_outside(name_hash(layer), reserved);
+            egui::ecolor::Hsva::new(hue / 360.0, sat, val, 1.0).into()
+        }
+        theme::CanvasStyle::Mono { base } => {
+            // Three steps for the three named operations, in the same order
+            // of prominence the hues carry: profile brightest, then holes,
+            // then surface work.
+            const STEPS: [f32; 3] = [1.0, 0.72, 0.45];
+            // Unrecognised names land between and below those, so they never
+            // impersonate a named operation but stay visible.
+            const OTHER: [f32; 4] = [0.86, 0.60, 0.34, 0.24];
+            let factor = match known_index(layer) {
+                Some(i) => STEPS[i],
+                None => OTHER[(name_hash(layer) % OTHER.len() as u32) as usize],
+            };
+            base.gamma_multiply(factor)
+        }
     }
+}
 
-    let mut hash: u32 = 0;
-    for b in layer.bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(u32::from(b));
-    }
-    // Spread over the circle minus the reserved band, then step over it.
-    //
-    // The band is widened by a degree on each side first, because this colour
-    // round-trips through 8-bit RGB on its way to `Color32` and comes back up
-    // to ~0.3 degrees from where it started. Generating exactly onto the edge
-    // put it back inside the band - which the test below caught.
+/// Spreads a hash over the hue circle, skipping every band the chrome owns.
+///
+/// A generated hue landing inside one would say "press this" or "this is
+/// wrong" about a part outline, on the largest painted surface in the window.
+///
+/// Each band is widened by a degree on each side first, because the colour
+/// round-trips through 8-bit RGB on its way to `Color32` and comes back up to
+/// ~0.3 degrees from where it started. Generating exactly onto an edge put it
+/// back inside the band - which the test below caught.
+fn spread_outside(hash: u32, reserved: &[(f32, f32)]) -> f32 {
     const GUARD: f32 = 1.0;
-    let (lo, hi) = (RESERVED_HUE.start() - GUARD, RESERVED_HUE.end() + GUARD);
-    let span = 360.0 - (hi - lo);
-    let mut hue = (hash % span as u32) as f32;
-    if hue >= lo {
-        hue += hi - lo;
+    let bands: Vec<(f32, f32)> = reserved.iter().map(|(lo, hi)| (lo - GUARD, hi + GUARD)).collect();
+    let blocked: f32 = bands.iter().map(|(lo, hi)| hi - lo).sum();
+    let span = 360.0 - blocked;
+    if span <= 1.0 {
+        // No theme does this, but a future palette that reserved almost the
+        // whole wheel would otherwise divide by ~zero and hash everything
+        // onto one hue.
+        return 0.0;
     }
-    // Full value and slightly off-full saturation: these sit on `WELL`, the
-    // darkest surface in the palette, so they can afford to be the only
-    // saturated colour on screen. The chrome around them is zero-chroma by
-    // design and does not compete.
-    egui::ecolor::Hsva::new(hue / 360.0, 0.78, 1.0, 1.0).into()
+    let mut hue = (hash % span as u32) as f32;
+    // Walk the bands in order, pushing the hue past each one it has reached.
+    let mut sorted = bands;
+    sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (lo, hi) in sorted {
+        if hue >= lo {
+            hue += hi - lo;
+        }
+    }
+    hue
 }
 
 /// Draws a shape and, recursively, every nested child - holes and interior
@@ -185,7 +241,7 @@ pub fn thumbnail(ui: &mut egui::Ui, shape: &PolygonDto, size: f32, override_colo
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     if ui.is_rect_visible(rect) {
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, theme::WELL);
+        painter.rect_filled(rect, 0.0, theme::WELL());
         let b = bounds_of(&shape.points);
         let pad = (b.w().max(b.h()).max(1.0) * 0.08) as f32;
         let view = View::fit(b, rect.shrink(pad.min(size / 4.0)));
@@ -246,7 +302,13 @@ mod tests {
 
     #[test]
     fn layer_colours_are_stable_and_differ_between_layers() {
+        // Reads the global palette, so it has to be serialised against the
+        // tests that change it - and it genuinely would fail under a Mono
+        // world, where two layers can share a brightness step.
+        let _guard = theme::TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        theme::set(theme::Theme::Oxide);
         assert_eq!(color_for_layer("cut"), color_for_layer("cut"));
+
         assert_ne!(color_for_layer("cut"), color_for_layer("drilling"));
     }
 
@@ -254,7 +316,9 @@ mod tests {
     /// spelled it - the whole reason the known names are pinned.
     #[test]
     fn known_operations_are_spelling_insensitive() {
-        for names in [["cut", "CUT", "Outer Cut"], ["drill", "DRILLING", "holes"], ["etch", "ENGRAVE", "Score 1"]] {
+        let _guard = theme::TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for names in
+ [["cut", "CUT", "Outer Cut"], ["drill", "DRILLING", "holes"], ["etch", "ENGRAVE", "Score 1"]] {
             let first = color_for_layer(names[0]);
             for n in names {
                 assert_eq!(color_for_layer(n), first, "{n} should match {}", names[0]);
@@ -263,15 +327,40 @@ mod tests {
     }
 
     /// No colour drawn from data may impersonate the accent or the error
-    /// signal. Exhaustive over a wide sample of names rather than a few.
+    /// signal. Exhaustive over a wide sample of names rather than a few, and
+    /// over **every** theme: each palette reserves its own bands, so a band
+    /// that is safe in OXIDE is exactly where CYBERPUNK puts its yellow.
+    ///
+    /// Runs serially and restores the theme it found, because the active
+    /// palette is process-global.
     #[test]
     fn no_layer_colour_lands_in_the_chrome_hue_band() {
         let mut names: Vec<String> = (0..4000).map(|i| format!("layer{i}")).collect();
         names.extend(["cut", "drill", "etch", "0", "DEFAULT", "annotation", "text", "dim"].iter().map(|s| (*s).to_string()));
-        for name in names {
-            let hsva = egui::ecolor::Hsva::from(color_for_layer(&name));
-            let hue = hsva.h * 360.0;
-            assert!(!RESERVED_HUE.contains(&hue), "layer {name:?} drew at hue {hue}, inside the reserved band");
+
+        let _guard = theme::TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let restore = theme::active();
+        for t in theme::Theme::ALL {
+
+            theme::set(t);
+            let theme::CanvasStyle::Hue { reserved, .. } = theme::palette().canvas else {
+                // A Mono world draws every layer in one hue by construction -
+                // the theme's own - so there is no band to stay out of.
+                continue;
+            };
+            for name in &names {
+                let hsva = egui::ecolor::Hsva::from(color_for_layer(name));
+                let hue = hsva.h * 360.0;
+                for (lo, hi) in reserved {
+                    assert!(
+                        hue < *lo || hue > *hi,
+                        "{}: layer {name:?} drew at hue {hue}, inside the reserved band {lo}..{hi}",
+                        t.label()
+                    );
+                }
+            }
         }
+        theme::set(restore);
     }
+
 }

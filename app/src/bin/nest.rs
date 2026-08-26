@@ -251,7 +251,10 @@ fn run() -> Result<(), String> {
         |_, _, _| {},
         |_| {},
         |_| {},
+        |_| {},
+        |_| {},
     )?;
+
     let elapsed = started.elapsed();
 
     // The same audit the window runs after every nest. A harness that reports

@@ -119,7 +119,7 @@ fn main() {
     let total_start = Instant::now();
     for generation in 1..=generations {
         let started = Instant::now();
-        let results = dispatch::run_generation(&mut ga, &sheets, &parts_by_id, &shape_ids, &placement_config, &never_cancel, &|_, _| {}, &cache);
+        let results = dispatch::run_generation(&mut ga, &sheets, &parts_by_id, &shape_ids, &placement_config, &never_cancel, &|_, _| {}, &|_| {}, &cache);
         let elapsed = started.elapsed();
         per_generation.push(elapsed);
         for evaluated in results {

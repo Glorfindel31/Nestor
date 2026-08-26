@@ -562,7 +562,7 @@ pub fn repack_sheet(request: RepackSheetRequest) -> Result<RepackSheetResponse, 
 // test builds instead of carrying an unused production entry point.
 #[cfg(test)]
 pub fn run_nest(request: RunNestRequest) -> Result<RunNestResponse, String> {
-    run_nest_with_progress(request, |_, _, _| {}, || false, |_, _, _| {}, |_| {}, |_| {})
+    run_nest_with_progress(request, |_, _, _| {}, || false, |_, _, _| {}, |_| {}, |_| {}, |_| {}, |_| {})
 }
 
 /// Everything `run_nest_with_progress` and `run_nest_live_preview` both need
@@ -1074,6 +1074,21 @@ fn escalated_run_config(base_ga_config: &GaConfig, base_generations: usize, run_
 /// rather than adding a callback parameter to that function - `dispatch`'s
 /// own doc comment already calls progress plumbing out as "left to whatever
 /// wraps this loop", so this is that wrapper, not a fork of engine logic.
+/// `on_parts_ready` fires exactly once, before the first generation, with
+/// the same authoritative id -> shape map `RunNestResponse::parts_by_id`
+/// reports at the end. A caller drawing the nest live needs the geometry
+/// *before* the first part lands, and until this existed the map only
+/// arrived with the finished response - so a live view had ids to place and
+/// nothing to draw for them.
+///
+/// It is not folded into `NestRunStartDto`: that fires once per escalation
+/// run, is `Copy`, and describes the search (rotations, population,
+/// generations). Part geometry is neither per-run nor cheap to copy.
+///
+/// `on_live` observes one individual's placement part by part - see
+/// `nesting::dispatch::run_generation`'s own doc for which individual and
+/// why only one. Pass `&|_| {}` to opt out; the cost is then one bool test
+/// per placed part.
 #[allow(clippy::too_many_arguments)]
 pub fn run_nest_with_progress(
     request: RunNestRequest,
@@ -1082,7 +1097,10 @@ pub fn run_nest_with_progress(
     on_individual_placed: impl Fn(usize, usize, usize) + Sync + Send,
     mut on_run_start: impl FnMut(&NestRunStartDto) + Send,
     mut on_run_complete: impl FnMut(&NestRunCompleteDto) + Send,
+    mut on_parts_ready: impl FnMut(&HashMap<usize, PolygonDto>) + Send,
+    on_live: impl Fn(nesting::placement::LiveEvent) + Sync + Send,
 ) -> Result<RunNestResponse, String> {
+
     // Read before `prepare_nest_inputs` consumes `request` - none of these
     // are needed by the shared validation/padding logic, only by the runs/GA
     // loop below.
@@ -1094,10 +1112,13 @@ pub fn run_nest_with_progress(
     let cleanup_threshold = request.config.cleanup_threshold_percent;
 
     let PreparedNestInputs { sheets, parts_by_id, parts_by_id_dto, shape_ids, adam, placement_config, part_rules } = prepare_nest_inputs(request)?;
+    // Handed over before any placement starts - see `on_parts_ready` above.
+    on_parts_ready(&parts_by_id_dto);
     // Same map on both configs: a rotation *gene* and the *placement* it
     // produces must agree about what each part is allowed to do, or a
     // grain-locked part gets a legal gene and an illegal placement.
     base_ga_config.part_rules = part_rules;
+
 
     // One cache for the *whole* escalation - every run, every individual,
     // every generation - not a fresh one per run/generation/individual.
@@ -1207,7 +1228,8 @@ pub fn run_nest_with_progress(
                 // at the boundary between whole generations.
                 let results = dispatch::run_generation(&mut ga, sheets_ref, parts_by_id_ref, shape_ids_ref, &placement_config, &should_cancel, &|done, total| {
                     on_individual_placed(generation_in_run, done, total)
-                }, cache_ref);
+                }, &on_live, cache_ref);
+
                 let mut improved_this_generation = false;
                 for evaluated in results {
                     if best.as_ref().is_none_or(|b| is_better_nest(&evaluated.result, b)) {
@@ -2016,7 +2038,10 @@ mod tests {
             |_, _, _| {},
             |_| {},
             |_| {},
+            |_| {},
+            |_| {},
         )
+
         .expect("should nest successfully");
 
         assert_eq!(seen_generations, vec![1, 2, 3, 4]);
@@ -2069,7 +2094,10 @@ mod tests {
             |_, _, _| {},
             |start| starts.lock().unwrap().push(*start),
             |complete| completes.lock().unwrap().push(*complete),
+            |_| {},
+            |_| {},
         )
+
         .expect("should nest successfully");
 
         let starts = starts.into_inner().unwrap();
@@ -2187,14 +2215,82 @@ mod tests {
         // generation), so this needs a thread-safe counter, not a plain
         // captured `let mut`.
         let checks = std::sync::atomic::AtomicUsize::new(0);
-        let response = run_nest_with_progress(request, |_, _, _| {}, || checks.fetch_add(1, Ordering::Relaxed) >= 2, |_, _, _| {}, |_| {}, |_| {})
+        let response = run_nest_with_progress(request, |_, _, _| {}, || checks.fetch_add(1, Ordering::Relaxed) >= 2, |_, _, _| {}, |_| {}, |_| {}, |_| {}, |_| {})
             .expect("should still return the best result found so far");
 
         assert!(response.cancelled);
     }
 
+    /// The live stream must be **one** nest being built, not every individual
+
+    /// in the population interleaved.
+    ///
+    /// `run_generation` places the whole population in parallel on rayon
+    /// threads, so an unfiltered hook would emit N layouts at once and the
+    /// live view would draw parts from eight different attempts on top of
+    /// each other. The observable invariant: between two `Begin` events, no
+    /// part id appears twice - a single nest places each copy exactly once,
+    /// whereas two interleaved ones repeat every id they share.
+    #[test]
+    fn the_live_stream_follows_one_individual_at_a_time() {
+        let request = RunNestRequest {
+            sheets: vec![square_dto(100.0)],
+            // 6 copies against population_size 6, so an interleaved stream
+            // would be obvious: ids would repeat many times over per attempt.
+            parts: vec![part(square_dto(10.0), 6)],
+            config: config(2),
+        };
+
+        // (attempt index, part id) in arrival order.
+        let attempts: std::sync::Mutex<Vec<Vec<usize>>> = std::sync::Mutex::new(Vec::new());
+        let parts_ready: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+        run_nest_with_progress(
+            request,
+            |_, _, _| {},
+            || false,
+            |_, _, _| {},
+            |_| {},
+            |_| {},
+            |parts| {
+                let mut ready = parts_ready.lock().unwrap();
+                assert!(ready.is_empty(), "on_parts_ready must fire exactly once for a whole run");
+                *ready = parts.keys().copied().collect();
+            },
+            |event| {
+                let mut attempts = attempts.lock().unwrap();
+                match event {
+                    nesting::placement::LiveEvent::Begin => attempts.push(Vec::new()),
+                    nesting::placement::LiveEvent::Part { part, .. } => {
+                        attempts.last_mut().expect("a Part must follow a Begin").push(part.id);
+                    }
+                    nesting::placement::LiveEvent::Candidates { .. } => {}
+                }
+            },
+        )
+        .expect("should nest successfully");
+
+        let attempts = attempts.into_inner().unwrap();
+        assert!(!attempts.is_empty(), "the live hook should have seen at least one attempt");
+        assert!(attempts.iter().any(|a| !a.is_empty()), "at least one attempt should have placed parts");
+
+        for (n, ids) in attempts.iter().enumerate() {
+            let mut sorted = ids.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), ids.len(), "attempt {n} repeated a part id: {ids:?} - two individuals' streams have been interleaved");
+            assert!(ids.len() <= 6, "attempt {n} placed {} parts, more than the job has", ids.len());
+        }
+
+        // The geometry the live view draws with arrives before any of it.
+        let mut ready = parts_ready.into_inner().unwrap();
+        ready.sort_unstable();
+        assert_eq!(ready, vec![0, 1, 2, 3, 4, 5], "every part copy should be drawable from the first frame");
+    }
+
     #[test]
     fn run_nest_with_progress_reports_per_individual_ticks_within_a_generation() {
+
         let request = RunNestRequest {
             sheets: vec![square_dto(100.0)],
             parts: vec![part(square_dto(10.0), 3)],
@@ -2204,7 +2300,8 @@ mod tests {
         let ticks = std::sync::Mutex::new(Vec::new());
         let response = run_nest_with_progress(request, |_, _, _| {}, || false, |generation, done, total| {
             ticks.lock().unwrap().push((generation, done, total));
-        }, |_| {}, |_| {})
+        }, |_| {}, |_| {}, |_| {}, |_| {})
+
         .expect("should nest successfully");
 
         let ticks = ticks.into_inner().unwrap();
@@ -2232,7 +2329,7 @@ mod tests {
             config: config(20),
         };
 
-        let response = run_nest_with_progress(request, |_, _, _| {}, || true, |_, _, _| {}, |_| {}, |_| {})
+        let response = run_nest_with_progress(request, |_, _, _| {}, || true, |_, _, _| {}, |_| {}, |_| {}, |_| {}, |_| {})
             .expect("an immediate cancel must still succeed gracefully");
 
         assert!(response.cancelled);

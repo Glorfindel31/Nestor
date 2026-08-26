@@ -17,7 +17,7 @@ use super::{config, prefs, theme, App};
 pub fn heading(app: &App, ui: &mut egui::Ui, number: &str, key: &str) {
     ui.horizontal(|ui| {
         if !number.is_empty() {
-            ui.label(RichText::new(number).color(theme::ACCENT).strong().family(theme::heavy()));
+            ui.label(RichText::new(number).color(theme::ACCENT()).strong().family(theme::heavy()));
         }
         ui.label(RichText::new(app.t(key)).strong().family(theme::heavy()));
     });
@@ -35,7 +35,7 @@ pub fn heading(app: &App, ui: &mut egui::Ui, number: &str, key: &str) {
 pub fn heading_rule(ui: &mut egui::Ui) {
     ui.add_space(6.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 3.0), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, theme::ACCENT);
+    ui.painter().rect_filled(rect, 0.0, theme::ACCENT());
     ui.add_space(8.0);
 }
 
@@ -43,18 +43,18 @@ pub fn heading_rule(ui: &mut egui::Ui) {
 /// fill difference from its own contents and no bevel: the border is the
 /// only thing saying where the panel ends.
 pub fn panel_frame(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
-    let response = egui::Frame::new().fill(theme::PANEL).inner_margin(12.0).outer_margin(egui::Margin { top: 0, bottom: 8, left: 0, right: 0 }).show(ui, contents).response;
-    theme::hairline(ui.painter(), response.rect, theme::LINE, 1.0);
+    let response = egui::Frame::new().fill(theme::PANEL()).inner_margin(12.0).outer_margin(egui::Margin { top: 0, bottom: 8, left: 0, right: 0 }).show(ui, contents).response;
+    theme::hairline(ui.painter(), response.rect, theme::LINE(), 1.0);
 }
 
 pub fn status_label(ui: &mut egui::Ui, status: &super::state::Status) {
     if !status.text.is_empty() {
-        ui.label(RichText::new(&status.text).color(if status.error { theme::ERROR } else { theme::DIM }));
+        ui.label(RichText::new(&status.text).color(if status.error { theme::ERROR() } else { theme::DIM() }));
     }
 }
 
 pub fn header(app: &mut App, ctx: &egui::Context) {
-    egui::TopBottomPanel::top("header").frame(egui::Frame::new().fill(theme::PANEL).inner_margin(8.0)).show(ctx, |ui| {
+    egui::TopBottomPanel::top("header").frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(8.0)).show(ctx, |ui| {
         ui.horizontal(|ui| {
             // No inter-item spacing across these three: it is one word, split
             // only so the sigma can carry the accent colour on its own.
@@ -67,12 +67,12 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
                 for (text, accented) in [("NE", false), ("Σ", true), ("TOR", false)] {
                     let mut mark = RichText::new(text).size(20.0).strong().family(theme::heavy());
                     if accented {
-                        mark = mark.color(theme::ACCENT);
+                        mark = mark.color(theme::ACCENT());
                     }
                     ui.label(mark);
                 }
             });
-            ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).color(theme::DIM));
+            ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).color(theme::DIM()));
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button(app.t("btn_settings")).on_hover_text(app.t("app_settings_title")).clicked() {
@@ -94,7 +94,7 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
                 if ui.button(format!("{} {label}", app.t("console_title"))).on_hover_text(super::keys::hint(app.t("console_title"), "Ctrl+L")).clicked() {
                     app.console_open = !app.console_open;
                 }
-                if ui.button(RichText::new(app.t("btn_reset")).color(theme::ERROR)).on_hover_text(app.t("btn_reset_tooltip")).clicked() {
+                if ui.button(RichText::new(app.t("btn_reset")).color(theme::ERROR())).on_hover_text(app.t("btn_reset_tooltip")).clicked() {
                     app.confirm_reset = true;
                 }
             });
@@ -118,7 +118,7 @@ fn settings_menu(app: &mut App, ctx: &egui::Context) {
             // narrower than its own title bar, so the section labels wrap and
             // the panel reads as noise.
             ui.set_min_width(260.0);
-            ui.label(RichText::new(app.t("lang_switch_label")).color(theme::DIM));
+            ui.label(RichText::new(app.t("lang_switch_label")).color(theme::DIM()));
             ui.horizontal(|ui| {
                 for lang in super::i18n::Lang::ALL {
                     if ui.selectable_label(app.prefs.lang == lang, lang.label()).clicked() {
@@ -143,7 +143,7 @@ fn settings_menu(app: &mut App, ctx: &egui::Context) {
             });
 
             ui.separator();
-            ui.label(RichText::new(app.t("scale_switch_label")).color(theme::DIM));
+            ui.label(RichText::new(app.t("scale_switch_label")).color(theme::DIM()));
             ui.horizontal(|ui| {
                 for scale in prefs::Scale::ALL {
                     if ui.selectable_label(app.prefs.scale == scale, app.t(scale.key())).clicked() {
@@ -152,6 +152,18 @@ fn settings_menu(app: &mut App, ctx: &egui::Context) {
                     }
                 }
             });
+
+            ui.separator();
+            ui.label(RichText::new(app.t("theme_switch_label")).color(theme::DIM()));
+            // A column, not a row: six names do not fit across this menu at
+            // the large TEXT SIZE, and a wrapped row puts the last two
+            // somewhere the eye does not look for them.
+            for theme in theme::Theme::ALL {
+                if ui.selectable_label(app.prefs.theme == theme, theme.label()).clicked() {
+                    app.set_theme(ctx, theme);
+                }
+            }
+
         });
     app.settings_menu_open = open;
 }
@@ -163,7 +175,7 @@ fn settings_menu(app: &mut App, ctx: &egui::Context) {
 /// under the floating RUN control. CONFIGURE is a right-hand side panel
 /// now (`config_panel` below); this strip is only a readout.
 pub fn bottom_bar(app: &mut App, ctx: &egui::Context) {
-    egui::TopBottomPanel::bottom("bottom_bar").frame(egui::Frame::new().fill(theme::PANEL).inner_margin(8.0)).show(ctx, |ui| {
+    egui::TopBottomPanel::bottom("bottom_bar").frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(8.0)).show(ctx, |ui| {
         ui.horizontal(|ui| {
             if let Some(snap) = &app.snapshot {
                 let summary = super::i18n::tv(
@@ -175,7 +187,7 @@ pub fn bottom_bar(app: &mut App, ctx: &egui::Context) {
                         ("util", &format!("{:.1}", snap.utilisation)),
                     ],
                 );
-                ui.label(RichText::new(summary).color(theme::DIM)).on_hover_text(app.t("bottom_bar_summary_tooltip"));
+                ui.label(RichText::new(summary).color(theme::DIM())).on_hover_text(app.t("bottom_bar_summary_tooltip"));
             }
         });
     });
@@ -198,7 +210,7 @@ pub fn config_panel(app: &mut App, ctx: &egui::Context) {
     // nothing in here reads better past ~460.
     let width = (ctx.screen_rect().width() * 0.30).clamp(340.0, 460.0);
     egui::SidePanel::right("configure")
-        .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(8.0))
+        .frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(8.0))
         .default_width(width)
         .width_range(320.0..=760.0)
         .show(ctx, |ui| {
@@ -262,11 +274,11 @@ pub fn run_float(app: &mut App, ctx: &egui::Context) {
         // full available width, and an auto-sized window then inflates to
         // half the screen with the button marooned in an empty panel.
         ui.horizontal(|ui| {
-            let accent = theme::ACCENT;
+            let accent = theme::ACCENT();
             status_label(ui, &app.run_status);
             if app.running {
                 ui.spinner();
-                if ui.add(big(RichText::new(app.t("btn_stop")).color(theme::ERROR))).on_hover_text(super::keys::hint(app.t("btn_stop"), "Ctrl+R")).clicked() {
+                if ui.add(big(RichText::new(app.t("btn_stop")).color(theme::ERROR()))).on_hover_text(super::keys::hint(app.t("btn_stop"), "Ctrl+R")).clicked() {
                     app.worker.cancel.cancel();
                     app.run_status.ok(app.t("run_status_stopped"));
                 }
@@ -283,7 +295,7 @@ pub fn run_float(app: &mut App, ctx: &egui::Context) {
                 let cost = app.cfg.search_cost_multiple();
                 if cost > 1.05 {
                     let text = super::i18n::tv(app.prefs.lang, "search_cost", &[("n", &format!("{cost:.0}"))]);
-                    let colour = if cost >= 4.0 { theme::ERROR } else { theme::DIM };
+                    let colour = if cost >= 4.0 { theme::ERROR() } else { theme::DIM() };
                     ui.label(RichText::new(text).color(colour).small()).on_hover_text(app.t("search_cost_tooltip"));
                 }
                 if ui
@@ -312,9 +324,9 @@ pub fn run_float(app: &mut App, ctx: &egui::Context) {
                 egui::ProgressBar::new(app.progress)
                     .desired_width(240.0 * RUN_BUTTON_SCALE)
                     .corner_radius(egui::CornerRadius::ZERO)
-                    .fill(theme::ACCENT)
+                    .fill(theme::ACCENT())
                     .animate(true)
-                    .text(RichText::new(format!("{:.0}%", app.progress * 100.0)).color(theme::TEXT).family(theme::heavy())),
+                    .text(RichText::new(format!("{:.0}%", app.progress * 100.0)).color(theme::TEXT()).family(theme::heavy())),
             );
             // egui repaints on input or on request only. Without this the
             // highlight advances just once per progress message - exactly the
@@ -322,9 +334,19 @@ pub fn run_float(app: &mut App, ctx: &egui::Context) {
             // the GA the cores it is actually using.
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
         }
-        if app.cfg.mirror {
-            ui.label(RichText::new(app.t("mirror_run_warning")).color(theme::ERROR).small());
+        // Deliberately outside the `if app.running` above: this is the one
+        // control that is *more* useful mid-run than before it, because the
+        // engine reads the flag on every part it places. Turning it off part
+        // way through a long job stops the cost immediately without
+        // restarting anything, and turning it on shows the next part to land.
+        let mut live = app.prefs.live_view;
+        if ui.checkbox(&mut live, RichText::new(app.t("live_view")).color(theme::TEXT())).on_hover_text(app.t("live_view_hint")).changed() {
+            app.set_live_view(live);
         }
+        if app.cfg.mirror {
+            ui.label(RichText::new(app.t("mirror_run_warning")).color(theme::ERROR()).small());
+        }
+
     });
 }
 
@@ -414,7 +436,7 @@ fn help(app: &mut App, ctx: &egui::Context) {
     egui::Modal::new(egui::Id::new("help")).show(ctx, |ui| {
         ui.set_max_width(560.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(app.t("help_title")).strong().family(theme::heavy()).size(18.0).color(theme::ACCENT));
+            ui.label(RichText::new(app.t("help_title")).strong().family(theme::heavy()).size(18.0).color(theme::ACCENT()));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 for lang in super::i18n::Lang::ALL {
                     if ui.selectable_label(app.prefs.lang == lang, lang.label()).clicked() {
@@ -445,17 +467,17 @@ fn help(app: &mut App, ctx: &egui::Context) {
             ui.label(app.t(key));
         }
         ui.add_space(12.0);
-        ui.label(RichText::new(app.t("help_keys_title")).color(theme::ACCENT).strong().family(theme::heavy()));
+        ui.label(RichText::new(app.t("help_keys_title")).color(theme::ACCENT()).strong().family(theme::heavy()));
         ui.add_space(4.0);
         egui::Grid::new("help_keys").num_columns(2).spacing([16.0, 2.0]).show(ui, |ui| {
             for binding in super::keys::BINDINGS {
                 ui.label(RichText::new(binding.keys).strong().family(theme::heavy()));
-                ui.label(RichText::new(app.t(binding.description_key)).color(theme::DIM));
+                ui.label(RichText::new(app.t(binding.description_key)).color(theme::DIM()));
                 ui.end_row();
             }
         });
         ui.add_space(8.0);
-        ui.label(RichText::new(app.t("help_tip")).color(theme::DIM));
+        ui.label(RichText::new(app.t("help_tip")).color(theme::DIM()));
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             // Persisted only when the dialog is actually closed, so ticking
@@ -474,10 +496,10 @@ fn help(app: &mut App, ctx: &egui::Context) {
         // Not an i18n key: a name, a year and a domain are the same in every
         // language, and routing them through the dictionary would only create
         // two copies to keep in sync.
-        ui.label(RichText::new("dev by Cedric Florentin 2026").color(theme::DIM).small());
+        ui.label(RichText::new("dev by Cedric Florentin 2026").color(theme::DIM()).small());
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            ui.label(RichText::new("By and For Upset Climbing").color(theme::DIM).small());
+            ui.label(RichText::new("By and For Upset Climbing").color(theme::DIM()).small());
             ui.hyperlink_to(RichText::new("upsetclimbing.com").small(), "https://upsetclimbing.com");
         });
     });
@@ -512,9 +534,9 @@ const HELP_WIDTH: f32 = 380.0;
 pub fn help_bubble(response: egui::Response, title: &str, body: &str) -> egui::Response {
     response.on_hover_ui(|ui| {
         ui.set_max_width(HELP_WIDTH);
-        ui.label(RichText::new(title).color(theme::ACCENT).family(theme::heavy()));
+        ui.label(RichText::new(title).color(theme::ACCENT()).family(theme::heavy()));
         ui.separator();
-        ui.label(RichText::new(body).color(theme::TEXT));
+        ui.label(RichText::new(body).color(theme::TEXT()));
     })
 }
 
@@ -522,7 +544,7 @@ pub fn help_bubble(response: egui::Response, title: &str, body: &str) -> egui::R
 pub fn number_row<T: egui::emath::Numeric>(ui: &mut egui::Ui, label: &str, tooltip: &str, value: &mut T, speed: f64, range: std::ops::RangeInclusive<T>) {
     let row = ui
         .horizontal(|ui| {
-            let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(label).color(theme::DIM)));
+            let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(label).color(theme::DIM())));
             let field = ui.add(egui::DragValue::new(value).speed(speed).range(range));
             name.union(field)
         })
@@ -548,5 +570,5 @@ pub fn choice<T: PartialEq + Copy>(ui: &mut egui::Ui, id: &str, current: &mut T,
 
 /// Text drawn in the accent colour, for the one-off places that need it.
 pub fn accent(text: impl Into<String>) -> RichText {
-    RichText::new(text.into()).color(theme::ACCENT)
+    RichText::new(text.into()).color(theme::ACCENT())
 }
