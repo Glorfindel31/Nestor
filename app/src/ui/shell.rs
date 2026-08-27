@@ -528,7 +528,7 @@ pub fn number_row<T: egui::emath::Numeric>(ui: &mut egui::Ui, label: &str, toolt
     let row = ui
         .horizontal(|ui| {
             let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(label).color(theme::DIM())));
-            let field = ui.add(egui::DragValue::new(value).speed(speed).range(range));
+            let field = ui.add(number(value, speed, range));
             name.union(field)
         })
         .inner;
@@ -554,4 +554,112 @@ pub fn choice<T: PartialEq + Copy>(ui: &mut egui::Ui, id: &str, current: &mut T,
 /// Text drawn in the accent colour, for the one-off places that need it.
 pub fn accent(text: impl Into<String>) -> RichText {
     RichText::new(text.into()).color(theme::ACCENT())
+}
+
+/// Every numeric field in the app, so that typing `120*3` or `1200/8` into
+/// one works everywhere rather than in whichever one got the treatment.
+///
+/// `custom_parser` replaces egui's own parse outright, so `eval` has to
+/// accept a bare number too - it does.
+pub fn number<'a, T: egui::emath::Numeric>(value: &'a mut T, speed: f64, range: std::ops::RangeInclusive<T>) -> egui::DragValue<'a> {
+    egui::DragValue::new(value).speed(speed).range(range).custom_parser(eval)
+}
+
+/// `+ - * /`, parentheses and unary minus, left-to-right with the usual
+/// precedence. Returns `None` on anything it does not understand, which is
+/// what `DragValue` wants to hear to keep the old value.
+///
+// ponytail: recursive descent over chars, no tokenizer struct. Add one if
+// this ever needs functions or units.
+pub fn eval(text: &str) -> Option<f64> {
+    let chars: Vec<char> = text.trim().chars().collect();
+    let mut at = 0;
+    let value = expr(&chars, &mut at)?;
+    (at == chars.len() && value.is_finite()).then_some(value)
+}
+
+/// Whitespace is skipped between tokens but never inside one, so `2 3` is
+/// two numbers with no operator (rejected) rather than twenty-three.
+fn skip_ws(c: &[char], at: &mut usize) {
+    while matches!(c.get(*at), Some(ch) if ch.is_whitespace()) {
+        *at += 1;
+    }
+}
+
+fn expr(c: &[char], at: &mut usize) -> Option<f64> {
+    let mut left = term(c, at)?;
+    skip_ws(c, at);
+    while let Some(&op @ ('+' | '-')) = c.get(*at) {
+        *at += 1;
+        let right = term(c, at)?;
+        skip_ws(c, at);
+        left = if op == '+' { left + right } else { left - right };
+    }
+    Some(left)
+}
+
+fn term(c: &[char], at: &mut usize) -> Option<f64> {
+    let mut left = atom(c, at)?;
+    skip_ws(c, at);
+    while let Some(&op @ ('*' | '/' | 'x')) = c.get(*at) {
+        *at += 1;
+        let right = atom(c, at)?;
+        skip_ws(c, at);
+        left = if op == '*' || op == 'x' { left * right } else { left / right };
+    }
+    Some(left)
+}
+
+fn atom(c: &[char], at: &mut usize) -> Option<f64> {
+    skip_ws(c, at);
+    match c.get(*at)? {
+        '-' => {
+            *at += 1;
+            Some(-atom(c, at)?)
+        }
+        '+' => {
+            *at += 1;
+            atom(c, at)
+        }
+        '(' => {
+            *at += 1;
+            let inner = expr(c, at)?;
+            skip_ws(c, at);
+            (c.get(*at) == Some(&')')).then(|| *at += 1)?;
+            Some(inner)
+        }
+        _ => {
+            let start = *at;
+            while matches!(c.get(*at), Some(d) if d.is_ascii_digit() || *d == '.' || *d == ',') {
+                *at += 1;
+            }
+            (*at > start).then_some(())?;
+            // A comma is a decimal separator in half the languages this app
+            // ships in, and a thousands separator in the other half. Only the
+            // former can be meant here - `1,5` has to be 1.5, not 15.
+            c[start..*at].iter().collect::<String>().replace(',', ".").parse().ok()
+        }
+    }
+}
+
+#[cfg(test)]
+mod eval_tests {
+    use super::eval;
+
+    #[test]
+    fn arithmetic_and_rejections() {
+        assert_eq!(eval("12"), Some(12.0));
+        assert_eq!(eval("1,5"), Some(1.5));
+        assert_eq!(eval("120 * 3"), Some(360.0));
+        assert_eq!(eval("1200/8"), Some(150.0));
+        assert_eq!(eval("2+3*4"), Some(14.0));
+        assert_eq!(eval("(2+3)*4"), Some(20.0));
+        assert_eq!(eval("-4+10"), Some(6.0));
+        assert_eq!(eval("10x3"), Some(30.0));
+        assert_eq!(eval("1/0"), None);
+        assert_eq!(eval("2+"), None);
+        assert_eq!(eval("2 3"), None);
+        assert_eq!(eval("(2+3"), None);
+        assert_eq!(eval("abc"), None);
+    }
 }

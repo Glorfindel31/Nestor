@@ -884,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "geometry"
-version = "2.6.0"
+version = "2.6.1"
 dependencies = [
  "clipper2",
  "dxf",
@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "nesting"
-version = "2.6.0"
+version = "2.6.1"
 dependencies = [
  "clipper2",
  "dxf",
@@ -2368,7 +2368,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rustynesting"
-version = "2.6.0"
+version = "2.6.1"
 dependencies = [
  "chrono",
  "dirs",

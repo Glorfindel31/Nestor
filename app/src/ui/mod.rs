@@ -173,6 +173,13 @@ pub struct App {
     next_ui_id: usize,
     shapes_collapsed: bool,
     select_all: bool,
+    /// Where a shift-click range in the shapes table extends *from* - the
+    /// visible row index of the last plain checkbox click.
+    select_anchor: Option<usize>,
+    /// Which quantity field held focus *last* frame. Tab has to be answered
+    /// from that, not from `Response::has_focus`: by the time the response
+    /// exists, egui has already taken the focus away to hand it on.
+    qty_focus: Option<egui::Id>,
     /// What the bulk-apply row is currently set to. Held on `App` rather than
     /// read back out of the table, because these are the *pending* values -
     /// nothing is written to any row until the matching APPLY is pressed.
@@ -340,6 +347,8 @@ impl App {
             next_ui_id: 1,
             shapes_collapsed: false,
             select_all: false,
+            select_anchor: None,
+            qty_focus: None,
             bulk_rot: state::RotRule::Any,
             bulk_mirror: state::MirrorRule::Job,
             bulk_qty: 1,

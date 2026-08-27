@@ -928,7 +928,7 @@ fn export_controls(app: &mut App, ui: &mut egui::Ui) {
             other => other.label().to_string(),
         });
         ui.label(RichText::new(app.t("export_spacing_label")).color(theme::DIM()));
-        ui.add(egui::DragValue::new(&mut app.export_spacing).speed(1.0).range(0.0..=10_000.0)).on_hover_text(app.t("export_spacing_tooltip"));
+        ui.add(shell::number(&mut app.export_spacing, 1.0, 0.0..=10_000.0)).on_hover_text(app.t("export_spacing_tooltip"));
         // Labels resolved before the `&mut` borrows, or the checkbox's
         // mutable field borrow and `app.t`'s shared one collide.
         let (outline_label, outline_tip) = (app.t("export_outline_label"), app.t("export_outline_tooltip"));

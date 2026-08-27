@@ -102,7 +102,7 @@ fn bulk_row(app: &mut App, ui: &mut egui::Ui) {
                 applied = true;
             }
 
-            ui.add(egui::DragValue::new(&mut app.bulk_qty).speed(0.2).range(0..=100_000));
+            ui.add(shell::number(&mut app.bulk_qty, 0.2, 0..=100_000));
             let qty = app.bulk_qty;
             if ui.button(super::i18n::t(lang, "bulk_apply_qty")).clicked() {
                 app.shapes.iter_mut().filter(|s| s.selected).for_each(|s| s.qty = qty);
@@ -208,6 +208,10 @@ fn table(app: &mut App, ui: &mut egui::Ui) {
     let sheet_area = app.largest_sheet_area();
     let threshold = app.cfg.dominant_threshold;
     let needle = app.shape_filter.to_lowercase();
+    // Read once for the whole table - `ui.input` inside the row loop would
+    // ask the same question per row per frame.
+    let (tab, shift_tab, shift_held) =
+        ui.input(|i| (i.key_pressed(egui::Key::Tab) && !i.modifiers.shift, i.key_pressed(egui::Key::Tab) && i.modifiers.shift, i.modifiers.shift));
 
     // Takes whatever height is going, rather than a fixed 560px that left a
     // band of empty panel below a long list on a tall window - and still
@@ -239,8 +243,29 @@ fn table(app: &mut App, ui: &mut egui::Ui) {
             cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, "th_dominant")).color(theme::DIM()).small()).on_hover_text(super::i18n::t(lang, "th_dominant_tooltip")));
             ui.end_row();
 
-            for (index, row) in app.shapes.iter_mut().enumerate().filter(|(_, r)| matches_filter(r, &needle)) {
-                cell(ui, |ui| ui.add_enabled_ui(!locked, |ui| ui.checkbox(&mut row.selected, "")));
+            // Collected during the loop and acted on after it, because the loop
+            // holds `app.shapes` borrowed mutably one row at a time - a
+            // shift-click on row 40 has to reach rows 3..40, and a quantity
+            // typed into one ticked row has to reach every other ticked row.
+            let mut qty_ids: Vec<egui::Id> = Vec::new();
+            let mut focus_qty: Option<i64> = None;
+            let mut spread_qty: Option<usize> = None;
+            let mut range_click: Option<usize> = None;
+            let mut anchor = app.select_anchor;
+            let previously_focused = app.qty_focus;
+            let mut still_focused = None;
+
+            for (visible, (index, row)) in app.shapes.iter_mut().enumerate().filter(|(_, r)| matches_filter(r, &needle)).enumerate() {
+                let tick = cell(ui, |ui| ui.add_enabled_ui(!locked, |ui| ui.checkbox(&mut row.selected, "")).inner);
+                if tick.clicked() {
+                    // VS Code's rule: a plain click moves the anchor, a
+                    // shift-click extends from it.
+                    if shift_held {
+                        range_click = Some(visible);
+                    } else {
+                        anchor = Some(visible);
+                    }
+                }
                 cell(ui, |ui| ui.label(RichText::new((index + 1).to_string()).color(theme::DIM())));
                 cell(ui, |ui| ui.label(format!("{}-{}", row.file, index + 1)));
                 let b = bounds_of(&row.poly.points);
@@ -252,7 +277,25 @@ fn table(app: &mut App, ui: &mut egui::Ui) {
                         shell::choice(ui, &format!("role{}", row.ui_id), &mut row.role, &Role::ALL, |r| super::i18n::t(lang, r.key()).to_string());
                     })
                 });
-                cell(ui, |ui| ui.add_enabled_ui(!locked, |ui| ui.add(egui::DragValue::new(&mut row.qty).speed(0.2).range(0..=100_000))));
+                let qty = cell(ui, |ui| ui.add_enabled_ui(!locked, |ui| ui.add(shell::number(&mut row.qty, 0.2, 0..=100_000))).inner);
+                // Tab out of a quantity lands on the next quantity, not on
+                // the role dropdown three widgets later. `qty_ids.len()` is
+                // this row's own index until the push below.
+                if qty.has_focus() {
+                    still_focused = Some(qty.id);
+                }
+                if previously_focused == Some(qty.id) {
+                    let here = qty_ids.len() as i64;
+                    if tab {
+                        focus_qty = Some(here + 1);
+                    } else if shift_tab {
+                        focus_qty = Some(here - 1);
+                    }
+                }
+                qty_ids.push(qty.id);
+                if qty.changed() && row.selected {
+                    spread_qty = Some(row.qty);
+                }
                 cell(ui, |ui| {
                     ui.add_enabled_ui(!locked && row.role == Role::Part, |ui| {
                         shell::choice(ui, &format!("rot{}", row.ui_id), &mut row.rot, &RotRule::ALL, |r| super::i18n::t(lang, r.key()).to_string());
@@ -273,6 +316,38 @@ fn table(app: &mut App, ui: &mut egui::Ui) {
                     }
                 });
                 ui.end_row();
+            }
+
+            if let Some(to) = range_click {
+                let from = anchor.unwrap_or(to);
+                let (lo, hi) = (from.min(to), from.max(to));
+                app.shapes
+                    .iter_mut()
+                    .filter(|r| matches_filter(r, &needle))
+                    .enumerate()
+                    .filter(|(v, _)| (lo..=hi).contains(v))
+                    .for_each(|(_, r)| r.selected = true);
+                anchor = Some(from);
+            }
+            app.select_anchor = anchor;
+            app.qty_focus = still_focused;
+
+            if let Some(q) = spread_qty {
+                app.shapes.iter_mut().filter(|r| r.selected).for_each(|r| r.qty = q);
+            }
+
+            // Wraps at both ends, so tabbing off the last row returns to the
+            // first rather than escaping the table.
+            if let (Some(target), false) = (focus_qty, qty_ids.is_empty()) {
+                let id = qty_ids[target.rem_euclid(qty_ids.len() as i64) as usize];
+                ui.memory_mut(|m| m.request_focus(id));
+                // Land with the old value selected, so the next keystroke
+                // replaces it. Without this, tabbing into a field showing 1
+                // and typing 5 gives 15. The end cursor is clamped to the
+                // real text length when the field renders.
+                let mut state = egui::text_edit::TextEditState::default();
+                state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(usize::MAX))));
+                state.store(ui.ctx(), id);
             }
         });
     });

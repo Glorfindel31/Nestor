@@ -15,7 +15,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
 
         ui.horizontal(|ui| {
             ui.label(RichText::new(app.t("tolerance_label")).color(theme::DIM()));
-            ui.add(egui::DragValue::new(&mut app.cfg.curve_tolerance).speed(0.05).range(0.01..=10.0));
+            ui.add(shell::number(&mut app.cfg.curve_tolerance, 0.05, 0.01..=10.0));
 
             let enabled = app.importing == 0 && !app.controls_locked();
             if ui.add_enabled(enabled, egui::Button::new(shell::accent(app.t("btn_browse")).strong().family(theme::heavy()))).clicked() {
@@ -51,9 +51,9 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         ui.label(RichText::new(app.t("rect_hint")).color(theme::DIM()).small());
         ui.horizontal(|ui| {
             ui.label(RichText::new(app.t("rect_width_label")).color(theme::DIM()));
-            ui.add(egui::DragValue::new(&mut app.rect_w).speed(10.0).range(0.0..=1e6));
+            ui.add(shell::number(&mut app.rect_w, 10.0, 0.0..=1e6));
             ui.label(RichText::new(app.t("rect_height_label")).color(theme::DIM()));
-            ui.add(egui::DragValue::new(&mut app.rect_h).speed(10.0).range(0.0..=1e6));
+            ui.add(shell::number(&mut app.rect_h, 10.0, 0.0..=1e6));
             ui.label(RichText::new(app.t("rect_layer_label")).color(theme::DIM()));
             ui.add(egui::TextEdit::singleline(&mut app.rect_layer).desired_width(110.0));
             if ui.add_enabled(!app.controls_locked(), egui::Button::new(app.t("btn_add_rect"))).clicked() {
