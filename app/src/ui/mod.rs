@@ -287,6 +287,9 @@ pub struct App {
     /// Cleared once the first frame has re-applied the style with real font
     /// metrics - see `theme::apply`'s `fonts_ready`.
     metrics_pending: bool,
+    /// Set only if GitHub reported a release newer than this build. Drives
+    /// the header badge; `None` covers "current" and "could not check".
+    update: Option<crate::update::Release>,
 }
 
 impl App {
@@ -309,6 +312,8 @@ impl App {
         // preference across before any run can start.
         worker.live.store(prefs.live_view, std::sync::atomic::Ordering::Relaxed);
         worker.load_saved();
+        // Once per launch, on its own thread like everything else.
+        worker.check_update();
 
 
         let mut app = Self {
@@ -371,6 +376,7 @@ impl App {
             sheet_views: HashMap::new(),
             repacking: None,
             settings_menu_open: false,
+            update: None,
             confirm_reset: false,
             recover_prompt: None,
             metrics_pending: true,
@@ -643,6 +649,10 @@ impl App {
                 if let Some(b) = best {
                     self.recover_prompt = Some(Box::new(b));
                 }
+            }
+            Msg::UpdateAvailable(release) => {
+                self.console.log(console::Kind::Plain, format!("update available: v{}", release.version));
+                self.update = Some(release);
             }
             Msg::Log(line) => self.console.log(console::Kind::Plain, line),
         }

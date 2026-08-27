@@ -117,6 +117,10 @@ pub enum Msg {
     /// Startup: whatever `config.json` and `best_result.json` held.
     Loaded { config: Option<NestConfigDto>, best: Option<BestResultDto>, errors: Vec<String> },
 
+    /// A newer release exists on GitHub. Only ever sent when there is one -
+    /// silence means "current", or that the check could not reach the net.
+    UpdateAvailable(crate::update::Release),
+
     /// Free-form narration for the console window.
     Log(String),
 }
@@ -167,6 +171,16 @@ impl Worker {
                 None
             });
             emit.send(Msg::Loaded { config, best, errors });
+        });
+    }
+
+    /// Asks GitHub whether a newer release exists. Failure is logged and
+    /// dropped: an offline machine gets no banner and no complaint.
+    pub fn check_update(&self) {
+        self.spawn(|emit| match crate::update::check(env!("CARGO_PKG_VERSION")) {
+            Ok(Some(release)) => emit.send(Msg::UpdateAvailable(release)),
+            Ok(None) => {}
+            Err(e) => emit.send(Msg::Log(format!("update check failed: {e}"))),
         });
     }
 

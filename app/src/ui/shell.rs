@@ -73,6 +73,14 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
                 }
             });
             ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).color(theme::DIM()));
+            // Only ever present when there really is a newer release, so it
+            // costs nothing on an up-to-date install and needs no dismissal.
+            if let Some(release) = app.update.clone() {
+                let label = app.tv("update_available", &[("version", &release.version)]);
+                if ui.button(RichText::new(label).color(theme::ACCENT())).on_hover_text(app.t("update_available_tooltip")).clicked() {
+                    ctx.open_url(egui::OpenUrl::new_tab(release.url));
+                }
+            }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button(app.t("btn_settings")).on_hover_text(app.t("app_settings_title")).clicked() {
