@@ -52,6 +52,11 @@ use state::{ConfigForm, ShapeRow, Status};
 /// this struct, so language, scale and help-dismissed all survive the change.
 const PREFS_KEY: &str = "rustynesting-prefs-v2";
 
+/// Console-only, and deliberately English: the operator who just picked a
+/// language whose glyphs cannot be drawn is looking at boxes, so a
+/// translated warning would be one more row of them.
+const MISSING_CJK_FONT: &str = "no CJK font found on this system - Japanese, Korean and Chinese text will show as empty boxes. Install one (Windows: Settings > Time & Language > Language > add the language pack; Linux: the noto-fonts-cjk package) and restart.";
+
 /// A nest result as the RESULT panel displays it. Either the winner of a run,
 /// one of the earlier attempts from its history, or a recovered best result
 /// from a previous session.
@@ -301,7 +306,7 @@ impl App {
 
         // Once, here - not inside `apply`, which reruns on every TEXT SIZE
         // change. See `install_fonts`.
-        theme::install_fonts(&cc.egui_ctx);
+        let cjk_ok = theme::install_fonts(&cc.egui_ctx, prefs.lang);
         // Explicitly 1.0, not merely left alone: egui persists the zoom
         // factor in its own memory, so a version that once set it would
         // otherwise keep scaling strokes here forever.
@@ -383,7 +388,40 @@ impl App {
         };
         app.console.log(console::Kind::Run, "Nestor started");
         app.worker.load_store();
+        if !cjk_ok {
+            app.console.log(console::Kind::Error, MISSING_CJK_FONT.to_owned());
+        }
         app
+    }
+
+    /// Switches language.
+    ///
+    /// The three status lines are cleared rather than re-resolved: every
+    /// other label in this UI goes through `t()` every frame and follows the
+    /// switch on its own, but those hold text that was resolved once, when
+    /// the event happened, and would sit there in the old language until the
+    /// next action replaced them.
+    ///
+    /// ponytail: cleared, not re-resolved. Carrying the key and its arguments
+    /// on `Status` would let them survive the switch, and is the upgrade if
+    /// these ever hold something worth keeping - today they are transient
+    /// feedback about the last action, and an empty line beats a stale one in
+    /// the wrong language.
+    pub fn set_lang(&mut self, ctx: &egui::Context, lang: i18n::Lang) {
+        if self.prefs.lang == lang {
+            return;
+        }
+        self.prefs.lang = lang;
+        // Rebuilt on every switch, not only into or out of a CJK language:
+        // the loaded CJK faces are ordered with the current language's own
+        // first, because Japanese and Chinese draw some shared characters
+        // differently and the first face to claim a codepoint wins it.
+        if !theme::install_fonts(ctx, lang) {
+            self.console.log(console::Kind::Error, MISSING_CJK_FONT.to_owned());
+        }
+        self.import_status.clear();
+        self.run_status.clear();
+        self.export_status.clear();
     }
 
     fn t<'a>(&self, key: &'a str) -> &'a str {
@@ -687,7 +725,7 @@ impl App {
         }
         self.prefs.theme = theme;
         theme::set(theme);
-        theme::install_fonts(ctx);
+        let _ = theme::install_fonts(ctx, self.prefs.lang);
         theme::apply(ctx, self.prefs.scale.factor(), true);
         self.console.log(console::Kind::Plain, format!("theme: {}", theme.label()));
     }

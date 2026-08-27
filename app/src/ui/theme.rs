@@ -26,6 +26,7 @@
 //! full Vietnamese repertoire - see `install_fonts` for why that requirement
 //! ruled out most of the obvious genre faces.
 
+use super::i18n::Lang;
 use egui::Color32;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -625,10 +626,21 @@ pub fn stroke_width() -> f32 {
 /// weight - which `RichText::strong()` alone already did before `heavy()`
 /// existed.
 ///
-/// Call on startup and again on a theme change: `ctx.set_fonts` throws away
-/// and rebuilds the whole glyph atlas, so it must *not* be folded into
-/// `apply`, which reruns on every TEXT SIZE change.
-pub fn install_fonts(ctx: &egui::Context) {
+/// **No bundled face carries CJK glyphs**, so Japanese, Korean and Chinese
+/// get a face borrowed from the operating system, appended as the last
+/// fallback (see `cjk_face`). Embedding Noto CJK instead would have been
+/// self-contained, but it is roughly 20MB per script on every platform
+/// binary for three languages, on a release that is otherwise about 10MB.
+/// Returns `false` when `lang` itself needs CJK and no such font could be
+/// found - the caller says so out loud, because the alternative is a screen
+/// of empty boxes with no explanation.
+///
+/// Call on startup, on a theme change, and on a language change:
+/// `ctx.set_fonts` throws away and rebuilds the whole glyph atlas, so it
+/// must *not* be folded into `apply`, which reruns on every TEXT SIZE
+/// change.
+#[must_use]
+pub fn install_fonts(ctx: &egui::Context, lang: Lang) -> bool {
     const FACES: [(&str, &[u8]); 10] = [
         ("jetbrains", include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf")),
         ("jetbrains_bold", include_bytes!("../../assets/fonts/JetBrainsMono-Bold.ttf")),
@@ -670,7 +682,86 @@ pub fn install_fonts(ctx: &egui::Context) {
     // actually is bold.
     fonts.families.insert(heavy(), vec![p.font_bold.to_owned(), p.font.to_owned(), "jetbrains_bold".to_owned(), "jetbrains".to_owned()]);
 
+    // Last in every family, so they only ever supply glyphs no bundled face
+    // has. The theme's own type still draws all the Latin, which is what
+    // keeps a CJK language looking like the same app.
+    //
+    // **All three are loaded, not just the current language's.** The language
+    // picker spells every language in its own script, so the one thing a
+    // Japanese speaker must be able to read is the word 日本語 while the app
+    // is still in English - loading on demand would show them a box and
+    // nothing to click. `lang`'s own face goes first because Japanese and
+    // Chinese draw some shared characters differently, and whichever face
+    // comes first wins the codepoint.
+    //
+    // ponytail: reads up to ~46MB of system fonts at startup on Windows.
+    // If that ever shows up as launch latency, the upgrade is to load the
+    // picker's handful of glyphs from a subset and the rest on demand.
+    let mut missing = false;
+    for face in [lang, Lang::Ja, Lang::Ko, Lang::Zh] {
+        let name = match face {
+            Lang::Ja => "cjk_ja",
+            Lang::Ko => "cjk_ko",
+            Lang::Zh => "cjk_zh",
+            // `lang` on its first pass through, when it is not a CJK language.
+            _ => continue,
+        };
+        if fonts.font_data.contains_key(name) {
+            continue;
+        }
+        match cjk_paths(face).iter().find_map(|path| std::fs::read(path).ok()) {
+            Some(bytes) => {
+                fonts.font_data.insert(name.to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+                for list in fonts.families.values_mut() {
+                    list.push(name.to_owned());
+                }
+            }
+            // Only the language actually being displayed is worth complaining
+            // about; an unreadable entry in the picker is self-explanatory.
+            None => missing |= face == lang,
+        }
+    }
+
     ctx.set_fonts(fonts);
+    !missing
+}
+
+/// Where to look for a system font carrying `lang`'s script, best first.
+///
+/// One list per language rather than one font for all three: no regional
+/// font has kana *and* hangul *and* hanzi, so listing them separately is what
+/// correctness costs. Ordered newest-first, since a machine with the modern
+/// face usually also has the legacy one and the modern face looks better.
+///
+/// `.ttc` collections are read at index 0, which is the regular weight in
+/// every collection listed here.
+fn cjk_paths(lang: Lang) -> &'static [&'static str] {
+    // `cfg!` rather than `#[cfg]`: the other platforms' paths are just
+    // strings, and one expression reads better than three copies of the
+    // function.
+    if cfg!(target_os = "windows") {
+        match lang {
+            Lang::Ja => &[r"C:\Windows\Fonts\YuGothM.ttc", r"C:\Windows\Fonts\meiryo.ttc", r"C:\Windows\Fonts\msgothic.ttc"],
+            Lang::Ko => &[r"C:\Windows\Fonts\malgun.ttf", r"C:\Windows\Fonts\gulim.ttc", r"C:\Windows\Fonts\batang.ttc"],
+            _ => &[r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\simhei.ttf", r"C:\Windows\Fonts\simsun.ttc"],
+        }
+    } else if cfg!(target_os = "macos") {
+        match lang {
+            Lang::Ja => &["/System/Library/Fonts/Hiragino Sans GB.ttc", "/Library/Fonts/Arial Unicode.ttf"],
+            Lang::Ko => &["/System/Library/Fonts/AppleSDGothicNeo.ttc", "/System/Library/Fonts/Supplemental/AppleGothic.ttf", "/Library/Fonts/Arial Unicode.ttf"],
+            _ => &["/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/Hiragino Sans GB.ttc", "/Library/Fonts/Arial Unicode.ttf"],
+        }
+    } else {
+        // Distributions disagree about where Noto CJK lives, and it is not
+        // installed by default everywhere - hence the caller's warning. The
+        // one file covers all three scripts, so the lists are identical.
+        &[
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+        ]
+    }
 }
 
 /// The bold family - see `install_fonts`. Use it wherever `.strong()` was

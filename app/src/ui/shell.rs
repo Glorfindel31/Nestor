@@ -114,6 +114,21 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// The language picker, shared by the settings menu and the help dialog.
+///
+/// `horizontal_wrapped`, not `horizontal`: nine endonyms do not fit on one
+/// line in either place, and egui's plain horizontal layout does not wrap -
+/// it draws the overflow on top of what is already there.
+fn lang_picker(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
+    ui.horizontal_wrapped(|ui| {
+        for lang in super::i18n::Lang::ALL {
+            if ui.selectable_label(app.prefs.lang == lang, lang.label()).clicked() {
+                app.set_lang(ctx, lang);
+            }
+        }
+    });
+}
+
 fn settings_menu(app: &mut App, ctx: &egui::Context) {
     let mut open = app.settings_menu_open;
     egui::Window::new(app.t("app_settings_title"))
@@ -127,28 +142,7 @@ fn settings_menu(app: &mut App, ctx: &egui::Context) {
             // the panel reads as noise.
             ui.set_min_width(260.0);
             ui.label(RichText::new(app.t("lang_switch_label")).color(theme::DIM()));
-            ui.horizontal(|ui| {
-                for lang in super::i18n::Lang::ALL {
-                    if ui.selectable_label(app.prefs.lang == lang, lang.label()).clicked() {
-                        app.prefs.lang = lang;
-                        // Every label in this UI re-resolves through `t()`
-                        // each frame, so it follows the switch - but the three
-                        // status lines hold text that was resolved once, when
-                        // the event happened, and would sit there in the old
-                        // language until the next action replaced them.
-                        //
-                        // ponytail: cleared rather than re-resolved. Carrying
-                        // the key and its arguments on `Status` would let them
-                        // survive the switch, and is the upgrade if these ever
-                        // hold something worth keeping - today they are
-                        // transient feedback about the last action, and an
-                        // empty line beats a stale one in the wrong language.
-                        app.import_status.clear();
-                        app.run_status.clear();
-                        app.export_status.clear();
-                    }
-                }
-            });
+            lang_picker(app, ctx, ui);
 
             ui.separator();
             ui.label(RichText::new(app.t("scale_switch_label")).color(theme::DIM()));
@@ -443,31 +437,12 @@ fn help(app: &mut App, ctx: &egui::Context) {
     let mut close = false;
     egui::Modal::new(egui::Id::new("help")).show(ctx, |ui| {
         ui.set_max_width(560.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(app.t("help_title")).strong().family(theme::heavy()).size(18.0).color(theme::ACCENT()));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                for lang in super::i18n::Lang::ALL {
-                    if ui.selectable_label(app.prefs.lang == lang, lang.label()).clicked() {
-                        app.prefs.lang = lang;
-                        // Every label in this UI re-resolves through `t()`
-                        // each frame, so it follows the switch - but the three
-                        // status lines hold text that was resolved once, when
-                        // the event happened, and would sit there in the old
-                        // language until the next action replaced them.
-                        //
-                        // ponytail: cleared rather than re-resolved. Carrying
-                        // the key and its arguments on `Status` would let them
-                        // survive the switch, and is the upgrade if these ever
-                        // hold something worth keeping - today they are
-                        // transient feedback about the last action, and an
-                        // empty line beats a stale one in the wrong language.
-                        app.import_status.clear();
-                        app.run_status.clear();
-                        app.export_status.clear();
-                    }
-                }
-            });
-        });
+        ui.label(RichText::new(app.t("help_title")).strong().family(theme::heavy()).size(18.0).color(theme::ACCENT()));
+        ui.add_space(6.0);
+        // Its own row rather than right-aligned beside the title: nine
+        // endonyms are wider than the title row has left over, and the
+        // overflow silently drew them on top of each other.
+        lang_picker(app, ctx, ui);
         ui.add_space(8.0);
         ui.label(app.t("help_intro"));
         ui.add_space(8.0);

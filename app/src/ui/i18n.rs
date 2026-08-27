@@ -1,59 +1,140 @@
-//! UI strings, English and Vietnamese.
+//! UI strings, in nine languages.
 //!
-//! A near-mechanical port of the web UI's `i18n.js`: same flat key -> string
-//! map, same `{placeholder}` substitution, same fall-back-to-English rule
-//! (so adding a third language later can be done incrementally - a partial
-//! dictionary degrades to English rather than showing raw keys).
+//! The dictionaries are **not** in this file. Each language is one flat
+//! JSON file in `app/assets/i18n/` - `en.json`, `fr.json`, `ja.json` and so
+//! on - baked into the binary with `include_str!` at compile time. See
+//! `app/assets/i18n/README.md`, which is written for the person doing the
+//! translating rather than for a Rust programmer.
 //!
-//! What the port drops is the `data-i18n` DOM-attribute convention, which
-//! existed only because static HTML had no other way to re-translate itself
-//! on a language switch. egui rebuilds every widget from state each frame,
-//! so calling `t()` at the point of use *is* the mechanism.
+//! **Why files rather than the `match` arm per key this used to be.** With
+//! two languages a `("EN", "VI")` tuple per key was fine. With nine it is a
+//! nine-column table nobody can read, in a file a non-programmer cannot
+//! safely open, in a language they would have to compile to check. Moving
+//! the strings out means a translator edits one self-contained JSON file
+//! with their language and nothing else in it, and `cargo test` tells them
+//! whether they broke it. Nothing about the *mechanism* changed: same flat
+//! key -> string map, same `{placeholder}` substitution, same
+//! fall-back-to-English rule.
+//!
+//! That fallback is what makes a half-finished translation safe to ship. A
+//! missing key, and equally a key present but left as `""`, falls through to
+//! English - so a contributor can send in fifty rows without having to
+//! finish all 274, and the app shows English for the rest instead of blanks.
 //!
 //! ponytail: only the primary UI (labels, buttons, hints, tooltips, status
 //! messages, dialogs) is translated - the CONSOLE window's own narration
 //! (per-file import lines, per-generation/tick progress, run start/complete
-//! events) stays English-only, exactly as in `i18n.js`. That's debug
-//! telemetry, not something a non-English-reading operator needs to act on,
-//! and it's a lot of interpolation-heavy strings for comparatively little
-//! value. Extend the same way (add a row below, wrap the string in `t()`) if
-//! that ever needs to change.
+//! events) stays English-only, exactly as in the `i18n.js` this began as.
+//! That's debug telemetry, not something a non-English-reading operator
+//! needs to act on. Extend the same way (add the key to every JSON file,
+//! wrap the string in `t()`) if that ever needs to change.
 //!
-//! GENERATED from `frontend/dist/i18n.js` during the egui rewrite, then
-//! maintained by hand - the JS file it came from no longer exists.
+//! CJK note: Japanese, Korean and Chinese need glyphs none of this app's
+//! own faces carry. `theme::install_fonts` finds a CJK face on the operating
+//! system rather than embedding one - see its own comment for why, and for
+//! what happens on a machine that has none.
+
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum Lang {
     #[default]
     En,
     Vi,
+    Fr,
+    Es,
+    It,
+    De,
+    Ja,
+    Ko,
+    Zh,
 }
 
 impl Lang {
-    pub const ALL: [Lang; 2] = [Lang::En, Lang::Vi];
+    /// Picker order: English first as the source language, then the rest by
+    /// script - Latin, then CJK.
+    pub const ALL: [Lang; 9] = [Lang::En, Lang::Vi, Lang::Fr, Lang::Es, Lang::It, Lang::De, Lang::Ja, Lang::Ko, Lang::Zh];
 
     /// What the language picker shows - each language's own endonym, not its
     /// English name, so a speaker can find their own row without having to
     /// read English first.
+    ///
+    /// Written with their real marks and scripts, not stripped to ASCII.
+    /// These labels are the one place whose job is to prove the app can
+    /// render the script it is offering; written flat they prove the
+    /// opposite.
     pub fn label(self) -> &'static str {
         match self {
             Lang::En => "ENGLISH",
-            // Spelled with its marks, not stripped to ASCII. This is the one
-            // label whose job is to prove the app can render the script it is
-            // offering; written flat it proved the opposite.
             Lang::Vi => "TIẾNG VIỆT",
+            Lang::Fr => "FRANÇAIS",
+            Lang::Es => "ESPAÑOL",
+            Lang::It => "ITALIANO",
+            Lang::De => "DEUTSCH",
+            Lang::Ja => "日本語",
+            Lang::Ko => "한국어",
+            Lang::Zh => "中文",
+        }
+    }
+
+    /// The `assets/i18n/<code>.json` this language reads. Only the tests
+    /// need it - `SOURCES` pairs file to language positionally - but it is
+    /// what makes their failure messages name the file to go and fix.
+    #[cfg(test)]
+    fn code(self) -> &'static str {
+        match self {
+            Lang::En => "en",
+            Lang::Vi => "vi",
+            Lang::Fr => "fr",
+            Lang::Es => "es",
+            Lang::It => "it",
+            Lang::De => "de",
+            Lang::Ja => "ja",
+            Lang::Ko => "ko",
+            Lang::Zh => "zh",
         }
     }
 }
 
+/// The raw files, in `Lang::ALL` order. `include_str!` needs a literal path,
+/// so this list is the one place a new language has to be named twice - once
+/// here and once as a `Lang` variant.
+const SOURCES: [&str; 9] = [
+    include_str!("../../assets/i18n/en.json"),
+    include_str!("../../assets/i18n/vi.json"),
+    include_str!("../../assets/i18n/fr.json"),
+    include_str!("../../assets/i18n/es.json"),
+    include_str!("../../assets/i18n/it.json"),
+    include_str!("../../assets/i18n/de.json"),
+    include_str!("../../assets/i18n/ja.json"),
+    include_str!("../../assets/i18n/ko.json"),
+    include_str!("../../assets/i18n/zh.json"),
+];
+
+/// Parsed once, on the first string anything asks for.
+///
+/// A file that does not parse becomes an **empty** dictionary rather than a
+/// panic: a contributor's stray comma should make their language render as
+/// English, not stop the app from starting. `every_file_parses` below is
+/// what makes sure that never reaches a release unnoticed.
+fn dicts() -> &'static [HashMap<String, String>; 9] {
+    static DICTS: OnceLock<[HashMap<String, String>; 9]> = OnceLock::new();
+    DICTS.get_or_init(|| SOURCES.map(|raw| serde_json::from_str(raw).unwrap_or_default()))
+}
+
+/// A key's own entry in one language, if it has a non-empty one. Empty is
+/// treated as absent so a translator can leave a row blank rather than
+/// having to delete it.
+fn entry(lang: Lang, key: &str) -> Option<&'static str> {
+    dicts()[lang as usize].get(key).map(String::as_str).filter(|s| !s.is_empty())
+}
+
 /// Looks up `key`, falling back to English for anything the chosen language
-/// is missing.
+/// is missing, and to the key itself if English is missing it too - so a
+/// typo is loud in the UI instead of showing up as a blank label.
 pub fn t<'a>(lang: Lang, key: &'a str) -> &'a str {
-    let (en, vi) = lookup(key);
-    match lang {
-        Lang::Vi if !vi.is_empty() => vi,
-        _ => en,
-    }
+    entry(lang, key).or_else(|| entry(Lang::En, key)).unwrap_or(key)
 }
 
 /// `t` plus `{name}` substitution, mirroring `i18n.js`'s `t(key, vars)`.
@@ -67,315 +148,72 @@ pub fn tv(lang: Lang, key: &str, vars: &[(&str, &str)]) -> String {
     s
 }
 
-#[rustfmt::skip]
-fn lookup<'a>(key: &'a str) -> (&'a str, &'a str) {
-    match key {
-        "heading_import_text"                      => ("IMPORT DXF / SVG", "NHẬP DXF / SVG"),
-        "tolerance_label"                          => ("TOLERANCE (mm)", "DUNG SAI (mm)"),
-        "tolerance_tooltip"                        => ("How closely curves (arcs/circles) are approximated with straight line segments, in millimeters. Lower = more accurate but more points; higher = fewer points but a coarser shape.", "Đường cong (cung/tròn) được xấp xỉ bằng đoạn thẳng chính xác đến mức nào, tính bằng milimét. Thấp hơn = chính xác hơn nhưng nhiều điểm hơn; cao hơn = ít điểm hơn nhưng hình dạng thô hơn."),
-        "btn_browse"                               => ("BROWSE...", "DUYỆT TỆP..."),
-        "dropzone_text"                            => ("or drag one or more .dxf/.svg files here", "hoặc kéo thả một hoặc nhiều tệp .dxf/.svg vào đây"),
-        "rect_hint"                                => ("or add a rectangle directly (a stock sheet size, or a simple rectangular part) without a DXF/SVG file:", "hoặc thêm trực tiếp một hình chữ nhật (kích thước tấm phôi, hoặc một chi tiết chữ nhật đơn giản) mà không cần tệp DXF/SVG:"),
-        "rect_width_label"                         => ("WIDTH (mm)", "CHIỀU RỘNG (mm)"),
-        "rect_height_label"                        => ("HEIGHT (mm)", "CHIỀU CAO (mm)"),
-        "rect_layer_label"                         => ("LAYER NAME", "TÊN LỚP"),
-        "btn_add_rect"                             => ("ADD RECTANGLE", "THÊM HÌNH CHỮ NHẬT"),
-        "svg_unit_title"                           => ("SVG UNITS", "ĐƠN VỊ SVG"),
-        "svg_unit_intro"                           => ("What does one coordinate unit in this SVG file represent in real life?", "Một đơn vị tọa độ trong tệp SVG này tương ứng với bao nhiêu ngoài đời thực?"),
-        "svg_unit_label"                           => ("FILE UNIT", "ĐƠN VỊ TỆP"),
-        "svg_unit_auto"                            => ("Auto-detect from file (recommended)", "Tự động nhận diện từ tệp (khuyến nghị)"),
-        "svg_unit_mm"                              => ("Millimeters (mm)", "Milimét (mm)"),
-        "svg_unit_cm"                              => ("Centimeters (cm)", "Xentimét (cm)"),
-        "svg_unit_m"                               => ("Meters (m)", "Mét (m)"),
-        "svg_unit_px"                              => ("Pixels (px, 96/inch)", "Điểm ảnh (px, 96/inch)"),
-        "svg_unit_cancel"                          => ("CANCEL", "HỦY"),
-        "svg_unit_ok"                              => ("IMPORT", "NHẬP"),
-        "heading_roles_text"                       => ("ASSIGN ROLES", "GÁN VAI TRÒ"),
-        "roles_empty"                              => ("Nothing imported yet. Every shape needs a role - PART to be nested, SHEET to be nested onto.", "Chưa nhập gì. Mỗi hình cần một vai trò - CHI TIẾT để xếp, TẤM PHÔI để xếp lên."),
-        "btn_mark_all_parts"                       => ("ALL PART", "TẤT CẢ = CHI TIẾT"),
-        "btn_mark_all_parts_tooltip"               => ("Set every imported shape's ROLE to PART in one click, instead of picking each row's dropdown individually.", "Đặt VAI TRÒ của mọi hình đã nhập thành CHI TIẾT chỉ bằng một cú nhấp, thay vì chọn từng dòng một."),
-        "btn_mark_all_sheets"                      => ("ALL SHEET", "TẤT CẢ = TẤM PHÔI"),
-        "btn_mark_all_sheets_tooltip"              => ("Set every imported shape's ROLE to SHEET in one click, instead of picking each row's dropdown individually.", "Đặt VAI TRÒ của mọi hình đã nhập thành TẤM PHÔI chỉ bằng một cú nhấp, thay vì chọn từng dòng một."),
-        "btn_remove_selected"                      => ("REMOVE SELECTED", "XÓA MỤC ĐÃ CHỌN"),
-        "btn_remove_selected_tooltip"              => ("Permanently remove every ticked shape below from the import list. Cannot be undone.", "Xóa vĩnh viễn mọi hình đã đánh dấu bên dưới khỏi danh sách nhập. Không thể hoàn tác."),
-        "toggle_collapse_tooltip"                  => ("Collapse/expand", "Thu gọn/Mở rộng"),
-        "roles_hint"                               => ("Mark each imported shape as a SHEET (stock to nest onto) or a PART (thing to nest), and set a quantity.", "Đánh dấu mỗi hình đã nhập là TẤM PHÔI (vật liệu để xếp lên) hoặc CHI TIẾT (thứ cần xếp), và đặt số lượng."),
-        "select_all_tooltip"                       => ("Select all", "Chọn tất cả"),
-        "th_index"                                 => ("#", "#"),
-        "th_name"                                  => ("NAME", "TÊN"),
-        "th_bbox"                                  => ("BBOX (W×H)", "KHUNG BAO (R×C)"),
-        "th_preview"                               => ("PREVIEW", "XEM TRƯỚC"),
-        "th_role"                                  => ("ROLE", "VAI TRÒ"),
-        "th_qty"                                   => ("QTY", "SL"),
-        "th_grain"                                 => ("ANGLES", "GÓC"),
-        "th_grain_tooltip"                         => ("Restrict which angles this piece may be placed at. Use it when the material has a direction: a visible grain, a brushed finish, or a printed pattern that has to run the same way on every piece. ANY lets the nest use every angle it is searching (best packing).", "Giới hạn các góc mà chi tiết này được phép đặt. Dùng khi vật liệu có hướng: vân gỗ nhìn thấy, bề mặt xước, hay họa tiết in phải chạy cùng chiều trên mọi chi tiết. TẤT CẢ cho phép dùng mọi góc (xếp tốt nhất)."),
-        "th_part_mirror"                           => ("FLIP", "LẬT"),
-        "th_part_mirror_tooltip"                   => ("Whether this specific piece may be cut flipped over, overriding the job-wide FLIP PIECES OVER setting. Use DENY for a piece that must keep one face up (a good side, a printed face, an asymmetric feature) in a job where flipping is otherwise fine.", "Chi tiết cụ thể này có được cắt ở trạng thái lật ngược hay không, ghi đè thiết lập LẬT NGƯỢC chung. Chọn CẤM cho chi tiết phải giữ nguyên một mặt (mặt đẹp, mặt in, chi tiết không đối xứng)."),
-        "rot_any"                                  => ("ANY", "TẤT CẢ"),
-        "rot_0_180"                                => ("0 / 180 only", "Chỉ 0 / 180"),
-        "rot_quarter"                              => ("90° steps", "Bước 90°"),
-        "rot_fixed"                                => ("0° only", "Chỉ 0°"),
-        "rot_fixed_90"                             => ("90° only", "Chỉ 90°"),
-        "rot_90_270"                               => ("90 / 270 only", "Chỉ 90 / 270"),
-        "bulk_label"                               => ("SET SELECTED", "ĐẶT CHO MỤC ĐÃ CHỌN"),
-        "bulk_tooltip"                             => ("Apply a value to every ticked row at once, instead of changing them one at a time. Does nothing if no rows are ticked.", "Áp dụng một giá trị cho mọi hàng đã đánh dấu cùng lúc, thay vì đổi từng hàng một. Không có tác dụng nếu chưa đánh dấu hàng nào."),
-        "bulk_apply_qty"                           => ("SET QTY", "ĐẶT SỐ LƯỢNG"),
-        "bulk_applied"                             => ("Applied to {n} selected shape(s).", "Đã áp dụng cho {n} hình đã chọn."),
-        "mirror_job"                               => ("USE JOB", "THEO JOB"),
-        "mirror_allow"                             => ("ALLOW", "CHO PHÉP"),
-        "mirror_deny"                              => ("DENY", "CẤM"),
-        "th_dominant"                              => ("DOMINANT?", "CHIẾM ƯU THẾ?"),
-        "th_dominant_tooltip"                      => ("Whether this part alone would take up enough of a sheet (per the DOMINANT AREA setting below) to close that sheet immediately after being placed - it still gets placed, just without any neighbors.", "Liệu chi tiết này một mình có chiếm đủ diện tích tấm phôi (theo thiết lập DIỆN TÍCH CHIẾM ƯU THẾ bên dưới) để đóng tấm phôi đó ngay sau khi đặt hay không - vẫn được đặt, chỉ là không có chi tiết nào khác cùng tấm."),
-        "heading_library_text"                     => ("LIBRARY", "THƯ VIỆN"),
-        "library_summary"                          => ("{parts} part(s), {remnants} offcut(s)", "{parts} chi tiết, {remnants} phần thừa"),
-        "library_hint"                             => ("Shapes you saved to reuse. Parts are things you cut regularly; offcuts are leftover material from earlier jobs - add one as a sheet and nest onto it instead of opening new stock.", "Các hình đã lưu để dùng lại. Chi tiết là thứ bạn cắt thường xuyên; phần thừa là vật liệu còn lại từ công việc trước - thêm vào làm tấm phôi và xếp lên đó thay vì mở tấm mới."),
-        "library_parts_heading"                    => ("SAVED PARTS", "CHI TIẾT ĐÃ LƯU"),
-        "library_remnants_heading"                 => ("OFFCUTS", "PHẦN THỪA"),
-        "library_no_parts"                         => ("No saved parts yet - tick rows in ASSIGN ROLES and press SAVE TO LIBRARY.", "Chưa có chi tiết nào - đánh dấu các dòng trong GÁN VAI TRÒ rồi nhấn LƯU VÀO THƯ VIỆN."),
-        "library_no_remnants"                      => ("No offcuts yet - run a nest, then press SCAN FOR OFFCUTS in the RESULT panel.", "Chưa có phần thừa - hãy chạy xếp, rồi nhấn QUÉT PHẦN THỪA trong bảng KẾT QUẢ."),
-        "library_add"                              => ("ADD", "THÊM"),
-        "library_delete"                           => ("DEL", "XÓA"),
-        "library_delete_tooltip"                   => ("Remove this shape from the library permanently. This cannot be undone.", "Xóa vĩnh viễn hình này khỏi thư viện. Không thể hoàn tác."),
-        "library_save_selected"                    => ("SAVE TO LIBRARY", "LƯU VÀO THƯ VIỆN"),
-        "library_save_selected_tooltip"            => ("Save every ticked PART into the library so it can be added to a later job without importing the file again. Sheets are skipped.", "Lưu mọi CHI TIẾT đã đánh dấu vào thư viện để thêm vào công việc sau mà không cần nhập lại tệp. Tấm phôi được bỏ qua."),
-        "library_saved"                            => ("Saved {n} shape(s) to the library.", "Đã lưu {n} hình vào thư viện."),
-        "library_nothing_to_save"                  => ("Tick at least one row whose ROLE is PART.", "Hãy đánh dấu ít nhất một dòng có VAI TRÒ là CHI TIẾT."),
-        "library_error"                            => ("The saved library could not be read - see the console.", "Không đọc được thư viện đã lưu - xem bảng điều khiển."),
-        "offcut_scan"                              => ("SCAN FOR OFFCUTS", "QUÉT PHẦN THỪA"),
-        "offcut_scan_tooltip"                      => ("Work out what usable material is left over on each sheet of this result. Nothing is saved until you press KEEP.", "Tính xem mỗi tấm phôi trong kết quả này còn lại bao nhiêu vật liệu dùng được. Chưa lưu gì cho đến khi bạn nhấn GIỮ."),
-        "offcut_scanning"                          => ("scanning...", "đang quét..."),
-        "offcut_found"                             => ("{n} offcut(s), {area} m2 of usable material", "{n} phần thừa, {area} m2 vật liệu dùng được"),
-        "offcut_keep"                              => ("KEEP", "GIỮ"),
-        "offcut_keep_tooltip"                      => ("Save these offcuts to the library so a later job can nest onto them instead of opening a new sheet.", "Lưu các phần thừa này vào thư viện để công việc sau có thể xếp lên chúng thay vì mở tấm mới."),
-        "offcut_name"                              => ("Offcut sheet {sheet} ({w}x{h})", "Phần thừa tấm {sheet} ({w}x{h})"),
-        "heading_result_text"                      => ("RESULT", "KẾT QUẢ"),
-        "result_empty"                             => ("No layout yet. RUN NEST packs the parts onto the sheets and the result lands here.", "Chưa có bố cục. CHẠY XẾP HÌNH sẽ xếp các chi tiết lên tấm phôi và kết quả hiện ở đây."),
-        "stat_audit"                               => ("AUDIT", "KIỂM TRA"),
-        "audit_checking"                           => ("CHECKING", "ĐANG KIỂM TRA"),
-        "audit_checking_tooltip"                   => ("Checking every part on every sheet for overlaps, parts off the material, and clearances below what was configured.", "Đang kiểm tra mọi chi tiết trên mọi tấm phôi xem có chồng lấn, lọt ra ngoài vật liệu, hay khoảng cách nhỏ hơn thiết lập không."),
-        "audit_unknown"                            => ("NOT CHECKED", "CHƯA KIỂM TRA"),
-        "audit_unknown_tooltip"                    => ("This arrangement has not been checked. A recovered result with no saved config cannot be checked, because the margin and spacing it was nested with are unknown.", "Cách sắp xếp này chưa được kiểm tra. Kết quả khôi phục mà không có cấu hình đã lưu thì không kiểm tra được, vì không biết lề và khoảng cách đã dùng khi xếp."),
-        "audit_passed"                             => ("PASSED", "ĐẠT"),
-        "audit_passed_tooltip"                     => ("Every part is on its sheet, no two parts overlap, and every gap meets the configured spacing. Safe to cut.", "Mọi chi tiết đều nằm trên tấm phôi, không có hai chi tiết nào chồng lấn, và mọi khe hở đều đạt khoảng cách đã thiết lập. An toàn để cắt."),
-        "audit_failed_count"                       => ("{n} FATAL", "{n} LỖI NẶNG"),
-        "audit_failed"                             => ("FAILED", "KHÔNG ĐẠT"),
-        "audit_failed_tooltip"                     => ("Do not cut this. Parts overlap or hang off the material - cutting it would destroy them.", "Đừng cắt bản này. Có chi tiết chồng lấn hoặc lọt ra ngoài vật liệu - cắt sẽ làm hỏng chúng."),
-        "audit_warned_count"                       => ("{n} WARNING", "{n} CẢNH BÁO"),
-        "audit_warned"                             => ("WARNINGS", "CẢNH BÁO"),
-        "audit_warned_tooltip"                     => ("Cuttable, but not exactly as configured: some parts sit closer together than the spacing asked for, or inside the sheet-edge margin.", "Có thể cắt, nhưng không đúng như thiết lập: một số chi tiết nằm gần nhau hơn khoảng cách yêu cầu, hoặc nằm trong lề mép tấm phôi."),
-        "audit_kind_overlap"                       => ("OVERLAP", "CHỒNG LẤN"),
-        "audit_kind_outside_sheet"                 => ("OFF THE SHEET", "NGOÀI TẤM PHÔI"),
-        "audit_kind_below_spacing"                 => ("TOO CLOSE", "QUÁ GẦN"),
-        "audit_kind_outside_margin"                => ("INSIDE MARGIN", "TRONG LỀ"),
-        "audit_more"                               => ("
-...and {n} more", "
-...và {n} nữa"),
-        "chart_label"                              => ("PROGRESS", "TIẾN TRÌNH"),
-        "chart_series_util"                        => ("UTILISATION 0-100%", "TỶ LỆ SỬ DỤNG 0-100%"),
-        "chart_series_unplaced"                    => ("UNPLACED (PEAK {peak})", "CHƯA ĐẶT (CAO NHẤT {peak})"),
-        "chart_hint"                               => ("CLICK A POINT TO VIEW THAT ATTEMPT", "NHẤP VÀO MỘT ĐIỂM ĐỂ XEM LẦN THỬ ĐÓ"),
-        "chart_readout"                            => ("Attempt {i} (generation {gen}): {util}% used, {unplaced} unplaced", "Lần thử {i} (thế hệ {gen}): dùng {util}%, {unplaced} chưa đặt"),
-        "view_attempt_label"                       => ("VIEW ATTEMPT", "XEM LẦN THỬ"),
-        "view_attempt_tooltip"                     => ("Every attempt that beat the previous best while the GA ran, in the order it found them - not just the one it ended up keeping. Pick one to see that arrangement instead of the final winner.", "Mọi lần thử đã vượt qua kết quả tốt nhất trước đó trong quá trình chạy GA, theo thứ tự tìm thấy - không chỉ lần cuối cùng được giữ lại. Chọn một lần để xem cách sắp xếp đó thay vì kết quả cuối cùng."),
-        "unplaced_hint"                            => ("These parts could not be placed on any sheet (outlined in red below and in the list they came from):", "Các chi tiết này không thể đặt lên tấm phôi nào (viền đỏ bên dưới và trong danh sách gốc):"),
-        "export_hint"                              => ("Export the attempt currently shown above to a file:", "Xuất lần thử đang hiển thị ở trên ra tệp:"),
-        "export_format_label"                      => ("FORMAT", "ĐỊNH DẠNG"),
-        "export_spacing_label"                     => ("SHEET SPACING (mm)", "KHOẢNG CÁCH GIỮA TẤM (mm)"),
-        "export_spacing_tooltip"                   => ("Neither DXF nor SVG has a separate concept of 'sheets' - every sheet used gets written into the same drawing, laid out left to right. This is the gap kept between each one so they don't overlap.", "Cả DXF lẫn SVG đều không có khái niệm riêng về 'tấm phôi' - mọi tấm phôi được dùng đều ghi vào cùng một bản vẽ, xếp từ trái sang phải. Đây là khoảng cách giữ giữa các tấm để chúng không chồng lên nhau."),
-        "export_outline_label"                     => ("INCLUDE SHEET OUTLINE", "BAO GỒM VIỀN TẤM PHÔI"),
-        "export_outline_tooltip"                   => ("Also write each sheet's own rectangle as a shape in the export, not just the parts placed on it.", "Cũng ghi hình chữ nhật của từng tấm phôi vào tệp xuất, không chỉ các chi tiết đặt trên đó."),
-        "export_unplaced_label"                    => ("INCLUDE UNPLACED PARTS", "BAO GỒM CHI TIẾT CHƯA ĐẶT"),
-        "export_unplaced_tooltip"                  => ("Also write every part that never got placed on any sheet, laid out in a simple non-overlapping grid after the last sheet (not nested - just kept from overlapping so you can see and handle them).", "Cũng ghi mọi chi tiết chưa từng được đặt lên tấm phôi nào, xếp thành lưới đơn giản không chồng lấn sau tấm phôi cuối cùng (không phải xếp nesting - chỉ để tránh chồng lấn cho bạn xem và xử lý thủ công)."),
-        "btn_export"                               => ("EXPORT", "XUẤT"),
-        "btn_report"                               => ("REPORT", "BÁO CÁO"),
-        "report_tooltip"                           => ("Write the full PDF job report - summary, nests, parts and settings - whatever the format above says.", "Xuất báo cáo PDF đầy đủ - tổng quan, các tấm, chi tiết và cài đặt - bất kể định dạng chọn ở trên."),
-        "margin_label"                             => ("MARGIN (mm)", "LỀ (mm)"),
-        "margin_tooltip"                           => ("Minimum empty gap kept between a piece and the true edge of the sheet - e.g. so a cutting tool has room to run without going off the material. Set to 0 for jobs where the tool can safely overhang the edge (like most laser cutting).", "Khoảng trống tối thiểu giữa một chi tiết và mép thật của tấm phôi - ví dụ để dao cắt có chỗ chạy mà không vượt ra ngoài vật liệu. Đặt 0 cho các công việc mà dao có thể an toàn tràn ra mép (như hầu hết cắt laser)."),
-        "import_size_guessed"                      => ("{file} does not say how big it is (a viewBox but no width/height), so 96dpi was assumed - check the BBOX column against the real part and re-import with the right FILE UNIT if it is wrong.", "{file} không cho biết kích thước thật (có viewBox nhưng không có width/height), nên đã giả định 96dpi - hãy đối chiếu cột BBOX với chi tiết thật và nhập lại với ĐƠN VỊ TỆP đúng nếu sai."),
-        "filter_label"                             => ("FIND", "TÌM"),
-        "filter_hint"                              => ("name", "tên"),
-        "filter_tooltip"                           => ("Show only the shapes whose source name contains this. Hiding a shape also unticks it, so SELECT ALL and REMOVE SELECTED can only ever touch what you can see.", "Chỉ hiện những hình có tên tệp nguồn chứa nội dung này. Hình bị ẩn cũng được bỏ chọn, nên CHỌN TẤT CẢ và XÓA MỤC ĐÃ CHỌN chỉ tác động lên những gì bạn nhìn thấy."),
-        "filter_count"                             => ("{shown} of {total}", "{shown} trên {total}"),
-        "sort_label"                               => ("SORT", "SẮP XẾP"),
-        "sort_name"                                => ("NAME", "TÊN"),
-        "sort_size"                                => ("SIZE", "KÍCH THƯỚC"),
-        "sort_qty"                                 => ("QTY", "SỐ LƯỢNG"),
-        "sort_role"                                => ("ROLE", "VAI TRÒ"),
-        "sort_tooltip"                             => ("Reorder the table. This is display order only - it has no effect on the nest, which sorts the parts by size itself.", "Sắp xếp lại bảng. Chỉ là thứ tự hiển thị - không ảnh hưởng đến việc xếp hình, vì hệ thống tự sắp các chi tiết theo kích thước."),
-        "kerf_label"                               => ("KERF (mm)", "MẠCH CẮT (mm)"),
-        "kerf_tooltip"                             => ("How much material the cutting tool itself destroys - the width of the slot it leaves. Each cut eats this much out of the gap between two pieces, so it is added on top of the spacing rather than being part of it. Leave at 0 if your CAM already accounts for it. Typical: 0.15mm fibre laser, 1-2mm plasma.", "Lượng vật liệu mà dao cắt tự nó phá đi - bề rộng rãnh cắt để lại. Mỗi đường cắt ăn mất chừng đó trong khe hở giữa hai chi tiết, nên nó được cộng thêm vào khoảng cách chứ không nằm trong đó. Để 0 nếu phần mềm CAM đã tính rồi. Thường gặp: 0,15mm laser sợi quang, 1-2mm plasma."),
-        "sheet_fit_button"                         => ("FIT ({zoom}%)", "VỪA KHUNG ({zoom}%)"),
-        "sheet_fit_tooltip"                        => ("Back to showing the whole sheet. Ctrl+scroll (or pinch) over a sheet to zoom in, middle-drag to move around, double-click to fit.", "Quay lại hiển thị toàn bộ tấm phôi. Giữ Ctrl và lăn chuột (hoặc chụm hai ngón) trên tấm để phóng to, kéo bằng nút chuột giữa để di chuyển, nhấp đúp để vừa khung."),
-        "spacing_label"                            => ("SPACING (mm)", "KHOẢNG CÁCH (mm)"),
-        "spacing_tooltip"                          => ("Minimum gap kept between two pieces placed next to each other, so a cutting tool fits between them and they don't touch. Set to 0 if pieces can be placed edge-to-edge with no gap at all.", "Khoảng cách tối thiểu giữ giữa hai chi tiết đặt cạnh nhau, để dao cắt vừa lọt giữa chúng và chúng không chạm nhau. Đặt 0 nếu các chi tiết có thể đặt sát mép nhau, không có khoảng cách."),
-        "runs_label"                               => ("RUNS", "SỐ LẦN CHẠY"),
-        "runs_tooltip"                             => ("How many increasingly thorough attempts to try automatically, keeping whichever one nests best. Each attempt after the first raises the rotation angles, the population and the rounds all at once, so its cost compounds: on an 800-piece test job one run took 47 seconds, two took 205, and three took over ten minutes - and all three returned the same answer. Leave this at 1 unless a run finishes with pieces left unplaced. Watch the cost estimate beside RUN NEST before raising it.", "Số lần thử ngày càng kỹ lưỡng để tự động thực hiện, giữ lại lần xếp tốt nhất. Mỗi lần sau lần đầu đều tăng đồng thời số góc xoay, quần thể và số vòng, nên chi phí tăng rất nhanh: với một việc 800 chi tiết, một lần mất 47 giây, hai lần mất 205 giây, ba lần hơn mười phút - và cả ba cho cùng một kết quả. Hãy để ở 1 trừ khi còn chi tiết chưa được xếp. Xem ước tính chi phí bên cạnh CHẠY XẾP HÌNH trước khi tăng."),
-        "cleanup_label"                            => ("CLEANUP THRESHOLD (%, blank = off)", "NGƯỠNG DỌN DẸP (%, để trống = tắt)"),
-        "cleanup_tooltip"                          => ("After a run finishes, any sheet whose own utilisation ends up below this gets re-packed in place - same settings, that sheet's parts only, never pulling parts from other sheets. Leave blank to turn this off. You can also REPACK a single sheet manually from the RESULT view regardless of this setting.", "Sau khi chạy xong, bất kỳ tấm phôi nào có tỷ lệ sử dụng thấp hơn ngưỡng này sẽ được sắp xếp lại tại chỗ - cùng thiết lập, chỉ các chi tiết của tấm đó, không bao giờ lấy chi tiết từ tấm khác. Để trống để tắt. Bạn cũng có thể XẾP LẠI thủ công từng tấm từ màn hình KẾT QUẢ bất kể thiết lập này."),
-        "cleanup_placeholder"                      => ("e.g. 60", "vd. 60"),
-        "cleanup_hint"                             => ("Sheets under this utilisation get auto-repacked in place after a run (same parts, tighter arrangement) - blank turns it off. You can also REPACK any single sheet manually from the RESULT view regardless.", "Các tấm phôi có tỷ lệ sử dụng dưới ngưỡng này sẽ tự động được xếp lại tại chỗ sau khi chạy (cùng chi tiết, sắp xếp chặt hơn) - để trống để tắt. Bạn cũng có thể XẾP LẠI thủ công bất kỳ tấm nào từ màn hình KẾT QUẢ."),
-        "mirror_label"                             => ("FLIP PIECES OVER (MIRROR)", "LẬT NGƯỢC CHI TIẾT (ĐỐI XỨNG)"),
-        "mirror_tooltip"                           => ("Lets the nest place a piece flipped over (mirrored), not just rotated - which often saves real material on pieces that are not symmetric. Only tick this if the material has no side: no grain, no coating, no printed or good face, and no feature that has to stay on one face. If the material does have a side, a flipped piece is scrap.", "Cho phép xếp chi tiết ở trạng thái lật ngược (đối xứng gương), không chỉ xoay - thường tiết kiệm được nhiều vật liệu với các chi tiết không đối xứng. Chỉ bật nếu vật liệu không phân mặt: không vân, không phủ, không in ấn hay mặt đẹp, và không có chi tiết nào bắt buộc phải nằm trên một mặt. Nếu vật liệu có phân mặt, chi tiết bị lật là phế phẩm."),
-        "mirror_on_badge"                          => ("ON — PIECES MAY BE CUT MIRRORED", "ĐANG BẬT — CHI TIẾT CÓ THỂ BỊ CẮT NGƯỢC"),
-        "mirror_run_warning"                       => ("MIRRORING ON", "ĐANG BẬT LẬT NGƯỢC"),
-        "mirror_hint"                              => ("Only for material with no good side (no grain, no coating, no printed face). RUN 1 is always done without flipping, so you always get a flip-free result to compare against - whichever run packs best is the one you keep. Always starts OFF at app launch, never restored from the last session.", "Chỉ dùng cho vật liệu không phân mặt (không vân, không phủ, không in ấn). Lần chạy 1 luôn được thực hiện không lật, nên bạn luôn có kết quả không lật để so sánh - lần chạy nào xếp tốt nhất sẽ được giữ. Luôn bắt đầu ở trạng thái TẮT mỗi lần mở ứng dụng, không khôi phục từ phiên trước."),
-        "btn_advanced_collapsed"                   => ("ADVANCED SETTINGS ▾", "THIẾT LẬP NÂNG CAO ▾"),
-        "btn_advanced_expanded"                    => ("ADVANCED SETTINGS ▴", "THIẾT LẬP NÂNG CAO ▴"),
-        "settings_bar_text"                        => ("CONFIGURATION", "CẤU HÌNH"),
-        "placement_label"                          => ("PLACEMENT", "KIỂU XẾP"),
-        "placement_tooltip"                        => ("How the program judges where to slide a piece into place. TIGHT FIT (recommended): judges purely by how snugly a piece touches already-placed pieces or the sheet edge - the one that benchmarked best against a real interlocking-tile stress test, and never worse than the alternatives on a typical mixed-shape job either. The remaining options are kept for comparison/fallback. GRAVITY + CORRECTIVE: the sheet's first two pieces settle by GRAVITY, then every piece after switches to TIGHT FIT's contact measure. GRAVITY: let pieces settle toward a corner, like Tetris. BOX: try to keep everything placed so far inside as small a rectangle as possible. CONVEX HULL: judge by the simplified outer shape wrapped around everything placed so far. GRAVITY + TIGHT FIT: use GRAVITY first, then break ties between equally-good spots by which one touches more.", "Cách chương trình đánh giá vị trí trượt một chi tiết vào chỗ. KHÍT CHẶT (khuyến nghị): đánh giá thuần túy dựa trên mức độ chi tiết áp sát các chi tiết đã đặt hoặc mép tấm phôi - lựa chọn có kết quả tốt nhất khi kiểm tra với bài test ghép khít thực tế, và không bao giờ kém hơn các lựa chọn khác trên công việc hình dạng hỗn hợp thông thường. Các tùy chọn còn lại được giữ để so sánh/dự phòng. TRỌNG LỰC + HIỆU CHỈNH: hai chi tiết đầu tiên của tấm phôi lắng xuống theo TRỌNG LỰC, sau đó mọi chi tiết tiếp theo chuyển sang phép đo tiếp xúc của KHÍT CHẶT. TRỌNG LỰC: để các chi tiết lắng về một góc, giống Tetris. HỘP: cố giữ mọi thứ đã đặt trong một hình chữ nhật nhỏ nhất có thể. BAO LỒI: đánh giá theo hình bao đơn giản hóa quanh mọi thứ đã đặt. TRỌNG LỰC + KHÍT CHẶT: dùng TRỌNG LỰC trước, rồi phá thế hòa giữa các vị trí tốt ngang nhau bằng chi tiết nào tiếp xúc nhiều hơn."),
-        "placement_opt_tightfit"                   => ("TIGHT FIT (RECOMMENDED)", "KHÍT CHẶT (KHUYẾN NGHỊ)"),
-        "placement_opt_gravitycorrective"          => ("GRAVITY + CORRECTIVE", "TRỌNG LỰC + HIỆU CHỈNH"),
-        "placement_opt_gravitytightfit"            => ("GRAVITY + TIGHT FIT", "TRỌNG LỰC + KHÍT CHẶT"),
-        "placement_opt_gravity"                    => ("GRAVITY", "TRỌNG LỰC"),
-        "placement_opt_box"                        => ("BOX", "HỘP"),
-        "placement_opt_convexhull"                 => ("CONVEX HULL", "BAO LỒI"),
-        "placement_hint"                           => ("TIGHT FIT (recommended) scores by how snugly a piece touches its neighbors - best for irregular/interlocking shapes. GRAVITY settles pieces like Tetris; BOX/CONVEX HULL score by the overall shape placed so far and plateau earlier on irregular parts. GRAVITY + CORRECTIVE/TIGHT FIT are hybrids. Hover PLACEMENT for the full comparison.", "KHÍT CHẶT (khuyến nghị) đánh giá theo mức độ chi tiết áp sát các chi tiết lân cận - phù hợp nhất cho hình dạng không đều/ghép khít. TRỌNG LỰC để chi tiết lắng như Tetris; HỘP/BAO LỒI đánh giá theo hình bao tổng thể và chững lại sớm hơn với hình dạng không đều. TRỌNG LỰC + HIỆU CHỈNH/KHÍT CHẶT là kiểu lai. Di chuột vào KIỂU XẾP để xem so sánh đầy đủ."),
-        "rotations_label"                          => ("STARTING ROTATIONS", "SỐ GÓC XOAY BAN ĐẦU"),
-        "rotations_tooltip"                        => ("How many angles each piece is tried at. This is the setting that actually changes the result - and the most expensive one, because the work grows with it. 4 is a good general value; 2 is faster and fine for pieces that only nest one way up; below that pieces start needing extra sheets. Each RUN after the first adds one more angle to this.", "Số góc xoay được thử cho mỗi chi tiết. Đây là thiết lập thực sự thay đổi kết quả - và cũng tốn kém nhất, vì khối lượng tính toán tăng theo nó. 4 là giá trị chung tốt; 2 nhanh hơn và đủ cho chi tiết chỉ xếp được một chiều; thấp hơn nữa thì sẽ tốn thêm tấm. Mỗi LẦN CHẠY sau lần đầu cộng thêm một góc vào đây."),
-        "population_label"                         => ("STARTING POPULATION", "QUẦN THỂ BAN ĐẦU"),
-        "population_tooltip"                       => ("The starting number of full arrangements ('attempts') compared side by side in the first RUN's rounds - later RUNs use a proportionally bigger population to search their wider rotation grid.", "Số lượng cách sắp xếp đầy đủ ('lần thử') ban đầu được so sánh song song trong các vòng của LẦN CHẠY đầu tiên - các LẦN CHẠY sau dùng quần thể lớn hơn tương ứng để tìm kiếm trên lưới góc xoay rộng hơn."),
-        "mutation_label"                           => ("MUTATION %", "TỶ LỆ ĐỘT BIẾN %"),
-        "mutation_tooltip"                         => ("The chance that a small random change (swap two pieces' order, or reroll one piece's rotation) gets made when mixing two good attempts together to make a new one. Keeps the search from getting stuck repeating itself. Stays the same across every RUN.", "Xác suất xảy ra một thay đổi ngẫu nhiên nhỏ (đổi chỗ thứ tự hai chi tiết, hoặc quay lại góc xoay của một chi tiết) khi lai hai lần thử tốt để tạo ra lần thử mới. Giúp việc tìm kiếm không bị lặp lại chính nó. Giữ nguyên xuyên suốt mọi LẦN CHẠY."),
-        "mutation_hint"                            => ("MUTATION %: chance of a random tweak (reordering parts or rerolling a rotation) when breeding two good attempts together - keeps the search from stalling on one arrangement.", "TỶ LỆ ĐỘT BIẾN %: xác suất xảy ra một thay đổi ngẫu nhiên nhỏ (sắp xếp lại chi tiết hoặc quay lại góc xoay) khi lai hai lần thử tốt - giúp việc tìm kiếm không bị chững lại ở một cách sắp xếp."),
-        "generations_label"                        => ("STARTING GENERATIONS", "SỐ THẾ HỆ BAN ĐẦU"),
-        "generations_tooltip"                      => ("The starting number of rounds ('try a bunch of attempts, keep the best, breed a new batch, repeat') the first RUN does - later RUNs use proportionally more rounds to search their wider rotation grid.", "Số vòng ban đầu ('thử một loạt, giữ lại tốt nhất, lai tạo lứa mới, lặp lại') mà LẦN CHẠY đầu tiên thực hiện - các LẦN CHẠY sau dùng nhiều vòng hơn tương ứng để tìm kiếm trên lưới góc xoay rộng hơn."),
-        "dominant_label"                           => ("DOMINANT AREA", "DIỆN TÍCH CHIẾM ƯU THẾ"),
-        "dominant_tooltip"                         => ("If one piece alone takes up more than this fraction of a sheet (0.9 = 90%), the program stops trying to fit more onto that sheet and starts a fresh one, since there's basically no room left anyway. It still gets placed - it just gets a sheet to itself instead of sharing.", "Nếu một chi tiết duy nhất chiếm hơn tỷ lệ này của tấm phôi (0.9 = 90%), chương trình sẽ ngừng cố xếp thêm vào tấm đó và bắt đầu tấm mới, vì gần như không còn chỗ trống. Chi tiết vẫn được đặt - chỉ là nó chiếm riêng một tấm thay vì chia sẻ."),
-        "dominant_hint"                            => ("DOMINANT AREA: a part alone taking up more than this share of a sheet gets that sheet to itself instead of sharing (still placed) - flagged live as CLOSES SHEET in the shapes table above.", "DIỆN TÍCH CHIẾM ƯU THẾ: một chi tiết duy nhất chiếm hơn tỷ lệ này của tấm phôi sẽ chiếm riêng tấm đó thay vì chia sẻ (vẫn được đặt) - được đánh dấu trực tiếp là ĐÓNG TẤM trong bảng hình ở trên."),
-        "max_threads_label"                        => ("MAX CPU THREADS", "SỐ LUỒNG CPU TỐI ĐA"),
-        "max_threads_hint"                         => ("This computer has {cores}. 0 uses all of them.", "Máy này có {cores}. 0 dùng tất cả."),
-        "max_threads_tooltip"                      => ("How many CPU cores the program is allowed to use at once while it searches for a good packing. 0 = use every core your computer has (fastest). Set a lower number to leave some CPU free for other programs while it runs.", "Số lõi CPU chương trình được phép dùng cùng lúc khi tìm cách xếp tốt. 0 = dùng mọi lõi máy tính có (nhanh nhất). Đặt số thấp hơn để chừa CPU cho chương trình khác trong khi chạy."),
-        "seed_label"                               => ("SEED", "HẠT GIỐNG"),
-        "seed_tooltip"                             => ("Starting point for the search's randomness (initial attempt order/rotations, every mutation/breeding choice across every round). The same seed with the same everything else always reproduces the exact same result - change it to sample a different random starting point, keep it fixed to compare other settings fairly.", "Điểm khởi đầu cho tính ngẫu nhiên của việc tìm kiếm (thứ tự/góc xoay ban đầu, mọi lựa chọn đột biến/lai tạo ở mỗi vòng). Cùng một hạt giống với mọi thứ khác giữ nguyên sẽ luôn cho ra đúng một kết quả - thay đổi để lấy mẫu điểm khởi đầu ngẫu nhiên khác, giữ cố định để so sánh công bằng các thiết lập khác."),
-        "bottom_bar_summary_tooltip"               => ("Sheets used / parts unplaced / material utilisation for the current best result - stays visible even while this bar is collapsed.", "Số tấm đã dùng / chi tiết chưa xếp / tỷ lệ sử dụng vật liệu của kết quả tốt nhất hiện tại - vẫn hiển thị ngay cả khi thanh này đang thu gọn."),
-        "btn_run"                                  => ("RUN NEST", "CHẠY XẾP HÌNH"),
-        "search_cost"                              => ("≈ {n}x cost", "≈ {n}x chi phí"),
-        "search_cost_tooltip"                      => ("How much search this job is asking for, against the default settings. It counts angles x arrangements x rounds across every RUN, not seconds - the real time depends on your parts. Anything much above 1x is usually paying for search that returns the same layout: on every job measured here, raising RUNS, POPULATION or GENERATIONS above the defaults cost multiples of the time and saved no sheets. ROTATIONS is the one worth spending on.", "Mức tìm kiếm mà việc này yêu cầu, so với thiết lập mặc định. Nó đếm góc xoay x cách sắp xếp x số vòng qua mọi LẦN CHẠY, không phải giây - thời gian thực tế tùy thuộc chi tiết của bạn. Cao hơn 1x nhiều thường là trả tiền cho việc tìm kiếm cho ra cùng một bố cục: với mọi việc đã đo ở đây, tăng SỐ LẦN CHẠY, QUẦN THỂ hay THẾ HỆ trên mặc định đều tốn gấp nhiều lần thời gian mà không tiết kiệm được tấm nào. GÓC XOAY là thứ đáng tăng."),
-        "btn_stop"                                 => ("STOP", "DỪNG"),
-        "console_title"                            => ("CONSOLE", "NHẬT KÝ"),
-        "app_settings_title"                       => ("App settings", "Cài đặt ứng dụng"),
-        // Header buttons carry a word, not a glyph: the old "*" and "?" were
-        // unidentifiable at any text size, and a tooltip only helps someone
-        // who already suspects there is something there to hover.
-        "btn_settings"                             => ("SETTINGS", "CÀI ĐẶT"),
-        // Shortcut descriptions. The key names themselves (`Ctrl+R`) live in
-        // `keys::BINDINGS`, not here - they are identical in every language
-        // and a translation has no business being able to break one.
-        "help_keys_title"                          => ("KEYBOARD", "BÀN PHÍM"),
-        "help_keys_run"                            => ("run a nest, or stop one that is running", "chạy xếp hình, hoặc dừng lần đang chạy"),
-        "help_keys_undo"                           => ("undo the last piece move or sheet repack", "hoàn tác lần di chuyển chi tiết hoặc xếp lại tấm gần nhất"),
-        "help_keys_console"                        => ("show or hide CONSOLE", "hiện hoặc ẩn NHẬT KÝ"),
-        "help_keys_config"                         => ("show or hide CONFIGURATION", "hiện hoặc ẩn CẤU HÌNH"),
-        "help_keys_help"                           => ("this help", "trợ giúp này"),
-        "help_keys_escape"                         => ("close a dialog", "đóng hộp thoại"),
-        "help_keys_redo"                           => ("redo a change that was undone", "làm lại thay đổi vừa hoàn tác"),
-        "redo_done"                                => ("redid the last undone change", "đã làm lại thay đổi vừa hoàn tác"),
-        "redo_nothing"                             => ("nothing to redo", "không có gì để làm lại"),
-        "undo_done"                                => ("undid the last change", "đã hoàn tác thay đổi gần nhất"),
-        "undo_nothing"                             => ("nothing to undo", "không có gì để hoàn tác"),
-        "btn_run_tooltip"                          => ("Nest every PART onto the SHEETs, using the settings in CONFIGURATION", "Xếp mọi CHI TIẾT lên các TẤM PHÔI, theo thiết lập trong CẤU HÌNH"),
-        "btn_help"                                 => ("HELP", "TRỢ GIÚP"),
-        "update_available"                         => ("v{version} AVAILABLE", "CÓ BẢN v{version}"),
-        "update_available_tooltip"                 => ("A newer version has been released - opens the download page in your browser", "Đã có phiên bản mới - mở trang tải về trong trình duyệt"),
-        "lang_switch_title"                        => ("Language", "Ngôn ngữ"),
-        "lang_switch_label"                        => ("LANGUAGE", "NGÔN NGỮ"),
-        "scale_switch_title"                       => ("Text size", "Cỡ chữ"),
-        "scale_switch_label"                       => ("TEXT SIZE", "CỠ CHỮ"),
-        "scale_small"                              => ("SMALL", "NHỎ"),
-        "scale_normal"                             => ("NORMAL", "BÌNH THƯỜNG"),
-        "scale_large"                              => ("BIG", "LỚN"),
-        "import_importing"                         => ("importing {n} file(s)...", "đang nhập {n} tệp..."),
-        "import_status_ok"                         => ("{n} shape(s) imported ({total} total)", "đã nhập {n} hình ({total} tổng cộng)"),
-        "import_status_none"                       => ("no shapes imported - see console", "không nhập được hình nào - xem nhật ký"),
-        "rect_invalid_size"                        => ("width and height must both be greater than 0", "chiều rộng và chiều cao phải lớn hơn 0"),
-        "run_need_sheet"                           => ("mark at least one shape as SHEET", "đánh dấu ít nhất một hình là TẤM PHÔI"),
-        "run_need_part"                            => ("mark at least one shape as PART with quantity > 0", "đánh dấu ít nhất một hình là CHI TIẾT với số lượng > 0"),
-        "run_invalid_config_field"                 => ("\"{field}\" in the settings is not a valid number - check that field and try again", "\"{field}\" trong thiết lập không phải là số hợp lệ - kiểm tra lại trường này và thử lại"),
-        "run_status_running"                       => ("nesting...", "đang xếp hình..."),
-        "run_status_stopped"                       => ("stopped early", "đã dừng sớm"),
-        "run_status_done"                          => ("done", "hoàn tất"),
-        "run_status_failed"                        => ("nest failed: {err}", "xếp hình thất bại: {err}"),
-        "unplaced_label_no_room"                   => ("no room found", "không tìm được chỗ"),
-        "unplaced_detail_no_room"                  => ("Didn't find room in this run - try more generations, a smaller margin/spacing, or fewer competing parts.", "Không tìm được chỗ trong lần chạy này - hãy thử nhiều thế hệ hơn, giảm lề/khoảng cách, hoặc giảm số chi tiết cạnh tranh."),
-        "unplaced_label_too_large"                 => ("too large for any sheet", "quá lớn so với mọi tấm phôi"),
-        "unplaced_detail_too_large"                => ("Too large to fit on any available sheet at all (checked its own width/height against every sheet's), even by itself.", "Quá lớn để vừa với bất kỳ tấm phôi nào (đã so sánh chiều rộng/cao với từng tấm), kể cả khi đặt một mình."),
-        "bottom_bar_summary"                       => ("sheets {sheets} · unplaced {unplaced} · util {util}%", "tấm {sheets} · chưa xếp {unplaced} · sử dụng {util}%"),
-        "stat_fitness"                             => ("FITNESS", "ĐỘ THÍCH NGHI"),
-        "stat_utilisation"                         => ("UTILISATION", "TỶ LỆ SỬ DỤNG"),
-        "stat_unplaced"                            => ("UNPLACED", "CHƯA XẾP"),
-        "stat_sheets_used"                         => ("SHEETS USED", "SỐ TẤM ĐÃ DÙNG"),
-        "sheet_caption"                            => ("SHEET {n} — {parts} part(s), {util}% used", "TẤM {n} — {parts} chi tiết, đã dùng {util}%"),
-        "repack_tooltip"                           => ("Re-pack this sheet's own parts in place (same settings as the run), keeping it only if it's actually better - never pulls parts from other sheets.", "Xếp lại tại chỗ các chi tiết của riêng tấm này (cùng thiết lập với lần chạy), chỉ giữ lại nếu thực sự tốt hơn - không bao giờ lấy chi tiết từ tấm khác."),
-        "repack_button"                            => ("REPACK", "XẾP LẠI"),
-        "pin_locked"                               => ("Piece #{id} pinned - REPACK will now work around it.", "Đã ghăm chi tiết #{id} - XẾP LẠI sẽ sắp xếp xung quanh nó."),
-        "pin_unlocked"                             => ("Piece #{id} unpinned.", "Đã bỏ ghăm chi tiết #{id}."),
-        "drag_placed"                              => ("Piece #{id} moved and pinned.", "Đã di chuyển và ghăm chi tiết #{id}."),
-        "drag_rejected"                            => ("Won't fit there - it would overlap another piece or cross the sheet edge (spacing and margin count).", "Không vừa ở đó - sẽ chồng lên chi tiết khác hoặc vượt mép tấm (tính cả khoảng cách và lề)."),
-        "drag_failed"                              => ("Could not check that position: {err}", "Không kiểm tra được vị trí đó: {err}"),
-        "theme_switch_label"                       => ("THEME", "GIAO DIỆN"),
-        "live_building"                            => ("BUILDING THIS NEST NOW - the engine is still working. Ghost outlines are the positions it is weighing up.", "ĐANG XẾP - máy vẫn đang tính. Các đường mờ là những vị trí đang được cân nhắc."),
-        "live_view"                                => ("LIVE VIEW", "XEM TRỰC TIẾP"),
-        "live_view_hint"                           => ("Draw the nest as it is built, piece by piece. Slower - turn it off for the fastest run. Can be switched on or off while a nest is running.", "Vẽ quá trình xếp theo từng chi tiết. Chậm hơn - hãy tắt để chạy nhanh nhất. Có thể bật hoặc tắt ngay trong khi đang xếp."),
-        "drag_hint"                                => ("Drag a piece to move it, click a piece to pin it. With the pointer on a piece, arrow keys nudge it and R turns it (Shift+R the other way). Ctrl+scroll zooms the sheet, middle-drag moves around it. REPACK tidies the unpinned pieces around the pinned ones.", "Kéo để di chuyển chi tiết, bấm để ghăm. Khi trỏ chuột trên một chi tiết, các phím mũi tên dịch nhẹ và phím R xoay nó (Shift+R xoay ngược lại). Giữ Ctrl và lăn chuột để phóng to tấm phôi, kéo bằng nút chuột giữa để di chuyển. XẾP LẠI sẽ sắp xếp các chi tiết chưa ghăm xung quanh các chi tiết đã ghăm."),
-        "repack_needs_config"                      => ("This result was recovered from an older session that did not save its settings - run a nest first to enable REPACK.", "Kết quả này được khôi phục từ phiên cũ không lưu thiết lập - hãy chạy một lần xếp mới để dùng XẾP LẠI."),
-        "repack_status_running"                    => ("repacking sheet {n}...", "đang xếp lại tấm {n}..."),
-        "repack_status_improved"                   => ("sheet {n} improved ({util}% used)", "tấm {n} đã cải thiện (đã dùng {util}%)"),
-        "repack_status_no_improvement"             => ("sheet {n}: no improvement found, kept as-is", "tấm {n}: không cải thiện được, giữ nguyên"),
-        "repack_status_failed"                     => ("repack sheet {n} failed: {err}", "xếp lại tấm {n} thất bại: {err}"),
-        "history_option"                           => ("#{i} gen {gen}{best} - fitness {fitness}, {unplaced} unplaced", "#{i} thế hệ {gen}{best} - độ thích nghi {fitness}, {unplaced} chưa xếp"),
-        "history_best_suffix"                      => (" (best)", " (tốt nhất)"),
-        "export_invalid_spacing"                   => ("sheet spacing must be 0 or more", "khoảng cách giữa tấm phải từ 0 trở lên"),
-        "export_dialog_failed"                     => ("couldn't open the save dialog: {err}", "không mở được hộp thoại lưu tệp: {err}"),
-        "export_format_pdf"                        => ("PDF REPORT", "BÁO CÁO PDF"),
-        "export_status_running"                    => ("exporting...", "đang xuất..."),
-        "export_status_done"                       => ("exported", "đã xuất"),
-        "dominant_closes_sheet"                    => ("CLOSES SHEET", "ĐÓNG TẤM"),
-        "role_part"                                => ("PART", "CHI TIẾT"),
-        "role_sheet"                               => ("SHEET", "TẤM PHÔI"),
-        "role_skip"                                => ("SKIP", "BỎ QUA"),
-        "confirm_remove_message"                   => ("Remove {n} selected shape(s) from the import list? This cannot be undone.", "Xóa {n} hình đã chọn khỏi danh sách nhập? Không thể hoàn tác."),
-        "confirm_remove_title"                     => ("Remove shapes", "Xóa hình"),
-        "recover_message"                          => ("A saved nest result from a previous session exists ({sheets} sheet(s), {util}% utilisation). Recover it?", "Có kết quả xếp hình đã lưu từ phiên trước ({sheets} tấm, sử dụng {util}%). Khôi phục?"),
-        "recover_title"                            => ("Recover last session?", "Khôi phục phiên trước?"),
-        "btn_reset"                                => ("RESET", "ĐẶT LẠI"),
-        "btn_reset_tooltip"                        => ("Clear the imported parts/sheets and the last nest result. Config settings (margin, spacing, rotations, etc.) are kept. Cannot be undone.", "Xóa các chi tiết/tấm phôi đã nhập và kết quả xếp hình gần nhất. Giữ nguyên cấu hình (lề, khoảng cách, góc xoay, v.v.). Không thể hoàn tác."),
-        "confirm_reset_message"                    => ("Clear all imported parts/sheets and the last nest result? Config settings are kept. This cannot be undone.", "Xóa toàn bộ chi tiết/tấm phôi đã nhập và kết quả xếp hình gần nhất? Cấu hình sẽ được giữ nguyên. Không thể hoàn tác."),
-        "confirm_reset_title"                      => ("Reset", "Đặt lại"),
-        "help_button_title"                        => ("How to use this app", "Cách sử dụng ứng dụng này"),
-        "help_title"                               => ("HOW TO USE NESTOR", "CÁCH SỬ DỤNG NESTOR"),
-        "help_intro"                               => ("Nestor nests parts onto stock sheets before cutting.", "Nestor xếp các chi tiết lên tấm phôi trước khi cắt."),
-        "help_step_import"                         => ("01 IMPORT — load DXF/SVG file(s), or add a rectangle by hand.", "01 NHẬP — tải tệp DXF/SVG, hoặc thêm hình chữ nhật thủ công."),
-        "help_step_roles"                          => ("02 ASSIGN ROLES — mark each shape SHEET (stock) or PART (to cut), set quantities.", "02 GÁN VAI TRÒ — đánh dấu mỗi hình là TẤM PHÔI (vật liệu) hoặc CHI TIẾT (cần cắt), đặt số lượng."),
-        "help_step_configure"                      => ("03 CONFIGURATION — adjust margin/spacing etc. on the right if needed (optional).", "03 CẤU HÌNH — chỉnh lề/khoảng cách... ở bên phải nếu cần (không bắt buộc)."),
-        "help_step_run"                            => ("RUN NEST — then review and EXPORT the result.", "CHẠY XẾP HÌNH — rồi xem và XUẤT kết quả."),
-        "help_tip"                                 => ("Hover any label for more detail.", "Di chuột vào bất kỳ nhãn nào để xem thêm chi tiết."),
-        "help_dont_show"                           => ("Don't show this again", "Không hiển thị lại"),
-        "help_close"                               => ("GOT IT", "ĐÃ HIỂU"),
-        // An unknown key renders as the key itself, so a typo is loud in the
-        // UI instead of showing up as a blank label.
-        other => (other, other),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// English is the source of truth: it is the only dictionary allowed to
+    /// define a key, and the only one every lookup can fall back to.
+    fn english() -> &'static HashMap<String, String> {
+        &dicts()[Lang::En as usize]
+    }
+
+    /// The whole scheme rests on the files being readable. `dicts()`
+    /// deliberately swallows a parse error into an empty map at runtime, so
+    /// without this test a broken translation would ship as a silently
+    /// all-English language.
+    #[test]
+    fn every_file_parses() {
+        for lang in Lang::ALL {
+            let parsed: Result<HashMap<String, String>, _> = serde_json::from_str(SOURCES[lang as usize]);
+            assert!(parsed.is_ok(), "assets/i18n/{}.json is not valid JSON: {}", lang.code(), parsed.unwrap_err());
+        }
+    }
 
     /// The fall-back chain is what makes a partial dictionary safe. If an
     /// unknown key ever stops echoing itself, every typo renders as empty
     /// space instead of something a bug report can name.
     #[test]
     fn an_unknown_key_is_visible_rather_than_blank() {
-        assert_eq!(t(Lang::En, "definitely_not_a_key"), "definitely_not_a_key");
-        assert_eq!(t(Lang::Vi, "definitely_not_a_key"), "definitely_not_a_key");
+        for lang in Lang::ALL {
+            assert_eq!(t(lang, "definitely_not_a_key"), "definitely_not_a_key");
+        }
     }
 
     #[test]
-    fn every_key_resolves_in_both_languages() {
-        for key in KEYS {
-            assert!(!t(Lang::En, key).is_empty(), "{key} is empty in English");
-            assert!(!t(Lang::Vi, key).is_empty(), "{key} is empty in Vietnamese (and has no English fallback)");
+    fn english_is_complete() {
+        assert!(english().len() > 250, "the English dictionary lost keys: {}", english().len());
+        for (key, value) in english() {
+            assert!(!value.is_empty(), "{key} is empty in English, which has nothing to fall back to");
+        }
+    }
+
+    /// Catches the commonest contributor mistake by far: a mistyped or
+    /// renamed key, which would otherwise sit in the file looking translated
+    /// while the UI quietly shows English.
+    #[test]
+    fn no_translation_invents_a_key() {
+        for lang in Lang::ALL {
+            for key in dicts()[lang as usize].keys() {
+                assert!(english().contains_key(key), "assets/i18n/{}.json has `{key}`, which is not a key in en.json", lang.code());
+            }
+        }
+    }
+
+    /// A `{placeholder}` is code, not prose: dropping or renaming one leaves
+    /// a message with a hole in it where a part id or a filename should be.
+    #[test]
+    fn placeholders_survive_translation() {
+        fn placeholders(s: &str) -> Vec<&str> {
+            let mut found: Vec<&str> = s.match_indices('{').filter_map(|(i, _)| s[i..].find('}').map(|j| &s[i + 1..i + j])).collect();
+            found.sort_unstable();
+            found
+        }
+        for lang in Lang::ALL {
+            for (key, translated) in &dicts()[lang as usize] {
+                let Some(source) = english().get(key) else { continue };
+                assert_eq!(placeholders(source), placeholders(translated), "assets/i18n/{}.json `{key}` does not use the same {{placeholders}} as en.json", lang.code());
+            }
         }
     }
 
@@ -386,283 +224,15 @@ mod tests {
         // as `i18n.js`'s `replaceAll` behaviour.
         assert_eq!(tv(Lang::En, "btn_run", &[("nope", "x")]), t(Lang::En, "btn_run"));
     }
-}
 
-#[cfg(test)]
-#[rustfmt::skip]
-const KEYS: &[&str] = &[
-    "heading_import_text",
-    "tolerance_label",
-    "tolerance_tooltip",
-    "btn_browse",
-    "dropzone_text",
-    "rect_hint",
-    "rect_width_label",
-    "rect_height_label",
-    "rect_layer_label",
-    "btn_add_rect",
-    "svg_unit_title",
-    "svg_unit_intro",
-    "svg_unit_label",
-    "svg_unit_auto",
-    "svg_unit_mm",
-    "svg_unit_cm",
-    "svg_unit_m",
-    "svg_unit_px",
-    "svg_unit_cancel",
-    "svg_unit_ok",
-    "heading_roles_text",
-    "roles_empty",
-    "btn_mark_all_parts",
-    "btn_mark_all_parts_tooltip",
-    "btn_mark_all_sheets",
-    "btn_mark_all_sheets_tooltip",
-    "btn_remove_selected",
-    "btn_remove_selected_tooltip",
-    "toggle_collapse_tooltip",
-    "roles_hint",
-    "select_all_tooltip",
-    "th_index",
-    "th_name",
-    "th_bbox",
-    "th_preview",
-    "th_role",
-    "th_qty",
-    "th_grain",
-    "th_grain_tooltip",
-    "th_part_mirror",
-    "th_part_mirror_tooltip",
-    "rot_any",
-    "rot_0_180",
-    "rot_quarter",
-    "rot_fixed",
-    "rot_fixed_90",
-    "rot_90_270",
-    "bulk_label",
-    "bulk_tooltip",
-    "bulk_apply_qty",
-    "bulk_applied",
-    "mirror_job",
-    "mirror_allow",
-    "mirror_deny",
-    "th_dominant",
-    "th_dominant_tooltip",
-    "heading_library_text",
-    "library_summary",
-    "library_hint",
-    "library_parts_heading",
-    "library_remnants_heading",
-    "library_no_parts",
-    "library_no_remnants",
-    "library_add",
-    "library_delete",
-    "library_delete_tooltip",
-    "library_save_selected",
-    "library_save_selected_tooltip",
-    "library_saved",
-    "library_nothing_to_save",
-    "library_error",
-    "offcut_scan",
-    "offcut_scan_tooltip",
-    "offcut_scanning",
-    "offcut_found",
-    "offcut_keep",
-    "offcut_keep_tooltip",
-    "offcut_name",
-    "heading_result_text",
-    "result_empty",
-    "stat_audit",
-    "audit_checking",
-    "audit_checking_tooltip",
-    "audit_unknown",
-    "audit_unknown_tooltip",
-    "audit_passed",
-    "audit_passed_tooltip",
-    "audit_failed_count",
-    "audit_failed",
-    "audit_failed_tooltip",
-    "audit_warned_count",
-    "audit_warned",
-    "audit_warned_tooltip",
-    "audit_kind_overlap",
-    "audit_kind_outside_sheet",
-    "audit_kind_below_spacing",
-    "audit_kind_outside_margin",
-    "audit_more",
-    "chart_label",
-    "chart_series_util",
-    "chart_series_unplaced",
-    "chart_hint",
-    "chart_readout",
-    "view_attempt_label",
-    "view_attempt_tooltip",
-    "unplaced_hint",
-    "export_hint",
-    "export_format_label",
-    "export_spacing_label",
-    "import_size_guessed",
-    "filter_label",
-    "filter_hint",
-    "filter_tooltip",
-    "filter_count",
-    "sort_label",
-    "sort_name",
-    "sort_size",
-    "sort_qty",
-    "sort_role",
-    "sort_tooltip",
-    "kerf_label",
-    "sheet_fit_button",
-    "sheet_fit_tooltip",
-    "kerf_tooltip",
-    "export_spacing_tooltip",
-    "export_outline_label",
-    "export_outline_tooltip",
-    "export_unplaced_label",
-    "export_unplaced_tooltip",
-    "btn_export",
-    "btn_report",
-    "report_tooltip",
-    "margin_label",
-    "margin_tooltip",
-    "spacing_label",
-    "spacing_tooltip",
-    "runs_label",
-    "runs_tooltip",
-    "search_cost",
-    "search_cost_tooltip",
-    "cleanup_label",
-    "cleanup_tooltip",
-    "cleanup_placeholder",
-    "cleanup_hint",
-    "mirror_label",
-    "mirror_tooltip",
-    "mirror_on_badge",
-    "mirror_run_warning",
-    "mirror_hint",
-    "btn_advanced_collapsed",
-    "btn_advanced_expanded",
-    "settings_bar_text",
-    "placement_label",
-    "placement_tooltip",
-    "placement_opt_tightfit",
-    "placement_opt_gravitycorrective",
-    "placement_opt_gravitytightfit",
-    "placement_opt_gravity",
-    "placement_opt_box",
-    "placement_opt_convexhull",
-    "placement_hint",
-    "rotations_label",
-    "rotations_tooltip",
-    "population_label",
-    "population_tooltip",
-    "mutation_label",
-    "mutation_tooltip",
-    "mutation_hint",
-    "generations_label",
-    "generations_tooltip",
-    "dominant_label",
-    "dominant_tooltip",
-    "dominant_hint",
-    "max_threads_hint",
-    "max_threads_label",
-    "max_threads_tooltip",
-    "seed_label",
-    "seed_tooltip",
-    "bottom_bar_summary_tooltip",
-    "btn_run",
-    "btn_stop",
-    "console_title",
-    "app_settings_title",
-    "btn_settings",
-    "help_keys_title",
-    "help_keys_run",
-    "help_keys_undo",
-    "help_keys_console",
-    "help_keys_config",
-    "help_keys_help",
-    "help_keys_escape",
-    "help_keys_redo",
-    "redo_done",
-    "redo_nothing",
-    "undo_done",
-    "undo_nothing",
-    "btn_run_tooltip",
-    "btn_help",
-    "update_available",
-    "update_available_tooltip",
-    "lang_switch_title",
-    "lang_switch_label",
-    "scale_switch_title",
-    "scale_switch_label",
-    "scale_small",
-    "scale_normal",
-    "scale_large",
-    "import_importing",
-    "import_status_ok",
-    "import_status_none",
-    "rect_invalid_size",
-    "run_need_sheet",
-    "run_need_part",
-    "run_invalid_config_field",
-    "run_status_running",
-    "run_status_stopped",
-    "run_status_done",
-    "run_status_failed",
-    "unplaced_label_no_room",
-    "unplaced_detail_no_room",
-    "unplaced_label_too_large",
-    "unplaced_detail_too_large",
-    "bottom_bar_summary",
-    "stat_fitness",
-    "stat_utilisation",
-    "stat_unplaced",
-    "stat_sheets_used",
-    "sheet_caption",
-    "repack_tooltip",
-    "repack_button",
-    "pin_locked",
-    "pin_unlocked",
-    "drag_placed",
-    "drag_rejected",
-    "drag_failed",
-    "theme_switch_label",
-    "live_building",
-    "live_view",
-    "live_view_hint",
-    "drag_hint",
-    "repack_needs_config",
-    "repack_status_running",
-    "repack_status_improved",
-    "repack_status_no_improvement",
-    "repack_status_failed",
-    "history_option",
-    "history_best_suffix",
-    "export_invalid_spacing",
-    "export_dialog_failed",
-    "export_format_pdf",
-    "export_status_running",
-    "export_status_done",
-    "dominant_closes_sheet",
-    "role_part",
-    "role_sheet",
-    "role_skip",
-    "confirm_remove_message",
-    "confirm_remove_title",
-    "recover_message",
-    "recover_title",
-    "btn_reset",
-    "btn_reset_tooltip",
-    "confirm_reset_message",
-    "confirm_reset_title",
-    "help_button_title",
-    "help_title",
-    "help_intro",
-    "help_step_import",
-    "help_step_roles",
-    "help_step_configure",
-    "help_step_run",
-    "help_tip",
-    "help_dont_show",
-    "help_close",
-];
+    /// Not a completeness requirement - a partial translation is explicitly
+    /// allowed - but the picker should not offer a language that is entirely
+    /// English, which would just look broken.
+    #[test]
+    fn every_offered_language_is_actually_translated() {
+        for lang in Lang::ALL.into_iter().filter(|l| *l != Lang::En) {
+            let done = english().keys().filter(|k| entry(lang, k).is_some()).count();
+            assert!(done * 2 > english().len(), "{} is only {done}/{} translated - too thin to offer in the picker", lang.code(), english().len());
+        }
+    }
+}
