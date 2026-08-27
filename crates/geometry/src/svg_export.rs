@@ -138,14 +138,7 @@ mod tests {
     use crate::svg_import::parse_svg;
 
     fn square(size: f64) -> LayeredPolygon {
-        LayeredPolygon {
-            points: vec![Point::new(0.0, 0.0), Point::new(size, 0.0), Point::new(size, size), Point::new(0.0, size)],
-            layer: "CUT".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        }
+        LayeredPolygon::new(vec![Point::new(0.0, 0.0), Point::new(size, 0.0), Point::new(size, size), Point::new(0.0, size)], "CUT".into(), None)
     }
 
     #[test]
@@ -218,14 +211,7 @@ mod tests {
     /// placement's translation and the sheet's own Y-flip.
     #[test]
     fn a_true_circle_part_exports_as_a_real_circle_element() {
-        let circle_shape = LayeredPolygon {
-            points: crate::dxf_import::tessellate_circle(0.0, 0.0, 5.0, 0.1),
-            layer: "CUT".into(),
-            is_circle: Some(crate::circular_nfp::Circle { cx: 0.0, cy: 0.0, r: 5.0 }),
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        };
+        let circle_shape = LayeredPolygon::new(crate::dxf_import::tessellate_circle(0.0, 0.0, 5.0, 0.1), "CUT".into(), Some(crate::circular_nfp::Circle { cx: 0.0, cy: 0.0, r: 5.0 }));
         let layout = SheetLayout { sheet: square(200.0), parts: vec![PlacedShape { shape: circle_shape, x: 50.0, y: 30.0, rotation: 0.0 }] };
 
         let svg = export_svg(std::slice::from_ref(&layout), 20.0, false);
@@ -246,21 +232,7 @@ mod tests {
     /// round-trip while still looking fine on the very first export/import).
     #[test]
     fn export_then_reimport_round_trips_a_non_symmetric_shape() {
-        let hat = LayeredPolygon {
-            points: vec![
-                Point::new(0.0, 0.0),
-                Point::new(10.0, 0.0),
-                Point::new(10.0, 5.0),
-                Point::new(20.0, 5.0),
-                Point::new(20.0, 20.0),
-                Point::new(0.0, 12.0),
-            ],
-            layer: "CUT".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        };
+        let hat = LayeredPolygon::new(vec![ Point::new(0.0, 0.0), Point::new(10.0, 0.0), Point::new(10.0, 5.0), Point::new(20.0, 5.0), Point::new(20.0, 20.0), Point::new(0.0, 12.0), ], "CUT".into(), None);
         let original_area = crate::polygon::polygon_area(&hat.points);
 
         let layout = SheetLayout { sheet: square(200.0), parts: vec![PlacedShape { shape: hat, x: 0.0, y: 0.0, rotation: 0.0 }] };

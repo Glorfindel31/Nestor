@@ -53,19 +53,7 @@ mod tests {
     use super::*;
 
     fn square_layered(x: f64, y: f64, size: f64) -> LayeredPolygon {
-        LayeredPolygon {
-            points: vec![
-                Point::new(x, y),
-                Point::new(x + size, y),
-                Point::new(x + size, y + size),
-                Point::new(x, y + size),
-            ],
-            layer: "0".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        }
+        LayeredPolygon::new(vec![ Point::new(x, y), Point::new(x + size, y), Point::new(x + size, y + size), Point::new(x, y + size), ], "0".into(), None)
     }
 
     #[test]
@@ -82,19 +70,7 @@ mod tests {
     fn obstacle_with_a_hole_big_enough_for_b_gets_a_restore_region() {
         // 20x20 obstacle with a 10x10 hole in the middle - big enough for a
         // 2x2 part `b` to nest inside.
-        let hole = LayeredPolygon {
-            points: vec![
-                Point::new(5.0, 5.0),
-                Point::new(15.0, 5.0),
-                Point::new(15.0, 15.0),
-                Point::new(5.0, 15.0),
-            ],
-            layer: "DRILL".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        };
+        let hole = LayeredPolygon::new(vec![ Point::new(5.0, 5.0), Point::new(15.0, 5.0), Point::new(15.0, 15.0), Point::new(5.0, 15.0), ], "DRILL".into(), None);
         let mut a = square_layered(0.0, 0.0, 20.0);
         a.children.push(hole);
         let b = square_layered(0.0, 0.0, 2.0);
@@ -105,19 +81,7 @@ mod tests {
 
     #[test]
     fn obstacle_with_a_hole_too_small_for_b_gets_no_restore_region() {
-        let hole = LayeredPolygon {
-            points: vec![
-                Point::new(9.0, 9.0),
-                Point::new(11.0, 9.0),
-                Point::new(11.0, 11.0),
-                Point::new(9.0, 11.0),
-            ],
-            layer: "DRILL".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        };
+        let hole = LayeredPolygon::new(vec![ Point::new(9.0, 9.0), Point::new(11.0, 9.0), Point::new(11.0, 11.0), Point::new(9.0, 11.0), ], "DRILL".into(), None);
         let mut a = square_layered(0.0, 0.0, 20.0);
         a.children.push(hole);
         let b = square_layered(0.0, 0.0, 5.0);

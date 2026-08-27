@@ -1,5 +1,6 @@
-//! Serialization boundary between the Tauri IPC surface and the internal
-//! `geometry`/`nesting` types. Kept as a separate, explicit conversion layer
+//! Boundary types between the UI and the internal `geometry`/`nesting`
+//! types, and the on-disk format for `config.json`/`best_result.json`/
+//! `shapes.json`. Kept as a separate, explicit conversion layer
 //! rather than deriving `Serialize`/`Deserialize` directly on
 //! `geometry::point::Point`/`LayeredPolygon` etc. - those crates are
 //! deliberately I/O-free (`geometry`'s own module doc: "Zero I/O, zero
@@ -117,6 +118,40 @@ pub struct PolygonDto {
     pub real_boundary: Option<Vec<RealVertexDto>>,
 }
 
+impl PolygonDto {
+    /// The single constructor, mirroring `LayeredPolygon::new`:
+    /// `children`/`texts`/`real_boundary` start empty.
+    #[must_use]
+    pub fn new(points: Vec<PointDto>, layer: String, is_circle: Option<CircleDto>) -> Self {
+        PolygonDto { points, layer, is_circle, children: Vec::new(), texts: Vec::new(), real_boundary: None }
+    }
+
+    /// Unsigned shoelace area of the outline.
+    #[must_use]
+    pub fn area(&self) -> f64 {
+        let n = self.points.len();
+        if n < 3 {
+            return 0.0;
+        }
+        let mut sum = 0.0;
+        for i in 0..n {
+            let j = (i + 1) % n;
+            sum += self.points[i].x * self.points[j].y - self.points[j].x * self.points[i].y;
+        }
+        (sum / 2.0).abs()
+    }
+
+    /// Outline area minus its holes - the DTO-side twin of
+    /// `geometry::polygon_material_area`, and the rule a commercial job
+    /// report's Util column uses. Counting a drilled hole as material
+    /// overstates every sheet holding a holed part, so a readout that used
+    /// `area()` here could not be read beside the run's own utilisation.
+    #[must_use]
+    pub fn material_area(&self) -> f64 {
+        (self.area() - self.children.iter().map(PolygonDto::area).sum::<f64>()).max(0.0)
+    }
+}
+
 impl From<&LayeredPolygon> for PolygonDto {
     fn from(poly: &LayeredPolygon) -> Self {
         PolygonDto {
@@ -214,14 +249,26 @@ pub struct ExpandedParts {
 }
 
 /// Normalises an authored angle list into what `PartRule` wants: degrees in
-/// `[0, 360)`, sorted, deduped at 1e-9, and non-finite values dropped. An
-/// empty result means unconstrained, which is also what a caller sending
-/// `[]` should get - "no allowed angles at all" is never a useful request,
-/// and treating it as a constraint would make the part unplaceable.
+/// `[0, 360)`, sorted, deduped, and non-finite values dropped. An empty
+/// result means unconstrained, which is also what a caller sending `[]`
+/// should get - "no allowed angles at all" is never a useful request, and
+/// treating it as a constraint would make the part unplaceable.
+///
+/// **Deduped at one degree, which is the resolution the NFP cache key
+/// actually distinguishes** (`cache_key::normalize_rotation` truncates to an
+/// integer, a preserved port behaviour). This used to dedupe at `1e-9`, nine
+/// decades finer, so an authored list containing both `22.5` and `22.7` kept
+/// two entries that then collided onto cache key `22` - whichever was
+/// computed first served its NFP to the other, and the part was placed
+/// against collision geometry for the wrong orientation. Angles under a
+/// degree apart are not separable by this engine, so collapsing them is
+/// honest where keeping both is silently wrong. Nothing the UI emits is
+/// affected (`RotRule` only ever produces multiples of 90); a hand-edited
+/// `config.json`/`shapes.json` is what reaches this.
 fn normalize_angles(angles: &[f64]) -> Vec<f64> {
     let mut out: Vec<f64> = angles.iter().filter(|a| a.is_finite()).map(|a| a.rem_euclid(360.0)).collect();
     out.sort_by(f64::total_cmp);
-    out.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    out.dedup_by(|a, b| (*a - *b).abs() < 1.0);
     out
 }
 
@@ -408,7 +455,8 @@ pub struct NestConfigDto {
     /// starting point, for anyone who wants to override where it begins.
     /// Defaults to 1 (exactly the given settings, no escalation) for old
     /// saved configs/API callers that predate this field - the friction-free
-    /// default of trying several escalating attempts is index.html's own
+    /// default of trying several escalating attempts is the deleted Electron
+    /// frontend's own
     /// field default, not this one, so a pre-existing saved config's
     /// behavior never silently changes underneath it.
     #[serde(default = "default_runs")]
@@ -1011,4 +1059,71 @@ pub struct RemnantDto {
     /// Largest rectangle that fits inside it - the size to write on the label.
     pub usable_width: f64,
     pub usable_height: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn square(size: f64) -> Vec<PointDto> {
+        vec![
+            PointDto { x: 0.0, y: 0.0 },
+            PointDto { x: size, y: 0.0 },
+            PointDto { x: size, y: size },
+            PointDto { x: 0.0, y: size },
+        ]
+    }
+
+    /// `cache_key::normalize_rotation` truncates a rotation to an integer, so
+    /// two authored angles inside the same degree are one cache entry. Keeping
+    /// both meant the second was placed against the first's NFP.
+    #[test]
+    fn authored_angles_are_deduped_at_the_cache_keys_own_resolution() {
+        use nesting::cache_key::normalize_rotation;
+
+        let kept = normalize_angles(&[22.5, 22.7, 45.0]);
+        assert_eq!(kept, vec![22.5, 45.0], "22.7 is not separable from 22.5");
+
+        let mut keys: Vec<i64> = kept.iter().copied().map(normalize_rotation).collect();
+        let before = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), before, "every surviving angle must own a distinct cache key");
+    }
+
+    /// Angles a full degree apart are separable and must all survive - the
+    /// dedupe must not swallow a real 90-degree grain rule.
+    #[test]
+    fn angles_a_degree_or_more_apart_all_survive() {
+        assert_eq!(normalize_angles(&[0.0, 90.0, 180.0, 270.0]).len(), 4);
+        assert_eq!(normalize_angles(&[0.0, 1.0, 2.0]).len(), 3);
+        // out of range, negative, duplicate and non-finite all handled
+        assert_eq!(normalize_angles(&[360.0, -90.0, 0.0, f64::NAN]), vec![0.0, 270.0]);
+    }
+
+    /// The GUI's per-sheet readout and the headless CLI's per-sheet column
+    /// both go through `material_area`. Counting a drilled hole as material
+    /// overstates every sheet holding a holed part, which is what made the
+    /// two disagree with each other and with the run's own utilisation
+    /// (`nesting::consolidation::recompute_totals`, which has always
+    /// subtracted holes).
+    #[test]
+    fn material_area_subtracts_holes_while_area_does_not() {
+        let mut poly = PolygonDto::new(square(10.0), "cut".into(), None);
+        poly.children.push(PolygonDto::new(square(3.0), "drill".into(), None));
+
+        assert_eq!(poly.area(), 100.0);
+        assert_eq!(poly.material_area(), 91.0);
+    }
+
+    /// Winding must not change the magnitude - imported DXF and SVG profiles
+    /// do not agree on direction - and a degenerate ring contributes nothing
+    /// rather than panicking.
+    #[test]
+    fn area_is_unsigned_and_survives_degenerate_rings() {
+        let mut reversed = square(10.0);
+        reversed.reverse();
+        assert_eq!(PolygonDto::new(reversed, "cut".into(), None).area(), 100.0);
+        assert_eq!(PolygonDto::new(Vec::new(), "cut".into(), None).area(), 0.0);
+        assert_eq!(PolygonDto::new(square(1.0)[..2].to_vec(), "cut".into(), None).material_area(), 0.0);
+    }
 }

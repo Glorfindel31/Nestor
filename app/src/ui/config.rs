@@ -21,7 +21,7 @@ const PLACEMENT_TYPES: [(PlacementTypeDto, &str); 6] = [
 
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     let lang = app.prefs.lang;
-    fn tr<'a>(lang: super::i18n::Lang, k: &'a str) -> &'a str {
+    fn tr(lang: super::i18n::Lang, k: &str) -> &str {
         super::i18n::t(lang, k)
     }
     let t = |k: &'static str| tr(lang, k);
@@ -71,7 +71,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
 
 fn advanced(app: &mut App, ui: &mut egui::Ui) {
     let lang = app.prefs.lang;
-    fn tr<'a>(lang: super::i18n::Lang, k: &'a str) -> &'a str {
+    fn tr(lang: super::i18n::Lang, k: &str) -> &str {
         super::i18n::t(lang, k)
     }
     let t = |k: &'static str| tr(lang, k);

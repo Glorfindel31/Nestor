@@ -83,7 +83,7 @@ impl Plot {
 /// invites the reader to wonder what it means.
 fn unplaced_scale(history: &[NestSnapshotDto]) -> Option<f64> {
     let peak = history.iter().map(|h| h.unplaced_count).max()?;
-    (peak > 0).then(|| peak as f64)
+    (peak > 0).then_some(peak as f64)
 }
 
 /// Draws the chart. Returns the attempt index the user clicked, if any.

@@ -109,7 +109,9 @@ pub struct LayeredPolygon {
 }
 
 impl LayeredPolygon {
-    pub(crate) fn new(points: Vec<Point>, layer: String, is_circle: Option<Circle>) -> Self {
+    /// The single constructor. `children`/`texts`/`real_boundary` start
+    /// empty; a caller that needs them fills them in afterwards.
+    pub fn new(points: Vec<Point>, layer: String, is_circle: Option<Circle>) -> Self {
         LayeredPolygon {
             points,
             layer,
@@ -1817,12 +1819,10 @@ mod tests {
         // DXF arcs always sweep CCW from start to end, so the right-hand cap
         // is 270 -> 90 (through 0 degrees) and the left-hand one is 90 -> 270
         // (through 180). Swapping those would carve the caps *into* the slot.
-        let entities = vec![
-            line("CUT", (0.0, 5.0), (20.0, 5.0)),
+        let entities = [line("CUT", (0.0, 5.0), (20.0, 5.0)),
             arc("CUT", 20.0, 270.0, 90.0),
             line("CUT", (20.0, -5.0), (0.0, -5.0)),
-            arc("CUT", 0.0, 90.0, 270.0),
-        ];
+            arc("CUT", 0.0, 90.0, 270.0)];
         let rings = entities_to_polygons_chained(entities.iter(), 0.01);
         assert_eq!(rings.len(), 1);
         let expected = 20.0 * 10.0 + std::f64::consts::PI * 25.0;
@@ -1881,7 +1881,7 @@ mod tests {
             }),
         );
         assert!(entity_to_polygon(&arc, 0.1).is_none(), "one quarter arc is not a closed shape on its own");
-        let entities = vec![arc];
+        let entities = [arc];
         assert!(entities_to_polygons_chained(entities.iter(), 0.1).is_empty(), "and chaining must not invent a chord to close it");
     }
 

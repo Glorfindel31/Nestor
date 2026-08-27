@@ -96,32 +96,7 @@ fn stamp_now() -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn the_display_buffer_is_capped_and_keeps_the_newest_lines() {
-        let mut c = Console::default();
-        for i in 0..MAX_LINES + 50 {
-            c.log(Kind::Plain, format!("line {i}"));
-        }
-        assert_eq!(c.lines.len(), MAX_LINES);
-        assert_eq!(c.lines.front().unwrap().text, format!("line {}", 50));
-        assert_eq!(c.lines.back().unwrap().text, format!("line {}", MAX_LINES + 49));
-    }
-
-    #[test]
-    fn the_stamp_is_a_fixed_width_clock() {
-        let s = stamp_now();
-        assert_eq!(s.len(), 8, "{s}");
-        assert!(s.chars().enumerate().all(|(i, c)| if i == 2 || i == 5 { c == ':' } else { c.is_ascii_digit() }), "{s}");
-    }
-}
-
-/// The floating log window. Draggable, minimisable, and deliberately not
-/// closable - losing the only narration channel to a stray click is worse
-/// than the screen space it costs.
 /// The log, as a collapsible left-hand side panel - the mirror of
 /// `shell::config_panel` on the right, and built the same way: a heading
 /// with the accent rule under it, a close button, and the header carrying
@@ -165,3 +140,25 @@ pub fn panel(app: &mut super::App, ctx: &egui::Context) {
         });
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_display_buffer_is_capped_and_keeps_the_newest_lines() {
+        let mut c = Console::default();
+        for i in 0..MAX_LINES + 50 {
+            c.log(Kind::Plain, format!("line {i}"));
+        }
+        assert_eq!(c.lines.len(), MAX_LINES);
+        assert_eq!(c.lines.front().unwrap().text, format!("line {}", 50));
+        assert_eq!(c.lines.back().unwrap().text, format!("line {}", MAX_LINES + 49));
+    }
+
+    #[test]
+    fn the_stamp_is_a_fixed_width_clock() {
+        let s = stamp_now();
+        assert_eq!(s.len(), 8, "{s}");
+        assert!(s.chars().enumerate().all(|(i, c)| if i == 2 || i == 5 { c == ':' } else { c.is_ascii_digit() }), "{s}");
+    }
+}

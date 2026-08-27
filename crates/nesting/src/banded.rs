@@ -782,7 +782,7 @@ pub fn pack_sheet(sheet_bounds: Bounds, parts: &[NestPart], curve_tolerance: f64
     heights.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
     crate::profile::BANDED_UNIFORM.time(|| {
         for height in heights {
-            let plan = uniform_plan(sheet_bounds, parts, &catalogue, height);
+            let plan = uniform_plan(sheet_bounds, parts, catalogue, height);
             if plan.area > best.area {
                 best = plan;
             }
@@ -799,7 +799,7 @@ pub fn pack_sheet(sheet_bounds: Bounds, parts: &[NestPart], curve_tolerance: f64
         }
         None => {
             let mut budget = NODE_BUDGET;
-            crate::profile::BANDED_SEARCH.time(|| search(sheet_bounds, parts, &catalogue, &mut pool, sheet_bounds.height, &mut Plan::default(), &mut best, &mut budget));
+            crate::profile::BANDED_SEARCH.time(|| search(sheet_bounds, parts, catalogue, &mut pool, sheet_bounds.height, &mut Plan::default(), &mut best, &mut budget));
             crate::profile::PLAN_CACHE_MISS.add(1);
             if let Ok(mut cache) = PLAN_CACHE.lock() {
                 // Same cap policy as `UNIT_CACHE`: stop growing, keep what is there.
@@ -815,7 +815,7 @@ pub fn pack_sheet(sheet_bounds: Bounds, parts: &[NestPart], curve_tolerance: f64
     if std::env::var("NEST_BANDED").is_ok_and(|v| v != "0") {
         eprintln!("  chosen bands: {:?}", best.bands);
     }
-    Some(materialise(sheet_bounds, parts, &catalogue, &best))
+    Some(materialise(sheet_bounds, parts, catalogue, &best))
 }
 
 /// A band sequence under consideration: the heights chosen so far and the
@@ -1020,14 +1020,7 @@ mod tests {
         NestPart {
             id,
             source_id,
-            polygon: LayeredPolygon {
-                points: vec![Point::new(0.0, 0.0), Point::new(w, 0.0), Point::new(w, h), Point::new(0.0, h)],
-                layer: "0".into(),
-                is_circle: None,
-                children: Vec::new(),
-                texts: Vec::new(),
-                real_boundary: None,
-            },
+            polygon: LayeredPolygon::new(vec![Point::new(0.0, 0.0), Point::new(w, 0.0), Point::new(w, h), Point::new(0.0, h)], "0".into(), None),
             rotation: 0.0,
         }
     }
@@ -1073,14 +1066,7 @@ mod tests {
         NestPart {
             id,
             source_id,
-            polygon: LayeredPolygon {
-                points: vec![Point::new(0.0, 0.0), Point::new(w, 0.0), Point::new(0.0, h)],
-                layer: "0".into(),
-                is_circle: None,
-                children: Vec::new(),
-                texts: Vec::new(),
-                real_boundary: None,
-            },
+            polygon: LayeredPolygon::new(vec![Point::new(0.0, 0.0), Point::new(w, 0.0), Point::new(0.0, h)], "0".into(), None),
             rotation: 0.0,
         }
     }

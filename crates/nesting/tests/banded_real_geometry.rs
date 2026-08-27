@@ -263,14 +263,7 @@ fn report_whether_the_bare_shape_pairs() {
 /// something else again.
 #[test]
 fn report_the_nfp_reference_convention() {
-    let square = |x: f64, y: f64| LayeredPolygon {
-        points: vec![Point::new(x, y), Point::new(x + 10.0, y), Point::new(x + 10.0, y + 10.0), Point::new(x, y + 10.0)],
-        layer: "0".into(),
-        is_circle: None,
-        children: Vec::new(),
-        texts: Vec::new(),
-        real_boundary: None,
-    };
+    let square = |x: f64, y: f64| LayeredPolygon::new(vec![Point::new(x, y), Point::new(x + 10.0, y), Point::new(x + 10.0, y + 10.0), Point::new(x, y + 10.0)], "0".into(), None);
     let a = square(100.0, 200.0);
     let b = square(100.0, 200.0);
     let nfp = geometry::obstacle_nfp::obstacle_nfp(&a, &b, CURVE_TOLERANCE).expect("squares have an NFP");

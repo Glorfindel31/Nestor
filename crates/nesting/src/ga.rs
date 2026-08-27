@@ -482,7 +482,7 @@ mod tests {
             assert!(same_ids(&ind.placement, 7));
             assert_eq!(ind.rotation.len(), 7);
             for &r in &ind.rotation {
-                assert!(r >= 0.0 && r < 360.0);
+                assert!((0.0..360.0).contains(&r));
                 assert_eq!((r / 90.0).round() * 90.0, r, "rotation {r} not on the 4-way grid");
             }
         }

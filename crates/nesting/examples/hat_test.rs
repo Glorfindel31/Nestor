@@ -130,7 +130,7 @@ fn main() {
 
     let sheet_raw = vec![Point::new(0.0, 0.0), Point::new(SHEET_SIZE, 0.0), Point::new(SHEET_SIZE, SHEET_SIZE), Point::new(0.0, SHEET_SIZE)];
     let sheet_points = prepare_sheet(&sheet_raw, 0.0, 0.0).expect("500x500 sheet should be usable at zero margin/spacing");
-    let sheet = LayeredPolygon { points: sheet_points, layer: "SHEET".into(), is_circle: None, children: Vec::new(), texts: Vec::new(), real_boundary: None };
+    let sheet = LayeredPolygon::new(sheet_points, "SHEET".into(), None);
     let sheets = vec![sheet]; // exactly one sheet - this is a single-sheet packing-density benchmark, not a multi-sheet job
 
     let placement_config = PlacementConfig { placement_type, rotations, dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD, curve_tolerance: CURVE_TOLERANCE, part_rules: Default::default(), banded_pass: true };

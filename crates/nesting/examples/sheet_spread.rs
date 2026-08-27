@@ -154,7 +154,7 @@ fn run(scenario: &Scenario, generations: usize, rotations: u32) {
     let sheet_points = rect(SHEET_W, SHEET_H);
     let sheet_usable = prepare_sheet(&sheet_points, margin(), spacing()).expect("sheet should offset cleanly");
     let sheet_area = polygon_area(&sheet_usable).abs();
-    let sheet = LayeredPolygon { points: sheet_usable, layer: "sheet".into(), is_circle: None, children: Vec::new(), texts: Vec::new(), real_boundary: None };
+    let sheet = LayeredPolygon::new(sheet_usable, "sheet".into(), None);
     let sheets: Vec<LayeredPolygon> = (0..scenario.sheet_copies).map(|_| sheet.clone()).collect();
 
     let mut parts_by_id: HashMap<usize, LayeredPolygon> = HashMap::new();

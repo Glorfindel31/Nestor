@@ -126,7 +126,8 @@ pub const DEFAULT_DOMINANT_PART_AREA_THRESHOLD: f64 = 0.9;
 /// footprint before measuring overlap with already-placed material/the
 /// sheet edge - the "is this touching" probe width. Empirical starting
 /// point, same order of magnitude as real spacing/margin values already
-/// used elsewhere in this codebase (3-6.5mm in the `FLAT.dxf` benchmarks);
+/// used elsewhere in this codebase (3-6.5mm in the since-removed `FLAT.dxf`
+/// benchmarks);
 /// tune against a real job if this doesn't clearly help.
 pub const TIGHT_FIT_PROBE_DISTANCE: f64 = 1.0;
 
@@ -330,7 +331,7 @@ pub struct Placement {
 /// own identity for the part (see `NestPart::id`) - nothing in this module
 /// uses it as an internal key, since ids aren't guaranteed unique (quantity
 /// > 1 of the same part shares an id, same as the JS original never assumed
-/// otherwise either).
+/// > otherwise either).
 #[derive(Clone, Copy, Debug)]
 pub struct PlacedPart {
     pub id: usize,
@@ -1588,7 +1589,8 @@ pub fn place_parts(
             // Extending this to `GravityCorrective` (not just TightFit/
             // GravityTightFit) turned out to be the fix for a real
             // benchmark regression: on a real 170-part/~100-sheet job
-            // (`tests/fixtures/FLAT.dxf`+`FLAT-struck.dxf`) averaging only
+            // (the `FLAT.dxf`+`FLAT-struck.dxf` fixtures, since removed from the
+            // tree) averaging only
             // ~1.7 parts per sheet, most sheets never reach a 3rd part at
             // all, so the *first* part's placement quality dominates -
             // before this, GravityCorrective's first part used the plain
@@ -2325,14 +2327,7 @@ mod tests {
     }
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> LayeredPolygon {
-        LayeredPolygon {
-            points: vec![Point::new(x, y), Point::new(x + w, y), Point::new(x + w, y + h), Point::new(x, y + h)],
-            layer: "0".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        }
+        LayeredPolygon::new(vec![Point::new(x, y), Point::new(x + w, y), Point::new(x + w, y + h), Point::new(x, y + h)], "0".into(), None)
     }
 
     fn square_with_hole(x: f64, y: f64, size: f64, hole_x: f64, hole_y: f64, hole_size: f64) -> LayeredPolygon {
@@ -2463,7 +2458,7 @@ mod tests {
         };
         let cache = NfpCache::new();
 
-        let _ = place_parts(&[sheet.clone()], parts(), &config(PlacementType::Gravity), &cache, &|| false, &|_, _| {}, &|_, _, _| {});
+        let _ = place_parts(std::slice::from_ref(&sheet), parts(), &config(PlacementType::Gravity), &cache, &|| false, &|_, _| {}, &|_, _, _| {});
         let entries_after_first = cache.stats();
         assert!(entries_after_first > 0);
 
@@ -2492,7 +2487,7 @@ mod tests {
         ];
 
         let same_shape_cache = NfpCache::new();
-        place_parts(&[sheet.clone()], same_shape_parts, &config(PlacementType::Gravity), &same_shape_cache, &|| false, &|_, _| {}, &|_, _, _| {}).unwrap();
+        place_parts(std::slice::from_ref(&sheet), same_shape_parts, &config(PlacementType::Gravity), &same_shape_cache, &|| false, &|_, _| {}, &|_, _, _| {}).unwrap();
 
         let distinct_shape_cache = NfpCache::new();
         place_parts(&[sheet], distinct_shape_parts, &config(PlacementType::Gravity), &distinct_shape_cache, &|| false, &|_, _| {}, &|_, _, _| {}).unwrap();
@@ -2521,7 +2516,7 @@ mod tests {
         let dense_parts = vec![NestPart { id: 0, source_id: 0, polygon: square(0.0, 0.0, 90.0), rotation: 0.0 }]; // 8,100mm2, 81%
         let sparse_parts = vec![NestPart { id: 0, source_id: 0, polygon: square(0.0, 0.0, 10.0), rotation: 0.0 }]; // 100mm2, 1%
 
-        let dense = place_parts(&[sheet.clone()], dense_parts, &config(PlacementType::Gravity), &NfpCache::new(), &|| false, &|_, _| {}, &|_, _, _| {}).unwrap();
+        let dense = place_parts(std::slice::from_ref(&sheet), dense_parts, &config(PlacementType::Gravity), &NfpCache::new(), &|| false, &|_, _| {}, &|_, _, _| {}).unwrap();
         let sparse = place_parts(&[sheet], sparse_parts, &config(PlacementType::Gravity), &NfpCache::new(), &|| false, &|_, _| {}, &|_, _, _| {}).unwrap();
 
         assert_eq!(dense.unplaced_count, 0);
@@ -2830,21 +2825,7 @@ mod tests {
     #[test]
     fn tight_fit_and_gravity_tight_fit_rotate_even_the_very_first_part_for_a_tighter_corner() {
         fn notched_square() -> LayeredPolygon {
-            LayeredPolygon {
-                points: vec![
-                    Point::new(4.0, 0.0),
-                    Point::new(10.0, 0.0),
-                    Point::new(10.0, 10.0),
-                    Point::new(0.0, 10.0),
-                    Point::new(0.0, 4.0),
-                    Point::new(4.0, 4.0),
-                ],
-                layer: "0".into(),
-                is_circle: None,
-                children: Vec::new(),
-                texts: Vec::new(),
-                real_boundary: None,
-            }
+            LayeredPolygon::new(vec![ Point::new(4.0, 0.0), Point::new(10.0, 0.0), Point::new(10.0, 10.0), Point::new(0.0, 10.0), Point::new(0.0, 4.0), Point::new(4.0, 4.0), ], "0".into(), None)
         }
 
         for placement_type in [PlacementType::TightFit, PlacementType::GravityTightFit] {

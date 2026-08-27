@@ -54,7 +54,7 @@
 
 use crate::clipper::offset_round;
 use crate::point::Point;
-use crate::polygon::{get_polygon_bounds, is_rectangle};
+use crate::polygon::{get_polygon_bounds, is_rectangle, polygon_area};
 
 /// Grows (or shrinks) an already-exact axis-aligned rectangle by `delta` on
 /// every side via plain arithmetic - no Clipper2 call, no join type, no
@@ -107,14 +107,31 @@ fn offset_rectangle_exact(polygon: &[Point], delta: f64) -> Option<Vec<Point>> {
 /// its true outline off the real material when placed flush - see
 /// `clipper::offset_round`, which is why this is the round join and not the
 /// cheaper bevel one.
-fn offset_clearance(polygon: &[Point], delta: f64) -> Vec<Vec<Point>> {
+///
+/// **Keeps the largest resulting ring**, the same convention
+/// `clipper::clean_polygon` uses. An inward offset can split a concave
+/// outline into several disjoint pieces - a U-shaped offcut from
+/// `remnant::sheet_remnants`, stored by the library as a `Role::Sheet`, does
+/// exactly this once `margin` exceeds half the notch width. Clipper's output
+/// order is not area order, so taking the first ring can hand back a sliver
+/// (measured: a 6800mm2 U-shaped offcut at margin 15 splits into rings of
+/// 1mm2 and 2mm2, and the first one is the 1) and every part then reports as
+/// unplaced on a sheet that visibly has material on it.
+///
+/// ponytail: largest ring, not every ring. The engine takes one polygon per
+/// sheet, so representing a split offcut as two independent sheets is a
+/// change to the sheet model, not to this function. Largest-ring is strictly
+/// better than arbitrary and is what a caller means by "the" offcut; upgrade
+/// path if split offcuts ever need their full area is to have the library
+/// store each ring as its own sheet at remnant time.
+fn offset_clearance(polygon: &[Point], delta: f64) -> Option<Vec<Point>> {
     if delta == 0.0 {
-        return vec![polygon.to_vec()];
+        return Some(polygon.to_vec());
     }
     if let Some(exact) = offset_rectangle_exact(polygon, delta) {
-        return vec![exact];
+        return Some(exact);
     }
-    offset_round(polygon, delta)
+    offset_round(polygon, delta).into_iter().max_by(|a, b| polygon_area(a).abs().total_cmp(&polygon_area(b).abs()))
 }
 
 /// Prepares a sheet boundary for nesting: insets (or, when `spacing / 2 >
@@ -123,12 +140,16 @@ fn offset_clearance(polygon: &[Point], delta: f64) -> Vec<Vec<Point>> {
 /// `None` only if the resulting inset collapses the sheet to nothing
 /// (e.g. a margin larger than the sheet itself).
 ///
-/// Uses `offset_bevel`, not the plain miter-join `offset` - see its doc
-/// comment for why a clearance buffer needs a spike-free join specifically.
+/// Uses `offset_round`, not the plain miter-join `offset` - see
+/// `clipper::offset_round` for why a clearance buffer needs a join that is
+/// spike-free *and* never under-grows (`offset_bevel` has the first property
+/// but not the second, and cost 71 fatal audit issues when it was tried).
 /// An exact rectangle skips Clipper2 entirely - see `offset_rectangle_exact`.
+/// A concave sheet that the inset splits keeps its largest piece - see
+/// `offset_clearance`.
 pub fn prepare_sheet(sheet: &[Point], margin: f64, spacing: f64) -> Option<Vec<Point>> {
     let delta = spacing / 2.0 - margin;
-    offset_clearance(sheet, delta).into_iter().next()
+    offset_clearance(sheet, delta)
 }
 
 /// Prepares a part's outer boundary for nesting: grows it outward by half
@@ -150,7 +171,7 @@ pub fn prepare_sheet(sheet: &[Point], margin: f64, spacing: f64) -> Option<Vec<P
 /// exact rectangular part skips Clipper2 entirely - see
 /// `offset_rectangle_exact`.
 pub fn prepare_part(part_outer: &[Point], spacing: f64) -> Option<Vec<Point>> {
-    offset_clearance(part_outer, spacing / 2.0).into_iter().next()
+    offset_clearance(part_outer, spacing / 2.0)
 }
 
 #[cfg(test)]
@@ -160,6 +181,35 @@ mod tests {
 
     fn square(x: f64, y: f64, size: f64) -> Vec<Point> {
         vec![Point::new(x, y), Point::new(x + size, y), Point::new(x + size, y + size), Point::new(x, y + size)]
+    }
+
+    /// A U-shaped offcut - what `remnant::sheet_remnants` hands back and the
+    /// library stores as a `Role::Sheet`. Once `margin` exceeds half the
+    /// notch width the inset splits it in two, and Clipper's output order is
+    /// not area order, so taking the first ring silently returned the smaller
+    /// piece. Every part then reports unplaced on a sheet with material on it.
+    #[test]
+    fn a_split_concave_sheet_keeps_its_largest_piece() {
+        let u = vec![
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 0.0),
+            Point::new(100.0, 100.0),
+            Point::new(70.0, 100.0),
+            Point::new(70.0, 20.0),
+            Point::new(30.0, 20.0),
+            Point::new(30.0, 100.0),
+            Point::new(0.0, 100.0),
+        ];
+        let rings = crate::clipper::offset_round(&u, -15.0);
+        assert!(rings.len() > 1, "this margin must actually split the offcut, or the test proves nothing");
+        let biggest = rings.iter().map(|r| crate::polygon::polygon_area(r).abs()).fold(0.0, f64::max);
+
+        let prepared = prepare_sheet(&u, 15.0, 0.0).expect("a split sheet still has usable area");
+        assert!(
+            (crate::polygon::polygon_area(&prepared).abs() - biggest).abs() < 1e-6,
+            "kept {} of a possible {biggest}",
+            crate::polygon::polygon_area(&prepared).abs()
+        );
     }
 
     #[test]

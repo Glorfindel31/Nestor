@@ -108,7 +108,7 @@ pub fn pack_unplaced_parts(parts: &[LayeredPolygon], spacing: f64) -> SheetLayou
         Point::new(0.0, total_height),
     ];
     SheetLayout {
-        sheet: LayeredPolygon { points: sheet_points, layer: "UNPLACED".to_string(), is_circle: None, children: Vec::new(), texts: Vec::new(), real_boundary: None },
+        sheet: LayeredPolygon::new(sheet_points, "UNPLACED".to_string(), None),
         parts: placed,
     }
 }
@@ -225,14 +225,7 @@ mod tests {
     use crate::point::Point;
 
     fn square(size: f64) -> LayeredPolygon {
-        LayeredPolygon {
-            points: vec![Point::new(0.0, 0.0), Point::new(size, 0.0), Point::new(size, size), Point::new(0.0, size)],
-            layer: "CUT".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        }
+        LayeredPolygon::new(vec![Point::new(0.0, 0.0), Point::new(size, 0.0), Point::new(size, size), Point::new(0.0, size)], "CUT".into(), None)
     }
 
     fn entities_on_layer<'a>(drawing: &'a Drawing, layer: &str) -> Vec<&'a LwPolyline> {
@@ -402,14 +395,7 @@ mod tests {
     /// same as `points` would.
     #[test]
     fn a_true_circle_part_exports_as_a_real_circle_entity_at_its_placed_position() {
-        let circle_shape = LayeredPolygon {
-            points: crate::dxf_import::tessellate_circle(0.0, 0.0, 5.0, 0.1),
-            layer: "CUT".into(),
-            is_circle: Some(crate::circular_nfp::Circle { cx: 0.0, cy: 0.0, r: 5.0 }),
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        };
+        let circle_shape = LayeredPolygon::new(crate::dxf_import::tessellate_circle(0.0, 0.0, 5.0, 0.1), "CUT".into(), Some(crate::circular_nfp::Circle { cx: 0.0, cy: 0.0, r: 5.0 }));
         // placed at (50, 30) - rotation is a no-op for a circle's center at
         // the origin, but exercises the same rotate-then-shift pipeline
         // every other part goes through.

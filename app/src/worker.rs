@@ -372,7 +372,7 @@ impl Worker {
     }
 }
 
-//// One position the engine scored for a part and did not necessarily take.
+/// One position the engine scored for a part and did not necessarily take.
 ///
 /// `nesting::placement::CandidateTrace` with the score dropped: the live
 /// view draws these as outlines and only needs to know where, at what angle,

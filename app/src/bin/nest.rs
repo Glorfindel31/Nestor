@@ -97,7 +97,8 @@ impl Default for Options {
                 rotations: 4,
                 // Mirrors `ui::state::ConfigForm::default` on purpose - the
                 // harness has to measure what the window actually ships, and
-                // these used to be the untuned `index.html` numbers
+                // these used to be the untuned numbers the deleted Electron
+                // frontend shipped
                 // (population 10, generations 5, tolerance 0.1), making every
                 // bench row 2-4x slower than a real run.
                 population_size: 4,
@@ -188,14 +189,7 @@ fn placement_type(raw: &str) -> Result<PlacementTypeDto, String> {
 }
 
 fn rect(w: f64, h: f64) -> PolygonDto {
-    PolygonDto {
-        points: vec![PointDto { x: 0.0, y: 0.0 }, PointDto { x: w, y: 0.0 }, PointDto { x: w, y: h }, PointDto { x: 0.0, y: h }],
-        layer: "sheet".to_string(),
-        is_circle: None,
-        children: Vec::new(),
-        texts: Vec::new(),
-        real_boundary: None,
-    }
+    PolygonDto::new(vec![PointDto { x: 0.0, y: 0.0 }, PointDto { x: w, y: 0.0 }, PointDto { x: w, y: h }, PointDto { x: 0.0, y: h }], "sheet".to_string(), None)
 }
 
 fn run() -> Result<(), String> {
@@ -363,7 +357,7 @@ fn per_sheet(response: &rustynesting::dto::RunNestResponse, sheet_area: f64) -> 
         .placements
         .iter()
         .map(|placement| {
-            let used: f64 = placement.parts.iter().filter_map(|p| response.parts_by_id.get(&p.id)).map(material_area_of).sum();
+            let used: f64 = placement.parts.iter().filter_map(|p| response.parts_by_id.get(&p.id)).map(rustynesting::dto::PolygonDto::material_area).sum();
             if sheet_area > 0.0 {
                 used / sheet_area * 100.0
             } else {
@@ -371,25 +365,6 @@ fn per_sheet(response: &rustynesting::dto::RunNestResponse, sheet_area: f64) -> 
             }
         })
         .collect()
-}
-
-/// Outline area minus its holes - the same rule `geometry::polygon_material_area`
-/// uses, and the same one a commercial job report's Util column uses. Counting
-/// a drilled hole as material overstates every sheet holding a holed part, so
-/// the two reports cannot be read side by side.
-fn material_area_of(poly: &rustynesting::dto::PolygonDto) -> f64 {
-    let outer = area_of(&poly.points);
-    let holes: f64 = poly.children.iter().map(|c| area_of(&c.points)).sum();
-    (outer - holes).max(0.0)
-}
-
-fn area_of(points: &[PointDto]) -> f64 {
-    let mut sum = 0.0;
-    for (i, p) in points.iter().enumerate() {
-        let q = &points[(i + 1) % points.len()];
-        sum += p.x * q.y - q.x * p.y;
-    }
-    (sum / 2.0).abs()
 }
 
 /// Which source id each part id belongs to, rebuilt from the per-source

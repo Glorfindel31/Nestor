@@ -133,7 +133,7 @@ fn entry(lang: Lang, key: &str) -> Option<&'static str> {
 /// Looks up `key`, falling back to English for anything the chosen language
 /// is missing, and to the key itself if English is missing it too - so a
 /// typo is loud in the UI instead of showing up as a blank label.
-pub fn t<'a>(lang: Lang, key: &'a str) -> &'a str {
+pub fn t(lang: Lang, key: &str) -> &str {
     entry(lang, key).or_else(|| entry(Lang::En, key)).unwrap_or(key)
 }
 
@@ -167,6 +167,46 @@ mod tests {
         for lang in Lang::ALL {
             let parsed: Result<HashMap<String, String>, _> = serde_json::from_str(SOURCES[lang as usize]);
             assert!(parsed.is_ok(), "assets/i18n/{}.json is not valid JSON: {}", lang.code(), parsed.unwrap_err());
+        }
+    }
+
+    /// A key whose text carries `{name}` must be rendered through `tv`, never
+    /// `t` - `t` returns the template verbatim, so the user reads a literal
+    /// `{n}` or `{err}`. Five keys had drifted onto plain `t` this way,
+    /// including both failure messages, which meant a nest that failed showed
+    /// "nest failed: {err}" and never the reason.
+    ///
+    /// Scans the UI source rather than the dictionaries, because the mistake
+    /// is at the call site. `include_str!` so it runs against the tree being
+    /// compiled, with no path or working-directory assumptions.
+    #[test]
+    fn no_placeholder_key_is_rendered_through_plain_t() {
+        const UI_SOURCES: &[&str] = &[
+            include_str!("mod.rs"),
+            include_str!("import.rs"),
+            include_str!("result.rs"),
+            include_str!("shell.rs"),
+            include_str!("shapes.rs"),
+            include_str!("config.rs"),
+            include_str!("library.rs"),
+            include_str!("console.rs"),
+            include_str!("prefs.rs"),
+            include_str!("canvas.rs"),
+            include_str!("state.rs"),
+            include_str!("history_chart.rs"),
+        ];
+
+        let templated: Vec<&String> = english().iter().filter(|(_, v)| v.contains('{')).map(|(k, _)| k).collect();
+        assert!(!templated.is_empty(), "the dictionary should have templated keys, or this test proves nothing");
+
+        for key in templated {
+            let plain = format!("t(\"{key}\")");
+            for src in UI_SOURCES {
+                assert!(
+                    !src.contains(&plain),
+                    "`{key}` interpolates {{...}} but is rendered with plain t() - use tv() and pass the value"
+                );
+            }
         }
     }
 

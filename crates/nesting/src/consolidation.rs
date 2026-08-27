@@ -338,14 +338,7 @@ mod tests {
     use geometry::point::Point;
 
     fn square(size: f64) -> LayeredPolygon {
-        LayeredPolygon {
-            points: vec![Point::new(0.0, 0.0), Point::new(size, 0.0), Point::new(size, size), Point::new(0.0, size)],
-            layer: "0".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        }
+        LayeredPolygon::new(vec![Point::new(0.0, 0.0), Point::new(size, 0.0), Point::new(size, size), Point::new(0.0, size)], "0".into(), None)
     }
 
     fn config() -> PlacementConfig {

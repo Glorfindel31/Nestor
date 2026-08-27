@@ -152,7 +152,9 @@ pub struct App {
 
     // ---- 01 IMPORT ----
     import_status: Status,
-    importing: bool,
+    /// How many files the running import batch covers - 0 when idle.
+    /// A count rather than a flag because `import_importing` interpolates it.
+    importing: usize,
     /// Shapes (not files) read by the batch in flight - what the status line
     /// reports when it finishes. Counting files instead said "1 shape(s)
     /// imported" after reading 99 of them out of one DXF.
@@ -327,7 +329,7 @@ impl App {
             worker,
             console: Default::default(),
             import_status: Default::default(),
-            importing: false,
+            importing: 0,
             imported_this_batch: 0,
             rect_w: 2440.0,
             rect_h: 1220.0,
@@ -470,7 +472,7 @@ impl App {
                 self.console.error(format!("import failed for {file}: {error}"));
             }
             Msg::ImportBatchDone { ok, failed } => {
-                self.importing = false;
+                self.importing = 0;
                 let imported = std::mem::take(&mut self.imported_this_batch);
                 if ok == 0 {
                     self.import_status.err(self.t("import_status_none"));
@@ -593,7 +595,8 @@ impl App {
                     }
                     (Err(e), _) => {
                         self.console.error(format!("repack failed: {e}"));
-                        self.run_status.err(self.t("repack_status_failed"));
+                        let n = index.map_or_else(|| "?".to_string(), |i| (i + 1).to_string());
+                        self.run_status.err(self.tv("repack_status_failed", &[("n", &n)]));
                     }
                     (Ok(_), None) => {}
                 }

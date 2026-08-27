@@ -106,39 +106,13 @@ mod tests {
     use crate::circular_nfp::Circle;
 
     fn square_layered(x: f64, y: f64, size: f64) -> LayeredPolygon {
-        LayeredPolygon {
-            points: vec![
-                Point::new(x, y),
-                Point::new(x + size, y),
-                Point::new(x + size, y + size),
-                Point::new(x, y + size),
-            ],
-            layer: "0".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        }
+        LayeredPolygon::new(vec![ Point::new(x, y), Point::new(x + size, y), Point::new(x + size, y + size), Point::new(x, y + size), ], "0".into(), None)
     }
 
     #[test]
     fn circular_fast_path_fires_for_two_circles_with_no_holes() {
-        let a = LayeredPolygon {
-            points: crate::dxf_import::tessellate_circle(0.0, 0.0, 10.0, 0.01),
-            layer: "0".into(),
-            is_circle: Some(Circle { cx: 0.0, cy: 0.0, r: 10.0 }),
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        };
-        let b = LayeredPolygon {
-            points: crate::dxf_import::tessellate_circle(0.0, 0.0, 4.0, 0.01),
-            layer: "0".into(),
-            is_circle: Some(Circle { cx: 0.0, cy: 0.0, r: 4.0 }),
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        };
+        let a = LayeredPolygon::new(crate::dxf_import::tessellate_circle(0.0, 0.0, 10.0, 0.01), "0".into(), Some(Circle { cx: 0.0, cy: 0.0, r: 10.0 }));
+        let b = LayeredPolygon::new(crate::dxf_import::tessellate_circle(0.0, 0.0, 4.0, 0.01), "0".into(), Some(Circle { cx: 0.0, cy: 0.0, r: 4.0 }));
 
         let result = inner_nfp(&a, &b, 0.01).expect("small circle should fit inside big circle");
         assert_eq!(result.len(), 1);
@@ -165,19 +139,7 @@ mod tests {
     fn general_fallback_fires_when_container_has_holes() {
         // A 20x20 square container with a 4x4 hole in the middle - forces the
         // general fallback (fast path 2 requires NO holes).
-        let hole = LayeredPolygon {
-            points: vec![
-                Point::new(8.0, 8.0),
-                Point::new(12.0, 8.0),
-                Point::new(12.0, 12.0),
-                Point::new(8.0, 12.0),
-            ],
-            layer: "DRILL".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        };
+        let hole = LayeredPolygon::new(vec![ Point::new(8.0, 8.0), Point::new(12.0, 8.0), Point::new(12.0, 12.0), Point::new(8.0, 12.0), ], "DRILL".into(), None);
         let mut a = square_layered(0.0, 0.0, 20.0);
         a.children.push(hole);
         let b = square_layered(0.0, 0.0, 2.0);

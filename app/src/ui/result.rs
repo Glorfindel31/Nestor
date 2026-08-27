@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use egui::{Color32, RichText};
 
-use super::state::{bounds_of, polygon_area, Bounds};
+use super::state::{bounds_of, Bounds};
 use super::{canvas, console, shell, theme, App, Snapshot};
 use crate::dto::{ExportRequest, PlacedPartDto, PointDto, PolygonDto, ReportPartDto, ReportRequest, RepackSheetRequest, SheetPlacementDto, ValidatePlacementRequest};
 use crate::worker::ExportFormat;
@@ -311,10 +311,13 @@ fn sheet_card(app: &mut App, ui: &mut egui::Ui, index: usize) {
     let Some(placement) = snap.placements.get(index) else { return };
     let Some(sheet) = app.result_sheets.get(placement.sheet_index).or_else(|| app.result_sheets.first()) else { return };
 
-    let sheet_area = polygon_area(&sheet.points);
-    let used: f64 = placement.parts.iter().filter_map(|p| app.parts_by_id.get(&p.id)).map(|poly| polygon_area(&poly.points)).sum();
+    let sheet_area = sheet.material_area();
+    let used: f64 = placement.parts.iter().filter_map(|p| app.parts_by_id.get(&p.id)).map(PolygonDto::material_area).sum();
     let util = if sheet_area > 0.0 { used / sheet_area * 100.0 } else { 0.0 };
-    // ponytail: raw polygon area, not margin/spacing-net "usable" area, and
+    // Holes subtracted on both sides, so this agrees with the run's own
+    // utilisation and with the headless CLI's per-sheet column - a drilled
+    // part counted whole overstates every sheet it sits on.
+    // ponytail: gross polygon area, not margin/spacing-net "usable" area, and
     // the bands are untuned - they exist to make a bad sheet obvious at a
     // glance, not to be a number anyone quotes.
     let band = if util >= 75.0 {
@@ -386,7 +389,7 @@ fn draw_ghosts(app: &App, painter: &egui::Painter, view: &canvas::View, index: u
     let mut seen = 0usize;
     for g in &ghost.positions {
         if !g.accepted {
-            let skip = seen % step != 0;
+            let skip = !seen.is_multiple_of(step);
             seen += 1;
             if skip {
                 continue;
@@ -909,7 +912,8 @@ fn start_repack(app: &mut App, index: usize) {
     );
 
     app.repacking = Some(index);
-    app.run_status.ok(app.t("repack_status_running"));
+    let msg = app.tv("repack_status_running", &[("n", &(index + 1).to_string())]);
+    app.run_status.ok(msg);
     app.worker.repack(RepackSheetRequest { sheet, placement, parts_by_id, config, part_rules: app.part_rules.clone() });
 }
 

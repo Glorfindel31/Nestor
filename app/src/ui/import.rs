@@ -17,13 +17,14 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
             ui.label(RichText::new(app.t("tolerance_label")).color(theme::DIM()));
             ui.add(egui::DragValue::new(&mut app.cfg.curve_tolerance).speed(0.05).range(0.01..=10.0));
 
-            let enabled = !app.importing && !app.controls_locked();
+            let enabled = app.importing == 0 && !app.controls_locked();
             if ui.add_enabled(enabled, egui::Button::new(shell::accent(app.t("btn_browse")).strong().family(theme::heavy()))).clicked() {
                 browse(app);
             }
-            if app.importing {
+            if app.importing > 0 {
                 ui.spinner();
-                ui.label(RichText::new(app.t("import_importing")).color(theme::DIM()));
+                let msg = app.tv("import_importing", &[("n", &app.importing.to_string())]);
+                ui.label(RichText::new(msg).color(theme::DIM()));
             }
         })
         .response
@@ -104,8 +105,9 @@ fn start_import(app: &mut App, paths: Vec<std::path::PathBuf>) {
 }
 
 fn dispatch(app: &mut App, paths: Vec<std::path::PathBuf>, svg_unit: Option<String>) {
-    app.importing = true;
-    app.import_status.ok(app.t("import_importing"));
+    app.importing = paths.len();
+    let msg = app.tv("import_importing", &[("n", &paths.len().to_string())]);
+    app.import_status.ok(msg);
     app.worker.import(paths, app.cfg.curve_tolerance, svg_unit);
 }
 
@@ -177,14 +179,7 @@ fn add_rectangle(app: &mut App) {
     let layer = if app.rect_layer.trim().is_empty() { "CUSTOM".to_string() } else { app.rect_layer.trim().to_string() };
     let (w, h) = (app.rect_w, app.rect_h);
     // Counter-clockwise, matching the winding importers produce.
-    let poly = PolygonDto {
-        points: vec![PointDto { x: 0.0, y: 0.0 }, PointDto { x: w, y: 0.0 }, PointDto { x: w, y: h }, PointDto { x: 0.0, y: h }],
-        layer: layer.clone(),
-        is_circle: None,
-        children: Vec::new(),
-        texts: Vec::new(),
-        real_boundary: None,
-    };
+    let poly = PolygonDto::new(vec![PointDto { x: 0.0, y: 0.0 }, PointDto { x: w, y: 0.0 }, PointDto { x: w, y: h }, PointDto { x: 0.0, y: h }], layer.clone(), None);
     app.push_shape(layer, poly);
     let msg = super::i18n::tv(app.prefs.lang, "import_status_ok", &[("n", "1"), ("total", &app.shapes.len().to_string())]);
     app.import_status.ok(msg);
@@ -199,16 +194,9 @@ mod tests {
     /// downstream area/placement calculation is quietly wrong.
     #[test]
     fn a_built_rectangle_has_the_requested_size() {
-        let poly = PolygonDto {
-            points: vec![PointDto { x: 0.0, y: 0.0 }, PointDto { x: 2440.0, y: 0.0 }, PointDto { x: 2440.0, y: 1220.0 }, PointDto { x: 0.0, y: 1220.0 }],
-            layer: "CUSTOM".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        };
+        let poly = PolygonDto::new(vec![PointDto { x: 0.0, y: 0.0 }, PointDto { x: 2440.0, y: 0.0 }, PointDto { x: 2440.0, y: 1220.0 }, PointDto { x: 0.0, y: 1220.0 }], "CUSTOM".into(), None);
         let b = crate::ui::state::bounds_of(&poly.points);
         assert_eq!((b.w(), b.h()), (2440.0, 1220.0));
-        assert_eq!(crate::ui::state::polygon_area(&poly.points), 2440.0 * 1220.0);
+        assert_eq!(poly.area(), 2440.0 * 1220.0);
     }
 }

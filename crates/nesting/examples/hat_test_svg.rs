@@ -99,7 +99,7 @@ fn run_job(label: &str, hat: LayeredPolygon, part_count: usize, run_seconds: u64
 
     let sheet_raw = vec![Point::new(0.0, 0.0), Point::new(SHEET_SIZE, 0.0), Point::new(SHEET_SIZE, SHEET_SIZE), Point::new(0.0, SHEET_SIZE)];
     let sheet_points = prepare_sheet(&sheet_raw, 0.0, 0.0).expect("500x500 sheet should be usable at zero margin/spacing");
-    let sheet = LayeredPolygon { points: sheet_points, layer: "SHEET".into(), is_circle: None, children: Vec::new(), texts: Vec::new(), real_boundary: None };
+    let sheet = LayeredPolygon::new(sheet_points, "SHEET".into(), None);
     let sheets = vec![sheet];
 
     let rotations = 2u32;

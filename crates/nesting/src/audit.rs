@@ -38,7 +38,7 @@
 use geometry::dxf_import::{shift_layered_polygon, LayeredPolygon};
 use geometry::polygon::{get_polygon_bounds, Bounds};
 
-use crate::placement::{bounds_within_distance, has_material_overlap, material_outside_sheet_area, PlacedObstacle};
+use crate::placement::{bounds_within_distance, has_material_overlap, material_outside_sheet_area};
 
 /// What went wrong. Ordered worst-first, and `is_fatal` is the only thing
 /// that decides pass/fail - a warning is information, not a veto.
@@ -98,10 +98,6 @@ impl AuditPart {
     #[must_use]
     pub fn placed(id: usize, outline: &LayeredPolygon, padded: &LayeredPolygon, x: f64, y: f64) -> Self {
         Self { id, outline: shift_layered_polygon(outline, x, y), padded: shift_layered_polygon(padded, x, y) }
-    }
-
-    fn from_obstacle(o: &PlacedObstacle, padded: &LayeredPolygon) -> Self {
-        Self::placed(o.id, &o.polygon, padded, o.placement.x, o.placement.y)
     }
 }
 
@@ -252,27 +248,13 @@ fn padding_extent(part: &AuditPart) -> f64 {
     }
 }
 
-/// Convenience for callers that already hold `PlacedObstacle`s (the engine's
-/// own representation) plus a padded outline per part.
-#[must_use]
-pub fn parts_from_obstacles(obstacles: &[PlacedObstacle], padded_of: impl Fn(usize) -> Option<LayeredPolygon>) -> Vec<AuditPart> {
-    obstacles.iter().filter_map(|o| padded_of(o.id).map(|padded| AuditPart::from_obstacle(o, &padded))).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use geometry::point::Point;
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> LayeredPolygon {
-        LayeredPolygon {
-            points: vec![Point::new(x, y), Point::new(x + w, y), Point::new(x + w, y + h), Point::new(x, y + h)],
-            layer: "cut".into(),
-            children: Vec::new(),
-            texts: Vec::new(),
-            is_circle: None,
-            real_boundary: None,
-        }
+        LayeredPolygon::new(vec![Point::new(x, y), Point::new(x + w, y), Point::new(x + w, y + h), Point::new(x, y + h)], "cut".into(), None)
     }
 
     /// A part plus its padding, both anchored at the origin and placed at

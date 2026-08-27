@@ -61,7 +61,7 @@ struct Expected {
     utilisation: f64,
 }
 
-const BASELINE: Expected = Expected { generations: 3, part_count: 252, sheets: 1, unplaced: 0, utilisation: 78.565_824_631_324_11 };
+const BASELINE: Expected = Expected { generations: 3, part_count: 252, sheets: 1, unplaced: 0, utilisation: 78.565_824_631_324_1 };
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -92,14 +92,7 @@ fn main() {
     }
 
     let sheet_raw = vec![Point::new(0.0, 0.0), Point::new(SHEET_SIZE, 0.0), Point::new(SHEET_SIZE, SHEET_SIZE), Point::new(0.0, SHEET_SIZE)];
-    let sheets = vec![LayeredPolygon {
-        points: prepare_sheet(&sheet_raw, 0.0, 0.0).expect("500x500 sheet should be usable at zero margin/spacing"),
-        layer: "SHEET".into(),
-        is_circle: None,
-        children: Vec::new(),
-        texts: Vec::new(),
-        real_boundary: None,
-    }];
+    let sheets = vec![LayeredPolygon::new(prepare_sheet(&sheet_raw, 0.0, 0.0).expect("500x500 sheet should be usable at zero margin/spacing"), "SHEET".into(), None)];
 
     let placement_config = PlacementConfig {
         placement_type: PlacementType::TightFit,

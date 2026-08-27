@@ -138,14 +138,7 @@ fn inner_nfp_general_fallback_works_against_real_drilled_profiles() {
     let drilled: Vec<_> = tree.iter().filter(|p| p.children.len() >= 2).collect();
     assert!(!drilled.is_empty(), "expected at least one profile with multiple drill holes");
 
-    let probe = geometry::dxf_import::LayeredPolygon {
-        points: vec![Point::new(0.0, 0.0), Point::new(0.5, 0.0), Point::new(0.5, 0.5), Point::new(0.0, 0.5)],
-        layer: "0".into(),
-        is_circle: None,
-        children: Vec::new(),
-        texts: Vec::new(),
-        real_boundary: None,
-    };
+    let probe = geometry::dxf_import::LayeredPolygon::new(vec![Point::new(0.0, 0.0), Point::new(0.5, 0.0), Point::new(0.5, 0.5), Point::new(0.0, 0.5)], "0".into(), None);
 
     let mut checked = 0;
     for profile in drilled.iter().take(10) {

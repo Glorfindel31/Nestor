@@ -237,14 +237,7 @@ mod tests {
     use geometry::point::Point;
 
     fn square(size: f64) -> LayeredPolygon {
-        LayeredPolygon {
-            points: vec![Point::new(0.0, 0.0), Point::new(size, 0.0), Point::new(size, size), Point::new(0.0, size)],
-            layer: "0".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        }
+        LayeredPolygon::new(vec![Point::new(0.0, 0.0), Point::new(size, 0.0), Point::new(size, size), Point::new(0.0, size)], "0".into(), None)
     }
 
     fn ga_config() -> GaConfig {
@@ -376,14 +369,7 @@ mod tests {
     }
 
     fn rect(w: f64, h: f64) -> LayeredPolygon {
-        LayeredPolygon {
-            points: vec![Point::new(0.0, 0.0), Point::new(w, 0.0), Point::new(w, h), Point::new(0.0, h)],
-            layer: "0".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        }
+        LayeredPolygon::new(vec![Point::new(0.0, 0.0), Point::new(w, 0.0), Point::new(w, h), Point::new(0.0, h)], "0".into(), None)
     }
 
     #[test]

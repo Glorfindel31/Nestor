@@ -18,16 +18,6 @@ pub fn almost_equal(a: f64, b: f64, tolerance: Option<f64>) -> bool {
     (a - b).abs() < tol
 }
 
-pub fn almost_equal_points(a: Point, b: Point, tolerance: Option<f64>) -> bool {
-    let tol = match tolerance {
-        Some(t) if t != 0.0 => t,
-        _ => TOL,
-    };
-    let dx = a.x - b.x;
-    let dy = a.y - b.y;
-    dx * dx + dy * dy < tol * tol
-}
-
 /// Port of `_withinDistance`.
 pub fn within_distance(p1: Point, p2: Point, distance: f64) -> bool {
     let dx = p1.x - p2.x;
@@ -249,6 +239,9 @@ pub fn point_in_polygon(
 /// Port of `polygonArea`. A negative area indicates counter-clockwise winding.
 #[must_use]
 pub fn polygon_area(polygon: &[Point]) -> f64 {
+    if polygon.is_empty() {
+        return 0.0;
+    }
     let mut area = 0.0;
     let mut j = polygon.len() - 1;
     for i in 0..polygon.len() {
@@ -285,6 +278,15 @@ mod tests {
             Point::new(0.0, 10.0),
         ];
         assert!((polygon_area(&square).abs() - 100.0).abs() < 1e-6);
+    }
+
+    /// The `len() - 1` seed underflows on an empty slice. Clipper boolean
+    /// ops can hand back a degenerate path, and every caller here reaches
+    /// for `.abs()` on the result rather than checking the input first.
+    #[test]
+    fn an_empty_polygon_has_zero_area_rather_than_panicking() {
+        assert_eq!(polygon_area(&[]), 0.0);
+        assert_eq!(polygon_area(&[Point::new(1.0, 2.0)]), 0.0);
     }
 
     #[test]

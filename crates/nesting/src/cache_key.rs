@@ -50,11 +50,16 @@ impl SourceId {
 
 /// Port of `NfpCache.makeKey` / `nfpCacheKey`: the single NFP cache-key both
 /// call sites share. `a`/`b` are the part/sheet source identifiers
-/// (`A.source`/`B.source` in the original); `a_flipped`/`b_flipped` default
-/// to `false` in every call site found in the Electron repo (the fields
-/// exist in the key format but nothing ever actually sets them true - no
-/// mirrored-part feature exists yet) but are kept as real parameters rather
-/// than dropped, since they are part of the key's identity.
+/// (`A.source`/`B.source` in the original); `a_flipped`/`b_flipped` are
+/// always `false` here, and deliberately so. This app *does* have mirroring,
+/// but a mirrored copy is registered as its own shape identity
+/// (`dispatch::MIRROR_ID_BIT`, grouped by real geometry in
+/// `commands::prepare_nest_inputs`), so it already gets its own cache
+/// entries through `a`/`b` - which it must have, since the mirror of a shape
+/// has a different NFP against everything. Do not "wire up" these flags to
+/// fix mirroring; it is not broken, and doing so would split every entry in
+/// two. They are kept as real parameters rather than dropped because they
+/// are part of the key format's identity.
 ///
 /// **A `Copy` struct, not the original's `format!`ed `String`.** The string
 /// form was faithful to the original and cost three heap allocations per

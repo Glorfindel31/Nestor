@@ -13,7 +13,7 @@
 //! 10000000)`, chosen there specifically "to ensure integer precision...
 //! while avoiding overflow"). `DeepnestScale` matches that choice exactly.
 
-use clipper2::{difference, inflate, intersect, union, xor, ClipperError, EndType, FillRule, JoinType, Paths};
+use clipper2::{difference, inflate, intersect, union, ClipperError, EndType, FillRule, JoinType, Paths};
 
 use crate::point::Point;
 use crate::polygon::polygon_area;
@@ -199,12 +199,6 @@ pub fn difference_polygons(
     let s: ClipperPaths = to_raw_paths(subject).into();
     let c: ClipperPaths = to_raw_paths(clip).into();
     Ok(from_paths(difference(s, c, fill_rule)?))
-}
-
-pub fn xor_polygons(subject: &[Vec<Point>], clip: &[Vec<Point>], fill_rule: FillRule) -> Result<Vec<Vec<Point>>, ClipperError> {
-    let s: ClipperPaths = to_raw_paths(subject).into();
-    let c: ClipperPaths = to_raw_paths(clip).into();
-    Ok(from_paths(xor(s, c, fill_rule)?))
 }
 
 /// Port of `background.js`'s outer/collision-NFP worker computation

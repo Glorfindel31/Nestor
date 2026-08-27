@@ -132,7 +132,7 @@ pub fn sheet_remnants(sheet: &[Point], placed: &[PlacedOutline], spacing: f64) -
     let mut out: Vec<Remnant> = rings
         .iter()
         .enumerate()
-        .filter(|(i, _)| depth[*i] % 2 == 0)
+        .filter(|(i, _)| depth[*i].is_multiple_of(2))
         .filter_map(|(i, ring)| {
             let holes: Vec<Vec<Point>> = rings
                 .iter()

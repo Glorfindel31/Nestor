@@ -45,7 +45,7 @@ impl ShapeRow {
     /// remembering both; this makes forgetting one a compile error instead of
     /// a silently half-initialised row.
     pub fn new(ui_id: usize, file: String, poly: PolygonDto) -> Self {
-        let area = polygon_area(&poly.points);
+        let area = poly.area();
         Self {
             ui_id,
             file,
@@ -176,22 +176,6 @@ impl MirrorRule {
     }
 }
 
-/// Shoelace area of a closed polygon, unsigned. The DOMINANT indicator and
-/// the per-sheet utilisation readout both need it, and both only ever
-/// compare magnitudes.
-pub fn polygon_area(points: &[crate::dto::PointDto]) -> f64 {
-    let n = points.len();
-    if n < 3 {
-        return 0.0;
-    }
-    let mut sum = 0.0;
-    for i in 0..n {
-        let j = (i + 1) % n;
-        sum += points[i].x * points[j].y - points[j].x * points[i].y;
-    }
-    (sum / 2.0).abs()
-}
-
 /// Axis-aligned bounds of a point list. Explicitly a loop rather than
 /// `iter().fold` over four separate min/max passes - this runs per row, per
 /// frame, over a real CAD file's dense arc tessellation.
@@ -265,7 +249,7 @@ impl Default for ConfigForm {
         // configs behaving unchanged and must not move.
         //
         // **Measured, not inherited.** These used to mirror the old web UI's
-        // `index.html` field defaults (`runs: 6, rotations: 2,
+        // The deleted Electron frontend's field defaults (`runs: 6, rotations: 2,
         // population_size: 6, generations: 5, curve_tolerance: 0.1`), and that
         // combination is unusable on a real job. `runs` escalates every
         // attempt by +1 rotation, +4 population and +5 generations, so six
@@ -476,6 +460,10 @@ mod tests {
     use super::*;
     use crate::dto::PointDto;
 
+    fn poly(points: Vec<PointDto>) -> PolygonDto {
+        PolygonDto { points, layer: "0".into(), is_circle: None, children: Vec::new(), texts: Vec::new(), real_boundary: None }
+    }
+
     fn rect(w: f64, h: f64) -> Vec<PointDto> {
         vec![PointDto { x: 0.0, y: 0.0 }, PointDto { x: w, y: 0.0 }, PointDto { x: w, y: h }, PointDto { x: 0.0, y: h }]
     }
@@ -483,22 +471,22 @@ mod tests {
     #[test]
     fn area_and_bounds_agree_with_a_known_rectangle() {
         let r = rect(3.0, 4.0);
-        assert_eq!(polygon_area(&r), 12.0);
+        assert_eq!(poly(r.clone()).area(), 12.0);
         let b = bounds_of(&r);
         assert_eq!((b.w(), b.h()), (3.0, 4.0));
         // Winding must not change the magnitude - imported DXF and SVG
         // profiles do not agree on direction.
         let mut reversed = r.clone();
         reversed.reverse();
-        assert_eq!(polygon_area(&reversed), 12.0);
+        assert_eq!(poly(reversed).area(), 12.0);
     }
 
     #[test]
     fn degenerate_point_lists_do_not_produce_infinities() {
         let b = bounds_of(&[]);
         assert_eq!((b.minx, b.miny, b.w(), b.h()), (0.0, 0.0, 0.0, 0.0));
-        assert_eq!(polygon_area(&[]), 0.0);
-        assert_eq!(polygon_area(&rect(1.0, 1.0)[..2]), 0.0);
+        assert_eq!(poly(Vec::new()).area(), 0.0);
+        assert_eq!(poly(rect(1.0, 1.0)[..2].to_vec()).area(), 0.0);
     }
 
     #[test]

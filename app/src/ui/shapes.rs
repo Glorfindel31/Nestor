@@ -157,7 +157,7 @@ fn find_row(app: &mut App, ui: &mut egui::Ui) {
         ui.add_enabled_ui(!locked, |ui| {
             ui.label(RichText::new(super::i18n::t(lang, "sort_label")).color(theme::DIM()).small());
             if ui.button(super::i18n::t(lang, "sort_name")).on_hover_text(super::i18n::t(lang, "sort_tooltip")).clicked() {
-                app.shapes.sort_by(|a, b| a.file.to_lowercase().cmp(&b.file.to_lowercase()));
+                app.shapes.sort_by_key(|a| a.file.to_lowercase());
             }
             if ui.button(super::i18n::t(lang, "sort_size")).on_hover_text(super::i18n::t(lang, "sort_tooltip")).clicked() {
                 // Biggest first: the parts that decide whether a job fits are

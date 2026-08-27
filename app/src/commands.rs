@@ -1,18 +1,17 @@
-//! Tauri command layer - a redesign, not a port, of the original Electron
-//! app's IPC surface. The original dispatches one `background-start` IPC
-//! message per GA individual to a pool of separate worker `BrowserWindow`
-//! processes, collecting `background-response` messages back asynchronously;
-//! this collapses to a single command per nest run, since `nesting::dispatch`
-//! already parallelizes a generation in-process via rayon - there's no
-//! separate worker process to message. Deliberately not wired to the legacy
-//! `frontend/deepnest.js`/`ui/**` Ractive UI (kept in the tree as reference
-//! only, unreferenced) - that code assumes a Node-integrated Electron
-//! renderer (`require("electron")`/`ipcRenderer`, etc.) that doesn't exist in
-//! Tauri's webview.
+//! The engine's entry points - a redesign, not a port, of the original
+//! Electron app's IPC surface. The original dispatches one `background-start`
+//! IPC message per GA individual to a pool of separate worker
+//! `BrowserWindow` processes, collecting `background-response` messages back
+//! asynchronously; this collapses to a single call per nest run, since
+//! `nesting::dispatch` already parallelizes a generation in-process via rayon
+//! - there is no separate worker process to message.
 //!
-//! Every command is a thin wrapper around a plain function (`import_dxf`/
-//! `run_nest` below) that takes no Tauri types and returns a plain
-//! `Result` - testable directly, without spinning up a Tauri runtime.
+//! Every entry point here is a plain function taking and returning `dto`
+//! types and a plain `Result`, with no UI dependency of any kind. That is
+//! what let the egui rewrite land without touching the engine, what the
+//! headless `nest` binary reuses, and what makes this module's own test
+//! suite the regression net for the whole pipeline. The UI reaches these
+//! only through `worker.rs` - see its module doc for why.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -587,6 +586,27 @@ struct PreparedNestInputs {
     part_rules: nesting::placement::PartRules,
 }
 
+/// How many threads a `max_threads` setting should actually get.
+///
+/// `0` means uncapped. Anything above the machine's own thread count is
+/// clamped down to it, because asking for more is never faster and is
+/// measurably slower: on a 6-core/12-thread box, the 800-part benchmark runs
+/// 22.8s at 8 threads, 24.0s uncapped, 25.5s at 100 and **33.5s at 256** -
+/// identical nests every time, just more context switching, and past the core
+/// count a thread can be preempted while holding one of the shared NFP/unit/
+/// band-plan cache locks and stall every other thread behind it.
+///
+/// Clamped rather than rejected so an existing saved `config.json` asking for
+/// 100 keeps working - it just behaves as "all of them", which is what it
+/// meant. `validate_nest_config`'s `<= 256` check stays where it is for the same
+/// reason.
+fn effective_threads(max_threads: usize) -> usize {
+    if max_threads == 0 {
+        return 0;
+    }
+    max_threads.min(std::thread::available_parallelism().map_or(usize::MAX, std::num::NonZeroUsize::get))
+}
+
 /// Checks shared by every entry point that builds a `GaConfig`/
 /// `PlacementConfig` from a `NestConfigDto` and feeds padded geometry to
 /// `geometry::clearance` - both the main escalating run
@@ -604,28 +624,6 @@ struct PreparedNestInputs {
 /// limits) - just enough to stop a fat-fingered config from pinning a CPU
 /// core on an effectively-unkillable job before the user notices there's a
 /// Stop button to press.
-
-/// How many threads a `max_threads` setting should actually get.
-///
-/// `0` means uncapped. Anything above the machine's own thread count is
-/// clamped down to it, because asking for more is never faster and is
-/// measurably slower: on a 6-core/12-thread box, the 800-part benchmark runs
-/// 22.8s at 8 threads, 24.0s uncapped, 25.5s at 100 and **33.5s at 256** -
-/// identical nests every time, just more context switching, and past the core
-/// count a thread can be preempted while holding one of the shared NFP/unit/
-/// band-plan cache locks and stall every other thread behind it.
-///
-/// Clamped rather than rejected so an existing saved `config.json` asking for
-/// 100 keeps working - it just behaves as "all of them", which is what it
-/// meant. The `<= 256` validation above stays where it is for the same
-/// reason.
-fn effective_threads(max_threads: usize) -> usize {
-    if max_threads == 0 {
-        return 0;
-    }
-    max_threads.min(std::thread::available_parallelism().map_or(usize::MAX, std::num::NonZeroUsize::get))
-}
-
 fn validate_nest_config(config: &NestConfigDto) -> Result<(), String> {
     if config.rotations == 0 || config.rotations > 360 {
         return Err("rotations must be between 1 and 360".into());
@@ -648,8 +646,9 @@ fn validate_nest_config(config: &NestConfigDto) -> Result<(), String> {
     if config.kerf < 0.0 {
         return Err("kerf must be >= 0".into());
     }
-    // Bounds match what `index.html`'s own inputs already constrain
-    // client-side (`min`/`max` on `cfg-mutation`/`import-tolerance`/`cfg-dominant`).
+    // Bounds match what the deleted Electron frontend's `index.html` inputs
+    // already constrained client-side (`min`/`max` on `cfg-mutation`/
+    // `import-tolerance`/`cfg-dominant`).
     if !(0.0..=100.0).contains(&config.mutation_rate) {
         return Err("mutation_rate must be between 0 and 100".into());
     }
@@ -699,13 +698,22 @@ pub fn validate_placement(request: ValidatePlacementRequest) -> Result<ValidateP
 
     // Everything else on the sheet, at its own current position - the part
     // being dragged is not an obstacle to itself.
+    //
+    // An id with no geometry is an error, not a part to skip. This used to
+    // `filter_map` the miss away, which made the check fail *open*: a part
+    // the caller forgot to send stopped being an obstacle, so a drop right on
+    // top of it came back `valid: true`. A validator that answers "yes"
+    // because it could not see the thing it was meant to check is worse than
+    // one that refuses - and `moved_id` right above already errors on exactly
+    // this, so the two halves of the same lookup disagreed.
     let others: Vec<nesting::placement::PlacedObstacle> = request
         .placement
         .parts
         .iter()
         .filter(|p| p.id != request.moved_id)
-        .filter_map(|p| {
-            parts_by_id.get(&p.id).map(|geometry| nesting::placement::PlacedObstacle {
+        .map(|p| {
+            let geometry = parts_by_id.get(&p.id).ok_or_else(|| format!("unknown part id {} on the sheet", p.id))?;
+            Ok(nesting::placement::PlacedObstacle {
                 polygon: rotate_layered_polygon(geometry, p.rotation),
                 id: p.id,
                 source_id: p.id,
@@ -713,7 +721,7 @@ pub fn validate_placement(request: ValidatePlacementRequest) -> Result<ValidateP
                 placement: nesting::placement::Placement { x: p.x, y: p.y },
             })
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
 
     let valid = nesting::placement::placement_is_valid(&sheet, &moved, nesting::placement::Placement { x: request.x, y: request.y }, &others);
     Ok(ValidatePlacementResponse { valid })
@@ -773,16 +781,22 @@ pub fn compute_remnants(request: crate::dto::RemnantRequest) -> Result<Vec<crate
         // drilled hole belongs to a piece someone is going to pick up, and
         // treating it as reclaimable would produce offcuts that physically
         // fall out of the sheet.
+        //
+        // An id with no geometry is an error, not a part to skip. A part that
+        // is invisible here is a part `sheet_remnants` never subtracts, so the
+        // offcut it reports covers material that is actually an already-cut
+        // piece - the exact hazard the `remnant.holes` comment below exists to
+        // prevent, reached by a different route. Failing loudly costs the user
+        // an offcut suggestion; failing quietly costs them a sheet.
         let placed: Vec<Vec<geometry::point::Point>> = placement
             .parts
             .iter()
-            .filter_map(|p| {
-                parts.get(&p.id).map(|poly| {
-                    let rotated = rotate_layered_polygon(poly, p.rotation);
-                    rotated.points.iter().map(|pt| geometry::point::Point::new(pt.x + p.x, pt.y + p.y)).collect()
-                })
+            .map(|p| {
+                let poly = parts.get(&p.id).ok_or_else(|| format!("unknown part id {} on sheet {}", p.id, placement.sheet_index))?;
+                let rotated = rotate_layered_polygon(poly, p.rotation);
+                Ok(rotated.points.iter().map(|pt| geometry::point::Point::new(pt.x + p.x, pt.y + p.y)).collect())
             })
-            .collect();
+            .collect::<Result<_, String>>()?;
 
         for remnant in geometry::remnant::sheet_remnants(&sheet.points, &placed, spacing) {
             let polygon = LayeredPolygon {
@@ -796,7 +810,7 @@ pub fn compute_remnants(request: crate::dto::RemnantRequest) -> Result<Vec<crate
                 children: remnant
                     .holes
                     .into_iter()
-                    .map(|h| LayeredPolygon { points: h, layer: sheet.layer.clone(), is_circle: None, children: Vec::new(), texts: Vec::new(), real_boundary: None })
+                    .map(|h| LayeredPolygon::new(h, sheet.layer.clone(), None))
                     .collect(),
                 texts: Vec::new(),
                 real_boundary: None,
@@ -1158,7 +1172,8 @@ pub fn run_nest_with_progress(
     //
     // `ROTATION_STAGNATION_LIMIT` no longer matches the original's constant
     // (was 10): a real benchmark session (24-combination grid sweep against
-    // the `FLAT.dxf`/`FLAT-struck.dxf` fixtures, see `docs/PORT_STATUS.md`)
+    // the since-removed `FLAT.dxf`/`FLAT-struck.dxf` fixtures, see
+    // `docs/PORT_STATUS.md`)
     // found `rotations=8` and up is a *strict downgrade* vs `rotations=4`
     // for this job's mostly-rectangular parts (102-103 sheets vs 100-101,
     // every combination tried) - consistent with the already-documented
@@ -1495,19 +1510,7 @@ mod tests {
     use crate::dto::{NestConfigDto, PartDto, PlacementTypeDto, PointDto, ReportPartDto, TextDto};
 
     fn square_dto(size: f64) -> PolygonDto {
-        PolygonDto {
-            points: vec![
-                PointDto { x: 0.0, y: 0.0 },
-                PointDto { x: size, y: 0.0 },
-                PointDto { x: size, y: size },
-                PointDto { x: 0.0, y: size },
-            ],
-            layer: "0".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        }
+        PolygonDto::new(vec![ PointDto { x: 0.0, y: 0.0 }, PointDto { x: size, y: 0.0 }, PointDto { x: size, y: size }, PointDto { x: 0.0, y: size }, ], "0".into(), None)
     }
 
     /// Every test part is unconstrained unless it says otherwise - see
@@ -1517,19 +1520,7 @@ mod tests {
     }
 
     fn rect_dto(w: f64, h: f64) -> PolygonDto {
-        PolygonDto {
-            points: vec![
-                PointDto { x: 0.0, y: 0.0 },
-                PointDto { x: w, y: 0.0 },
-                PointDto { x: w, y: h },
-                PointDto { x: 0.0, y: h },
-            ],
-            layer: "0".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        }
+        PolygonDto::new(vec![ PointDto { x: 0.0, y: 0.0 }, PointDto { x: w, y: 0.0 }, PointDto { x: w, y: h }, PointDto { x: 0.0, y: h }, ], "0".into(), None)
     }
 
     fn config(generations: usize) -> NestConfigDto {
@@ -2222,7 +2213,6 @@ mod tests {
     }
 
     /// The live stream must be **one** nest being built, not every individual
-
     /// in the population interleaved.
     ///
     /// `run_generation` places the whole population in parallel on rayon
@@ -2913,24 +2903,10 @@ mod tests {
     /// 4x`nestTest04` + 8x`nestTest03` at 80.1%.
     #[test]
     fn the_seed_order_puts_the_bigger_box_first_even_when_it_holds_less_material() {
-        let square = |w: f64, h: f64| PolygonDto {
-            points: vec![PointDto { x: 0.0, y: 0.0 }, PointDto { x: w, y: 0.0 }, PointDto { x: w, y: h }, PointDto { x: 0.0, y: h }],
-            layer: "CUT".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        };
+        let square = |w: f64, h: f64| PolygonDto::new(vec![PointDto { x: 0.0, y: 0.0 }, PointDto { x: w, y: 0.0 }, PointDto { x: w, y: h }, PointDto { x: 0.0, y: h }], "CUT".into(), None);
         // A 280x150 box holding 32,202mm2, as a triangle - less material than
         // the 120x300 below, more sheet.
-        let bitten = PolygonDto {
-            points: vec![PointDto { x: 0.0, y: 0.0 }, PointDto { x: 280.0, y: 0.0 }, PointDto { x: 280.0, y: 150.0 }, PointDto { x: 0.0, y: 150.0 }, PointDto { x: 90.0, y: 75.0 }],
-            layer: "CUT".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        };
+        let bitten = PolygonDto::new(vec![PointDto { x: 0.0, y: 0.0 }, PointDto { x: 280.0, y: 0.0 }, PointDto { x: 280.0, y: 150.0 }, PointDto { x: 0.0, y: 150.0 }, PointDto { x: 90.0, y: 75.0 }], "CUT".into(), None);
         let plain = square(120.0, 300.0);
         assert!(
             geometry::polygon::polygon_area(&bitten.points.iter().map(|p| geometry::point::Point::new(p.x, p.y)).collect::<Vec<_>>()).abs()
@@ -2976,17 +2952,7 @@ mod tests {
     /// `geometry::dxf_import`'s own `mirroring_preserves_arcs_and_winding`.)
     #[test]
     fn mirror_variants_are_reachable_without_duplicating_parts() {
-        let l_shape = PolygonDto {
-            points: [(0.0, 0.0), (30.0, 0.0), (30.0, 10.0), (10.0, 10.0), (10.0, 25.0), (0.0, 25.0)]
-                .iter()
-                .map(|&(x, y)| PointDto { x, y })
-                .collect(),
-            layer: "0".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        };
+        let l_shape = PolygonDto::new([(0.0, 0.0), (30.0, 0.0), (30.0, 10.0), (10.0, 10.0), (10.0, 25.0), (0.0, 25.0)] .iter() .map(|&(x, y)| PointDto { x, y }) .collect(), "0".into(), None);
         let build = |mirror: bool| {
             let mut cfg = config(6);
             cfg.rotations = 2;
@@ -3029,17 +2995,7 @@ mod tests {
     fn a_parts_own_mirror_setting_overrides_the_job_wide_switch() {
         use nesting::dispatch::MIRROR_ID_BIT;
 
-        let l_shape = |scale: f64| PolygonDto {
-            points: [(0.0, 0.0), (30.0, 0.0), (30.0, 10.0), (10.0, 10.0), (10.0, 25.0), (0.0, 25.0)]
-                .iter()
-                .map(|&(x, y)| PointDto { x: x * scale, y: y * scale })
-                .collect(),
-            layer: "0".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        };
+        let l_shape = |scale: f64| PolygonDto::new([(0.0, 0.0), (30.0, 0.0), (30.0, 10.0), (10.0, 10.0), (10.0, 25.0), (0.0, 25.0)] .iter() .map(|&(x, y)| PointDto { x: x * scale, y: y * scale }) .collect(), "0".into(), None);
 
         // Job-wide mirroring ON, but part 0 opts out.
         let mut cfg = config(6);
@@ -3143,6 +3099,42 @@ mod tests {
         assert!(expand_parts(parts, false).part_rules.is_empty(), "an empty allow-list means unconstrained, not unplaceable");
     }
 
+    // --- offcuts ---------------------------------------------------------
+
+    fn remnant_request() -> crate::dto::RemnantRequest {
+        // One 100x100 sheet with a single 20x20 part cut out of its corner.
+        crate::dto::RemnantRequest {
+            sheets: vec![square_dto(100.0)],
+            placements: vec![SheetPlacementDto {
+                sheet_index: 0,
+                parts: vec![PlacedPartDto { id: 0, x: 0.0, y: 0.0, rotation: 0.0, locked: false }],
+            }],
+            parts_by_id: HashMap::from([(0, square_dto(20.0))]),
+            config: config(1),
+        }
+    }
+
+    #[test]
+    fn an_offcut_excludes_the_part_that_was_cut_from_it() {
+        let remnants = compute_remnants(remnant_request()).expect("should compute");
+        assert!(!remnants.is_empty(), "a 100x100 sheet holding one 20x20 part has reusable offcut");
+        let total: f64 = remnants.iter().map(|r| r.area).sum();
+        assert!(total <= 100.0 * 100.0 - 20.0 * 20.0 + 1e-6, "offcut area {total} counts the cut part as reclaimable");
+        // Biggest first, as the doc promises.
+        assert!(remnants.windows(2).all(|w| w[0].area >= w[1].area));
+    }
+
+    /// A part with no geometry is never subtracted, so the offcut would cover
+    /// material that is actually an already-cut piece and the next job would
+    /// nest straight on top of it. That must be an error, not a silent skip.
+    #[test]
+    fn an_unresolvable_part_fails_instead_of_inflating_the_offcut() {
+        let mut request = remnant_request();
+        request.parts_by_id.remove(&0);
+        let err = compute_remnants(request).expect_err("must not report an offcut over an unsubtracted part");
+        assert!(err.contains("unknown part id 0"), "got {err}");
+    }
+
     // --- drag / lock / re-nest ------------------------------------------
 
     fn validate_request(spacing: f64, x: f64, y: f64) -> ValidatePlacementRequest {
@@ -3164,6 +3156,21 @@ mod tests {
             rotation: 0.0,
             config: cfg,
         }
+    }
+
+    /// The check must fail *closed*. Dropping part 1 straight onto part 0 is
+    /// an overlap; if part 0's geometry is missing from `parts_by_id` the
+    /// answer must be an error, never `valid: true` - a validator that says
+    /// yes because it could not see the obstacle is worse than one that
+    /// refuses.
+    #[test]
+    fn an_obstacle_with_no_geometry_is_an_error_not_an_absent_obstacle() {
+        let mut request = validate_request(0.0, 0.0, 0.0);
+        assert!(!validate_placement(request.clone()).unwrap().valid, "the drop overlaps part 0 while part 0 is visible");
+
+        request.parts_by_id.remove(&0);
+        let err = validate_placement(request).expect_err("a missing obstacle must not validate as a clear drop");
+        assert!(err.contains("unknown part id 0"), "got {err}");
     }
 
     #[test]

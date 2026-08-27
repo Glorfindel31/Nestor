@@ -971,14 +971,7 @@ mod tests {
     use crate::dxf_import::LayeredPolygon;
 
     fn square(size: f64) -> LayeredPolygon {
-        LayeredPolygon {
-            points: vec![Point::new(0.0, 0.0), Point::new(size, 0.0), Point::new(size, size), Point::new(0.0, size)],
-            layer: "CUT".into(),
-            is_circle: None,
-            children: Vec::new(),
-            texts: Vec::new(),
-            real_boundary: None,
-        }
+        LayeredPolygon::new(vec![Point::new(0.0, 0.0), Point::new(size, 0.0), Point::new(size, size), Point::new(0.0, size)], "CUT".into(), None)
     }
 
     fn layout(parts: usize) -> SheetLayout {
@@ -1044,7 +1037,7 @@ mod tests {
         let text = String::from_utf8(export_report(&[layout(3), layout(2)], &meta())).expect("ASCII only");
         let pages = text.matches("/Type /Page ").count();
         assert_eq!(text.matches("(/) Tj").count(), pages, "one page-number separator per page");
-        assert_eq!(text.matches(&format!("({pages}) Tj")).count() >= pages, true, "each page prints the total");
+        assert!(text.matches(&format!("({pages}) Tj")).count() >= pages, "each page prints the total");
     }
 
     #[test]
