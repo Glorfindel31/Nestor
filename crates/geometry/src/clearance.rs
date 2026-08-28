@@ -53,6 +53,7 @@
 //! purely an internal detail of how placement decisions get made.
 
 use crate::clipper::offset_round;
+use crate::simplify::simplify;
 use crate::point::Point;
 use crate::polygon::{get_polygon_bounds, is_rectangle, polygon_area};
 
@@ -171,7 +172,65 @@ pub fn prepare_sheet(sheet: &[Point], margin: f64, spacing: f64) -> Option<Vec<P
 /// exact rectangular part skips Clipper2 entirely - see
 /// `offset_rectangle_exact`.
 pub fn prepare_part(part_outer: &[Point], spacing: f64) -> Option<Vec<Point>> {
-    offset_clearance(part_outer, spacing / 2.0)
+    let exact = offset_clearance(part_outer, spacing / 2.0)?;
+    // **Capped by the buffer itself, so zero spacing stays a true no-op** - at
+    // `spacing == 0` a part must come back exactly as it went in.
+    let slack = simplification_slack(part_outer).min(spacing / 2.0);
+    if slack <= 0.0 || exact.len() < SIMPLIFY_ABOVE {
+        return Some(exact);
+    }
+    // Douglas-Peucker moves a vertex by at most its tolerance, so simplifying
+    // by exactly the slack we over-offset by lands somewhere between the true
+    // buffer and the over-grown one - never inside the true buffer. Outward is
+    // the safe direction: a part that thinks it is slightly bigger than it is
+    // can only refuse a placement, never allow an overlap.
+    let Some(padded) = offset_clearance(part_outer, spacing / 2.0 + slack) else { return Some(exact) };
+    let simplified = simplify(&padded, Some(slack), true);
+    // If it did not actually shed vertices, the exact buffer is strictly
+    // better - same cost, no over-growth.
+    if simplified.len() >= exact.len() {
+        return Some(exact);
+    }
+    Some(simplified)
+}
+
+/// Padded outlines with fewer vertices than this are returned exactly, never
+/// over-grown and simplified.
+///
+/// **This is what keeps `prepare_sheet` and `prepare_part` complementary for
+/// the shapes where that is load-bearing.** A part exactly the size of its
+/// sheet has to still fit at margin 0, which requires the part's padding and
+/// the sheet's inset to cancel exactly - and any over-growth breaks that. In
+/// practice that case is a rectangle, which `offset_rectangle_exact` pads to
+/// four points, so anything at or below a simple polygon's vertex count opts
+/// out and keeps the old behaviour bit for bit. It also opts out precisely
+/// where simplification had nothing to offer: the win is superlinear in
+/// vertex count, and there is none to be had at sixteen.
+const SIMPLIFY_ABOVE: usize = 32;
+
+/// How much a padded outline is allowed to be over-grown and then simplified
+/// back down.
+///
+/// **This is the single biggest lever on NFP cost in the engine.** The NFP is
+/// a Minkowski sum whose cost is superlinear in the vertex count, and
+/// `offset_round`'s round join is generous with vertices on anything curved:
+/// `curvy.dxf`'s 303-point outline pads to 559 points, and its self-NFP takes
+/// 114 seconds. Over-offsetting by a tenth of a millimetre and simplifying
+/// back leaves 177 points and takes 1.5 seconds - the same shape to within a
+/// rounding error nobody cutting metal can hold, 75 times faster.
+///
+/// A tenth of a millimetre is chosen against real spacings, which are
+/// millimetres, but it would be a fifth of a half-millimetre part - so it is
+/// also capped at half a percent of the part's own shorter side. Parts that
+/// small are dominated by their own kerf anyway.
+fn simplification_slack(part_outer: &[Point]) -> f64 {
+    /// The most a padded outline is allowed to drift from its true offset.
+    const MAX_SLACK: f64 = 0.1;
+    /// ...and the least, so a degenerate bounding box cannot drive it to zero
+    /// and reinstate the full vertex count.
+    const MIN_SLACK: f64 = 0.01;
+    let Some(bounds) = get_polygon_bounds(part_outer) else { return MIN_SLACK };
+    (bounds.width.min(bounds.height) * 0.005).clamp(MIN_SLACK, MAX_SLACK)
 }
 
 #[cfg(test)]
@@ -181,6 +240,61 @@ mod tests {
 
     fn square(x: f64, y: f64, size: f64) -> Vec<Point> {
         vec![Point::new(x, y), Point::new(x + size, y), Point::new(x + size, y + size), Point::new(x, y + size)]
+    }
+
+    /// **The invariant the whole simplification rests on, and the one thing
+    /// the audit cannot check.** `prepare_part` over-offsets by `slack` and
+    /// then simplifies by `slack`, which is only safe if the result still
+    /// contains the true `spacing / 2` buffer everywhere. If it ever came in
+    /// under that, two parts could be placed closer than the spacing asks -
+    /// and `audit` would not notice, because it pads through this very same
+    /// function and would agree with the mistake.
+    ///
+    /// So this compares against a buffer built independently, straight from
+    /// `offset_round`, and asserts nothing of it pokes outside what
+    /// `prepare_part` returned.
+    #[test]
+    fn a_prepared_part_always_contains_the_exact_spacing_buffer() {
+        let shapes: Vec<(&str, Vec<Point>)> = vec![
+            ("square", square(0.0, 0.0, 50.0)),
+            // A sliver with a sharp tip - the case `offset_round` exists for.
+            ("sliver", vec![Point::new(0.0, 0.0), Point::new(200.0, 2.0), Point::new(0.0, 4.0)]),
+            // A concave U, so an inward-moving simplification would show.
+            (
+                "concave U",
+                vec![
+                    Point::new(0.0, 0.0),
+                    Point::new(100.0, 0.0),
+                    Point::new(100.0, 100.0),
+                    Point::new(70.0, 100.0),
+                    Point::new(70.0, 20.0),
+                    Point::new(30.0, 20.0),
+                    Point::new(30.0, 100.0),
+                    Point::new(0.0, 100.0),
+                ],
+            ),
+            // Something curved and vertex-dense, which is what the
+            // simplification is actually aimed at.
+            ("circle-ish", (0..240).map(|i| {
+                let t = f64::from(i) / 240.0 * std::f64::consts::TAU;
+                Point::new(150.0 + 120.0 * t.cos(), 150.0 + 95.0 * t.sin())
+            }).collect()),
+        ];
+
+        for (name, shape) in &shapes {
+            for spacing in [0.0, 1.0, 5.0, 12.0] {
+                let prepared = prepare_part(shape, spacing).unwrap_or_else(|| panic!("{name} at spacing {spacing} should offset"));
+                // The exact buffer, built without going through prepare_part.
+                let exact = crate::clipper::offset_round(shape, spacing / 2.0);
+                let outside = crate::clipper::difference_polygons(&exact, std::slice::from_ref(&prepared), clipper2::FillRule::NonZero)
+                    .expect("difference should compute");
+                let leaked: f64 = outside.iter().map(|r| polygon_area(r).abs()).sum();
+                assert!(
+                    leaked < 1e-6,
+                    "{name} at spacing {spacing}: {leaked:.6} sq mm of the exact buffer falls outside the prepared outline - parts could be placed closer than the spacing allows"
+                );
+            }
+        }
     }
 
     /// A U-shaped offcut - what `remnant::sheet_remnants` hands back and the

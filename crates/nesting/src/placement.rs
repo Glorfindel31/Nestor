@@ -83,14 +83,53 @@ fn cached_obstacle_nfp(
     part_rotation: f64,
     curve_tolerance: f64,
 ) -> Option<Arc<CachedNfp>> {
-    let cached = cache.get_or_compute(part_source(obstacle_id), part_source(part_id), obstacle_rotation, part_rotation, false, false, || {
-        crate::profile::OBSTACLE_NFP_COMPUTE.time(|| obstacle_nfp(obstacle, part, curve_tolerance).map(|nfp| CachedNfp::Outer { outer: nfp.outer, children: nfp.children }))
+    // **Only the angle *between* the two shapes needs its own NFP.** Turning
+    // both shapes by the same angle turns their no-fit polygon by exactly
+    // that angle: if A' = R.A and B' = R.B, then B'+t clears A' exactly when
+    // B + R^-1.t clears A, so NFP(A', B') = R.NFP(A, B). The `+b[0]`
+    // reference-point translation inside `outer_nfp` rides along, since
+    // R.(m + b0) = R.m + R.b0.
+    //
+    // So a job on a four-angle grid needs four NFPs per shape pair, not
+    // sixteen - compute the pair with the obstacle at zero and the part at
+    // the difference, then turn the answer back. On `curvy.dxf`, where one
+    // NFP costs 1.4 seconds, that is 16 computations down to 4.
+    //
+    // This is the same trick `cache_key`'s documented caller convention
+    // already applies to inner NFPs, which hardcode `Arotation: 0` because a
+    // container does not rotate - here it is the obstacle that is pinned, and
+    // the result rotated afterwards instead of being used as-is.
+    let delta = part_rotation - obstacle_rotation;
+    let cached = cache.get_or_compute(part_source(obstacle_id), part_source(part_id), 0.0, delta, false, false, || {
+        let obstacle = rotate_layered_polygon(obstacle, -obstacle_rotation);
+        let part = rotate_layered_polygon(part, -obstacle_rotation);
+        crate::profile::OBSTACLE_NFP_COMPUTE.time(|| obstacle_nfp(&obstacle, &part, curve_tolerance).map(|nfp| CachedNfp::Outer { outer: nfp.outer, children: nfp.children }))
     })?;
+    // Turn the shared, obstacle-at-zero answer back into this obstacle's own
+    // frame. Paid once per `NfpAccumulator::obstacle_nfp` entry - the caller
+    // memoises this whole function - and never on the per-candidate path.
+    let cached = if crate::cache_key::normalize_rotation(obstacle_rotation) == 0 {
+        cached
+    } else {
+        let CachedNfp::Outer { outer, children } = &*cached else { return None };
+        Arc::new(CachedNfp::Outer {
+            outer: rotate_points(outer, obstacle_rotation),
+            children: children.iter().map(|c| rotate_points(c, obstacle_rotation)).collect(),
+        })
+    };
     // The `Arc` is returned rather than unpacked into an owned `ObstacleNfp`
     // on purpose: this is the hottest call in the engine (3.7M times on the
     // hat benchmark) and its only consumer immediately copies the points it
     // needs into a shifted buffer anyway, so an owned copy here was pure waste.
     matches!(&*cached, CachedNfp::Outer { .. }).then_some(cached)
+}
+
+/// Turns a bare point list about the origin - the point-list counterpart to
+/// `dxf_import::rotate_layered_polygon`, for rotating an NFP rather than a
+/// part. See `cached_obstacle_nfp` for why an NFP ever needs turning.
+fn rotate_points(points: &[Point], degrees: f64) -> Vec<Point> {
+    let (sin, cos) = (degrees * std::f64::consts::PI / 180.0).sin_cos();
+    points.iter().map(|p| Point::new(p.x * cos - p.y * sin, p.x * sin + p.y * cos)).collect()
 }
 
 /// `inner_nfp`, through `cache` - same idea as `cached_obstacle_nfp` above.
@@ -618,38 +657,135 @@ impl TightFitProbe {
     }
 }
 
+/// `NEST_NO_CONTACT=1` makes every candidate score zero contact, collapsing
+/// `TightFit` to its plain top-left tiebreak. A measurement tool, not a
+/// feature: this scorer is the most expensive thing in the engine and the
+/// whole board is indifferent to it, so the question of whether it earns its
+/// keep needs to be askable without a rebuild.
+fn contact_scoring_disabled() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var("NEST_NO_CONTACT").is_ok_and(|v| v != "0"))
+}
+
+/// Contact area between one candidate and one already-placed obstacle, keyed
+/// by both shapes' identities and the offset between them.
+///
+/// **Why this hits.** The area depends only on which two shapes are involved,
+/// at which rotations, and how far apart they sit - not on which sheet or
+/// which GA individual is being evaluated. Parts pack into repeating
+/// lattices, so the same few offsets recur relentlessly: measured on the
+/// `test05` board row, ~1M pair intersections drawn from 11,923 distinct
+/// combinations, a 98.8% recurrence rate. `NfpAccumulator::contact` already
+/// memoises within one sheet's scan; this catches what that cannot, which is
+/// almost entirely the same geometry seen again on the next sheet.
+///
+/// **Thread-local, not shared.** A global map would need a lock on a path
+/// taken a million times a run - exactly the convoy `cache::NfpCache` was
+/// restructured to escape. Per-thread copies cost a few thousand entries each
+/// and need no synchronisation at all.
+///
+/// **Summing per obstacle is equivalent to one intersection against all of
+/// them,** because placed parts do not overlap each other, so the union a
+/// single Clipper call would form has no double-counted area.
+type ContactPairKey = (usize, i64, usize, i64, i64, i64);
+
+/// Offset quantisation for `ContactPairKey`: a hundredth of a millimetre.
+const CONTACT_OFFSET_CELL: f64 = 0.01;
+
+/// Entries per thread before the memo is cleared wholesale. Real jobs settle
+/// around 12k; this is insurance against a pathological one, not a working
+/// limit, and clearing beats evicting because the next sheet refills it with
+/// what it actually needs.
+const MAX_CONTACT_MEMO: usize = 200_000;
+
+thread_local! {
+    static CONTACT_MEMO: std::cell::RefCell<HashMap<ContactPairKey, f64>> = std::cell::RefCell::new(HashMap::new());
+}
+
 fn tight_fit_contact_area(
     probe: &TightFitProbe,
+    part_id: (usize, i64),
     shiftvector: Placement,
     part_bounds: Bounds,
-    parts_neighborhood: &[(Bounds, Vec<Point>)],
-    sheet_neighborhood: &[(Bounds, Vec<Point>)],
+    parts_neighborhood: &[ContactObstacle],
+    sheet_neighborhood: &[ContactObstacle],
 ) -> f64 {
+    // ponytail: diagnostic toggle, see `contact_scoring_disabled`.
+    if contact_scoring_disabled() {
+        return 0.0;
+    }
     let candidate_bbox = Bounds { x: part_bounds.x + shiftvector.x, y: part_bounds.y + shiftvector.y, width: part_bounds.width, height: part_bounds.height };
-    let has_nearby = |neighborhood: &[(Bounds, Vec<Point>)]| neighborhood.iter().any(|(bounds, _)| bounds_within_distance(&candidate_bbox, bounds, TIGHT_FIT_PROBE_DISTANCE));
+    let has_nearby = |neighborhood: &[ContactObstacle]| neighborhood.iter().any(|(bounds, ..)| bounds_within_distance(&candidate_bbox, bounds, TIGHT_FIT_PROBE_DISTANCE));
     if !has_nearby(parts_neighborhood) && !has_nearby(sheet_neighborhood) {
         return 0.0;
     }
 
     let buffered: Vec<Vec<Point>> = crate::profile::CONTACT_PREP.time(|| probe.buffered.iter().map(|region| shift_points(region, shiftvector.x, shiftvector.y)).collect());
 
-    let contact_against = |neighborhood: &[(Bounds, Vec<Point>)]| -> f64 {
+    let intersect_one = |poly: &Vec<Point>| -> f64 {
+        crate::profile::CONTACT_INTERSECT.time(|| {
+            intersection_polygons(&buffered, std::slice::from_ref(poly), FillRule::NonZero)
+                .map(|regions| regions.iter().map(|r| polygon_area(r).abs()).sum())
+                .unwrap_or(0.0)
+        })
+    };
+
+    // **The sheet border band must stay ONE Clipper call over all its paths,
+    // not a sum of per-path intersections.** `sheet_border_band` is a ring -
+    // an outer boundary plus the sheet outline as a hole - and it is only a
+    // ring because `FillRule::NonZero` resolves the two together. Intersecting
+    // each path separately and adding gives the band plus the whole sheet
+    // interior, which is not a contact area at all. Parts are separate solids
+    // and can be summed; this cannot. It has no shape identity to key on and
+    // its own `skips_sheet_contact` cull, so it stays uncached either way.
+    let sheet_contact: f64 = if probe.skips_sheet_contact(&candidate_bbox) {
+        0.0
+    } else {
         let nearby: Vec<Vec<Point>> = crate::profile::CONTACT_PREP.time(|| {
-            neighborhood
+            sheet_neighborhood
                 .iter()
-                .filter(|(bounds, _)| bounds_within_distance(&candidate_bbox, bounds, TIGHT_FIT_PROBE_DISTANCE))
-                .map(|(_, poly)| poly.clone())
+                .filter(|(bounds, ..)| bounds_within_distance(&candidate_bbox, bounds, TIGHT_FIT_PROBE_DISTANCE))
+                .map(|(_, poly, _)| poly.clone())
                 .collect()
         });
         if nearby.is_empty() {
-            return 0.0;
+            0.0
+        } else {
+            crate::profile::CONTACT_INTERSECT.time(|| {
+                intersection_polygons(&buffered, &nearby, FillRule::NonZero).map(|regions| regions.iter().map(|r| polygon_area(r).abs()).sum()).unwrap_or(0.0)
+            })
         }
-        crate::profile::CONTACT_INTERSECT
-            .time(|| intersection_polygons(&buffered, &nearby, FillRule::NonZero).map(|regions| regions.iter().map(|r| polygon_area(r).abs()).sum()).unwrap_or(0.0))
     };
 
-    let sheet_contact = if probe.skips_sheet_contact(&candidate_bbox) { 0.0 } else { contact_against(sheet_neighborhood) };
-    TIGHT_FIT_PART_CONTACT_WEIGHT * contact_against(parts_neighborhood) + TIGHT_FIT_SHEET_CONTACT_WEIGHT * sheet_contact
+    let parts_contact: f64 = parts_neighborhood
+        .iter()
+        .filter(|(bounds, ..)| bounds_within_distance(&candidate_bbox, bounds, TIGHT_FIT_PROBE_DISTANCE))
+        .map(|(bounds, poly, id)| {
+            let Some((obstacle_source, obstacle_rotation)) = *id else { return intersect_one(poly) };
+            let key: ContactPairKey = (
+                part_id.0,
+                part_id.1,
+                obstacle_source,
+                obstacle_rotation,
+                ((bounds.x - candidate_bbox.x) / CONTACT_OFFSET_CELL).round() as i64,
+                ((bounds.y - candidate_bbox.y) / CONTACT_OFFSET_CELL).round() as i64,
+            );
+            if let Some(hit) = CONTACT_MEMO.with(|memo| memo.borrow().get(&key).copied()) {
+                return hit;
+            }
+            let area = intersect_one(poly);
+            CONTACT_MEMO.with(|memo| {
+                let mut memo = memo.borrow_mut();
+                if memo.len() >= MAX_CONTACT_MEMO {
+                    memo.clear();
+                }
+                memo.insert(key, area);
+            });
+            area
+        })
+        .sum();
+
+    TIGHT_FIT_PART_CONTACT_WEIGHT * parts_contact + TIGHT_FIT_SHEET_CONTACT_WEIGHT * sheet_contact
 }
 
 /// The sheet's own border, as an inward `TIGHT_FIT_PROBE_DISTANCE`-wide band
@@ -678,8 +814,9 @@ fn find_best_hybrid_candidate(
     excluded: &HashSet<usize>,
     probe: &TightFitProbe,
     part_bounds: Bounds,
-    parts_neighborhood: &[(Bounds, Vec<Point>)],
-    sheet_neighborhood: &[(Bounds, Vec<Point>)],
+    part_id: (usize, i64),
+    parts_neighborhood: &[ContactObstacle],
+    sheet_neighborhood: &[ContactObstacle],
 ) -> Option<usize> {
     let champion_idx = find_best_candidate(candidates, excluded)?;
     let champion_area = candidates[champion_idx].score.area();
@@ -694,8 +831,8 @@ fn find_best_hybrid_candidate(
 
     tied.into_iter()
         .max_by(|&a, &b| {
-            let contact_a = tight_fit_contact_area(probe, candidates[a].shiftvector, part_bounds, parts_neighborhood, sheet_neighborhood);
-            let contact_b = tight_fit_contact_area(probe, candidates[b].shiftvector, part_bounds, parts_neighborhood, sheet_neighborhood);
+            let contact_a = tight_fit_contact_area(probe, part_id, candidates[a].shiftvector, part_bounds, parts_neighborhood, sheet_neighborhood);
+            let contact_b = tight_fit_contact_area(probe, part_id, candidates[b].shiftvector, part_bounds, parts_neighborhood, sheet_neighborhood);
             contact_a.total_cmp(&contact_b)
         })
         .or(Some(champion_idx))
@@ -833,7 +970,11 @@ impl PlaceOnSheetOutcome {
 /// set - see `tight_fit_neighborhood`'s own doc comment. Depends only on
 /// `sheet`/`placed`/`placement_type`, never on any candidate part's
 /// rotation or position.
-type TightFitNeighborhood = (Vec<(Bounds, Vec<Point>)>, Vec<(Bounds, Vec<Point>)>);
+/// An already-placed obstacle as the contact scorer sees it: its shifted
+/// outline, that outline's bounds, and the shape identity `CONTACT_MEMO` keys
+/// on. `None` for the sheet border band, which is not a part.
+type ContactObstacle = (Bounds, Vec<Point>, Option<(usize, i64)>);
+type TightFitNeighborhood = (Vec<ContactObstacle>, Vec<ContactObstacle>);
 
 /// Builds `TightFit`'s "neighborhood", kept as two separate lists (not
 /// merged) so `tight_fit_contact_area` can weight contact against an
@@ -854,12 +995,12 @@ type TightFitNeighborhood = (Vec<(Bounds, Vec<Point>)>, Vec<(Bounds, Vec<Point>)
 /// multi-rotation search itself targets.
 fn tight_fit_neighborhood(sheet: &LayeredPolygon, placed: &[PlacedObstacle], placement_type: PlacementType) -> TightFitNeighborhood {
     if matches!(placement_type, PlacementType::TightFit | PlacementType::GravityTightFit | PlacementType::GravityCorrective) {
-        let parts: Vec<(Bounds, Vec<Point>)> = placed
+        let parts: Vec<ContactObstacle> = placed
             .iter()
-            .map(|o| shift_points(&o.polygon.points, o.placement.x, o.placement.y))
-            .filter_map(|p| get_polygon_bounds(&p).map(|b| (b, p)))
+            .map(|o| (shift_points(&o.polygon.points, o.placement.x, o.placement.y), (o.source_id, crate::cache_key::normalize_rotation(o.rotation))))
+            .filter_map(|(p, id)| get_polygon_bounds(&p).map(|b| (b, p, Some(id))))
             .collect();
-        let border: Vec<(Bounds, Vec<Point>)> = sheet_border_band(sheet).into_iter().filter_map(|p| get_polygon_bounds(&p).map(|b| (b, p))).collect();
+        let border: Vec<ContactObstacle> = sheet_border_band(sheet).into_iter().filter_map(|p| get_polygon_bounds(&p).map(|b| (b, p, None))).collect();
         (parts, border)
     } else {
         (Vec::new(), Vec::new())
@@ -1084,7 +1225,7 @@ pub(crate) fn try_place_part_on_sheet_accumulated(
             accumulator
                 .obstacle_nfp
                 .entry(obstacle_key)
-                .or_insert_with(|| cached_obstacle_nfp(cache, &obstacle.polygon, obstacle.source_id, obstacle.rotation, part, part_source_id, part_rotation, config.curve_tolerance))
+                .or_insert_with(|| { crate::profile::ACC_NFP_MISS.add(1); cached_obstacle_nfp(cache, &obstacle.polygon, obstacle.source_id, obstacle.rotation, part, part_source_id, part_rotation, config.curve_tolerance) })
                 .clone()
         }) else {
             error = true;
@@ -1288,13 +1429,13 @@ pub(crate) fn try_place_part_on_sheet_accumulated(
                             // every attempt. Off by default: it makes the
                             // memo a pure cost.
                             debug_assert_contact_unchanged(cached, || {
-                                tight_fit_contact_area(&probe, shiftvector, part_bounds, tight_fit_parts_neighborhood, tight_fit_sheet_neighborhood)
+                                tight_fit_contact_area(&probe, memo_key, shiftvector, part_bounds, tight_fit_parts_neighborhood, tight_fit_sheet_neighborhood)
                             });
                             cached
                         }
                         None => {
                             let computed = crate::profile::CANDIDATE_SCORING
-                                .time(|| tight_fit_contact_area(&probe, shiftvector, part_bounds, tight_fit_parts_neighborhood, tight_fit_sheet_neighborhood));
+                                .time(|| tight_fit_contact_area(&probe, memo_key, shiftvector, part_bounds, tight_fit_parts_neighborhood, tight_fit_sheet_neighborhood));
                             contact_memo.insert(position, computed);
                             computed
                         }
@@ -1316,7 +1457,7 @@ pub(crate) fn try_place_part_on_sheet_accumulated(
     let mut excluded: HashSet<usize> = HashSet::new();
     loop {
         let champion = if config.placement_type == PlacementType::GravityTightFit {
-            find_best_hybrid_candidate(&candidates, &excluded, &probe, part_bounds.expect("part always has points"), tight_fit_parts_neighborhood, tight_fit_sheet_neighborhood)
+            find_best_hybrid_candidate(&candidates, &excluded, &probe, part_bounds.expect("part always has points"), memo_key, tight_fit_parts_neighborhood, tight_fit_sheet_neighborhood)
         } else {
             find_best_candidate(&candidates, &excluded)
         };
@@ -1453,6 +1594,64 @@ fn sheet_usable_bounds(sheet: &LayeredPolygon) -> Bounds {
     get_polygon_bounds(&sheet.points).unwrap_or(Bounds { x: 0.0, y: 0.0, width: 0.0, height: 0.0 })
 }
 
+/// Computes every obstacle NFP the run can need, in parallel, before the
+/// greedy loop starts.
+///
+/// The shared `NfpCache` computes lazily and coalesces: the first thread to
+/// want a given NFP computes it while every other thread wanting it blocks.
+/// On `nestTest04` that is 16 NFPs costing 8.1s of compute inside a 9.8s
+/// run, which is why 12 threads only ran 1.7x faster than one. Issuing them
+/// all at once instead lets rayon spread them.
+///
+/// ponytail: the plain rotation grid only. A `part_rules` angle outside the
+/// grid just falls back to computing lazily, as before.
+fn prewarm_obstacle_nfps(parts: &[NestPart], config: &PlacementConfig, cache: &NfpCache) {
+    /// Above this many (shape, angle) variants the pairwise prewarm would
+    /// compute more than the run ever asks for. n^2 pairs, so keep it small.
+    const MAX_VARIANTS: usize = 48;
+
+    let rotations = config.rotations.max(1);
+    let step = 360.0 / rotations as f64;
+    let mut variants: Vec<(usize, f64, LayeredPolygon)> = Vec::new();
+    let mut seen: HashSet<(usize, i64)> = HashSet::new();
+    for p in parts {
+        let mut poly = p.polygon.clone();
+        let mut angle = p.rotation;
+        for k in 0..rotations {
+            if k > 0 {
+                poly = rotate_layered_polygon(&poly, step);
+                angle += step;
+            }
+            if seen.insert((p.source_id, crate::cache_key::normalize_rotation(angle))) {
+                variants.push((p.source_id, angle, poly.clone()));
+            }
+        }
+        if variants.len() > MAX_VARIANTS {
+            return;
+        }
+    }
+
+    // **Only prewarm when the run will actually use most of these pairs.**
+    // The prewarm computes all `variants^2` of them up front; the greedy scan
+    // tries every remaining part against the current obstacle set, so the
+    // pairs it genuinely exercises approach that square only once the part
+    // count is comparable to the variant count. Below that, most of the work
+    // is thrown away - and an obstacle NFP is not always cheap: on
+    // `curvy.dxf`, whose part carries a 207-point hole and so takes
+    // `inner_nfp`'s general fallback, one costs 118 seconds. Prewarming 16 of
+    // those for a single-part job took it from 0.0s to 278s.
+    if parts.len() < variants.len() {
+        return;
+    }
+
+    let pairs: Vec<(usize, usize)> = (0..variants.len()).flat_map(|a| (0..variants.len()).map(move |b| (a, b))).collect();
+    pairs.par_iter().for_each(|&(a, b)| {
+        let (a_src, a_rot, a_poly) = &variants[a];
+        let (b_src, b_rot, b_poly) = &variants[b];
+        let _ = cached_obstacle_nfp(cache, a_poly, *a_src, *a_rot, b_poly, *b_src, *b_rot, config.curve_tolerance);
+    });
+}
+
 #[must_use]
 pub fn place_parts(
     sheets: &[LayeredPolygon],
@@ -1472,6 +1671,8 @@ pub fn place_parts(
             rotation: p.rotation,
         })
         .collect();
+
+    prewarm_obstacle_nfps(&parts, config, cache);
 
     let mut total_sheet_area = 0.0;
     let mut total_usable_sheet_area = 0.0;
@@ -1602,8 +1803,8 @@ pub fn place_parts(
             // job's search space isn't noisy enough for run-to-run luck to
             // explain the gap either way).
             if placed.is_empty() && config.rotations > 1 && matches!(config.placement_type, PlacementType::TightFit | PlacementType::GravityTightFit | PlacementType::GravityCorrective) {
-                let border_neighborhood: Vec<(Bounds, Vec<Point>)> =
-                    sheet_border_band(sheet).into_iter().filter_map(|p| get_polygon_bounds(&p).map(|b| (b, p))).collect();
+                let border_neighborhood: Vec<ContactObstacle> =
+                    sheet_border_band(sheet).into_iter().filter_map(|p| get_polygon_bounds(&p).map(|b| (b, p, None))).collect();
                 // Both are set from the first `rotation_steps` entry below,
                 // whose delta is always 0 - i.e. they start exactly where the
                 // part already is.
@@ -1668,7 +1869,7 @@ pub fn place_parts(
                                     if has_material_outside_sheet(&shifted, sheet) {
                                         continue;
                                     }
-                                    let contact = tight_fit_contact_area(&trial_probe, candidate, trial_bounds, &[], &border_neighborhood);
+                                    let contact = tight_fit_contact_area(&trial_probe, (parts[i].source_id, crate::cache_key::normalize_rotation(trial_rotation)), candidate, trial_bounds, &[], &border_neighborhood);
                                     let better = match &best {
                                         None => true,
                                         Some((best_contact, best_pos, ..)) => {
@@ -2349,6 +2550,59 @@ mod tests {
 
     fn separated(x0: f64, y0: f64, s0: f64, x1: f64, y1: f64, s1: f64) -> bool {
         x0 + s0 <= x1 + 1e-6 || x1 + s1 <= x0 + 1e-6 || y0 + s0 <= y1 + 1e-6 || y1 + s1 <= y0 + 1e-6
+    }
+
+    /// `CONTACT_MEMO` keys on the offset between two shapes and nothing
+    /// else - not their absolute positions, not the sheet, not which GA
+    /// individual asked. That is only sound if contact area really is
+    /// translation invariant, so this asserts it directly: the same pair at
+    /// the same offset, moved bodily across the sheet, must score the same.
+    ///
+    /// The second half matters just as much. A key that collapsed distinct
+    /// offsets together would also pass the first assertion while quietly
+    /// serving one score for every position, so a genuinely different offset
+    /// has to come back different.
+    #[test]
+    fn contact_area_depends_on_the_offset_between_two_parts_and_nothing_else() {
+        let sheet = square(0.0, 0.0, 500.0);
+        let part = square(0.0, 0.0, 20.0);
+        let probe = TightFitProbe::new(&part, &sheet);
+        let part_bounds = get_polygon_bounds(&part.points).expect("part has bounds");
+
+        // One obstacle, and a candidate touching its left edge. Both are
+        // moved together by `shift`, so the offset between them never
+        // changes - only where on the sheet the pair sits.
+        let scored_at = |shift: f64, gap: f64| {
+            let obstacle = square(100.0 + shift, 100.0 + shift, 20.0);
+            let bounds = get_polygon_bounds(&obstacle.points).expect("obstacle has bounds");
+            let neighborhood: Vec<ContactObstacle> = vec![(bounds, obstacle.points.clone(), Some((7, 0)))];
+            tight_fit_contact_area(
+                &probe,
+                (0, 0),
+                Placement { x: 80.0 + shift - gap, y: 100.0 + shift },
+                part_bounds,
+                &neighborhood,
+                &[],
+            )
+        };
+
+        let reference = scored_at(0.0, 0.0);
+        assert!(reference > 0.0, "a candidate flush against an obstacle should register contact, got {reference}");
+        for shift in [37.0, 150.0, 213.5] {
+            let moved = scored_at(shift, 0.0);
+            assert!(
+                (moved - reference).abs() < 1e-9,
+                "contact area must not depend on where the pair sits: {reference} at the origin, {moved} shifted by {shift}"
+            );
+        }
+
+        // Pulled a third of the probe collar away, the same pair must score
+        // differently - otherwise the memo key is collapsing real offsets.
+        let apart = scored_at(0.0, TIGHT_FIT_PROBE_DISTANCE / 3.0);
+        assert!(
+            (apart - reference).abs() > 1e-9,
+            "a different offset must score differently, but both gave {reference}"
+        );
     }
 
     /// The milestone: one rectangle placed on one sheet, single individual,

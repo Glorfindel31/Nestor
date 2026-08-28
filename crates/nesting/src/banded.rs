@@ -147,7 +147,31 @@ fn build_units(part: &NestPart, base_rotation: f64, available: usize, curve_tole
 /// alone would be wrong - ids restart with every job, and a cache that lives
 /// as long as the process would then hand a new job the previous one's
 /// geometry - so the outline's own fingerprint is part of the key.
-type UnitCacheKey = (usize, u64, bool, u64, usize, u64, u64, u64);
+type UnitCacheKey = (usize, u64, bool, u64, usize, i64, i64, u64);
+
+/// Quantises a fingerprint term to micrometre resolution.
+///
+/// **The fingerprint terms cannot be raw bit patterns.** `canonical_part`
+/// reaches rotation 0 by turning the part by `-part.rotation`, and that does
+/// not recover the original bits - not because one rotation and its inverse
+/// drift (they cancel exactly, which is worth knowing before writing a test
+/// against this), but because `place_parts` never rotates in one step. Its
+/// trial walk is cumulative - `trial_polygon = rotate_layered_polygon(
+/// &trial_polygon, delta)`, one grid step at a time - so a copy at 270 is
+/// three 90-degree rotations deep and de-rotating it by 270 lands near, not
+/// on, a copy left at 0.
+///
+/// Hashing the raw bits therefore made a shape's key depend on the route the
+/// GA took to its rotation. Measured on the `test05` board row:
+/// `CATALOGUE_CACHE` saw 15 distinct keys for what are really 4 shape sets,
+/// and 6.2s of thread time rebuilding catalogues it already had. Quantised,
+/// it sees 4 and spends 2.2s.
+///
+/// 1e-6 is far above that drift and far below anything this engine calls a
+/// distinct shape.
+fn quantise(v: f64) -> i64 {
+    (v * 1e6).round() as i64
+}
 
 fn unit_cache_key(part: &NestPart, base_rotation: f64, available: usize, curve_tolerance: f64, rules: &PartRules) -> UnitCacheKey {
     let first = part.polygon.points.first().copied().unwrap_or(geometry::point::Point::new(0.0, 0.0));
@@ -157,8 +181,11 @@ fn unit_cache_key(part: &NestPart, base_rotation: f64, available: usize, curve_t
         available >= 2,
         curve_tolerance.to_bits(),
         part.polygon.points.len(),
-        polygon_area(&part.polygon.points).to_bits(),
-        (first.x * 1e6 + first.y).to_bits(),
+        quantise(polygon_area(&part.polygon.points)),
+        // Each coordinate quantised *before* they are combined - packing them
+        // as `x * 1e6 + y` first would leave x resolved to 1e-12, below the
+        // de-rotation drift this is meant to absorb.
+        quantise(first.x).wrapping_mul(1_000_003).wrapping_add(quantise(first.y)),
         // The allowed-angle set is part of what the catalogue depends on: the
         // same shape constrained to 0/180 has a different unit list from the
         // same shape free to turn, and this cache outlives a job.
@@ -226,7 +253,41 @@ static UNIT_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<UnitCacheKey, Ve
 /// shape's own `unit_cache_key` plus how many copies the pool holds.
 type PlanCacheKey = (u64, u64, Option<usize>, Vec<(UnitCacheKey, usize)>);
 
+/// **Deliberately NOT a `OnceLock` slot per key, unlike `CATALOGUE_CACHE`.**
+/// Coalescing was tried and measured: it cut searches from 39 to 13 and their
+/// thread time from 3.6s to 0.8s, and made the `test05` board row *slower*,
+/// 11.3s to 12.8s. A band search is ~60ms and there are only a handful of
+/// distinct plans, so making eleven threads queue behind one search costs
+/// more wall clock than letting them duplicate it. `cache::NfpCache` reaches
+/// the opposite conclusion on the same trade-off because the work it guards
+/// is an order of magnitude more expensive - the pattern is not a rule.
 static PLAN_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<PlanCacheKey, Vec<f64>>>> = std::sync::LazyLock::new(Default::default);
+
+/// The shape at absolute rotation 0, whichever copy of it we were handed.
+///
+/// **Why the catalogue must be built off this and not off `parts[i]`.** Both
+/// `build_catalogue` and `shape_fingerprints` take "the first part carrying
+/// this `source_id`" as the shape's representative, and `build_units` reads
+/// that part's own `rotation` twice: the geometry it turns is
+/// `part.rotation + base_rotation`, and the angle a rotation rule is checked
+/// against is the same sum. So the catalogue - and therefore its cache key -
+/// depended on which copy the GA's permutation happened to put first.
+///
+/// That cost twice. The key changed every individual, so `CATALOGUE_CACHE`
+/// missed almost every time: 9.9s of thread time over 396 calls on the
+/// `test05` board row, rebuilding the same catalogue. And the band layout
+/// itself silently varied with the permutation, since a representative at 90
+/// offers the packer bands at 90/180 where one at 0 offers 0/90.
+///
+/// Canonicalising to 0 fixes both: the orientation set is always `{0, 90}`,
+/// which is every distinct box orientation there is (180 maps a bounding box
+/// onto itself - see `ANGLES`), so nothing is lost by pinning it.
+fn canonical_part(part: &NestPart) -> NestPart {
+    if part.rotation == 0.0 {
+        return part.clone();
+    }
+    NestPart { id: part.id, source_id: part.source_id, polygon: rotate_layered_polygon(&part.polygon, -part.rotation), rotation: 0.0 }
+}
 
 /// The shape fingerprints `build_catalogue` reads, in the order it reads
 /// them - the key both caches below are built on.
@@ -244,13 +305,42 @@ fn shape_fingerprints(parts: &[NestPart], curve_tolerance: f64, rules: &PartRule
         // off this same part, so the base is a constant across them and the
         // part's own carried rotation is what distinguishes one key from
         // another - which `unit_cache_key` already folds in.
-        shapes.push((unit_cache_key(part, 0.0, available, curve_tolerance, rules), available));
+        shapes.push((unit_cache_key(&canonical_part(part), 0.0, available, curve_tolerance, rules), available));
     }
     shapes
 }
 
-fn plan_cache_key(sheet_bounds: Bounds, shapes: &[(UnitCacheKey, usize)], anchor: Option<usize>) -> PlanCacheKey {
-    (sheet_bounds.width.to_bits(), sheet_bounds.height.to_bits(), anchor, shapes.to_vec())
+fn plan_cache_key(sheet_bounds: Bounds, shapes: &[(UnitCacheKey, usize)], anchor: Option<usize>, catalogue: &[Unit]) -> PlanCacheKey {
+    let shapes = shapes.iter().map(|&(key, available)| (key, available.min(sheet_capacity(sheet_bounds, catalogue, key.0)))).collect();
+    (sheet_bounds.width.to_bits(), sheet_bounds.height.to_bits(), anchor, shapes)
+}
+
+/// An upper bound on how many copies of one shape any plan for this sheet can
+/// consume - what a pool count saturates at for cache-key purposes.
+///
+/// **Why the plan key needs this.** The search reads a count only through
+/// `shape_options`/`fill_band`'s `pool.available(..) >= u.count()` checks, so
+/// two pools that both hold more copies than the sheet could ever take are
+/// indistinguishable to it - yet keying on the raw count gave them different
+/// keys, and a sheet consumes parts, so the count fell by a few every sheet
+/// and the key almost never repeated. Measured on `test05`: 181 hits against
+/// 215 misses, at ~95ms a miss.
+///
+/// **Why the bound is sound.** Bands partition the sheet's height and each
+/// band is filled with copies of one unit, so a plan's total for a shape is a
+/// height-weighted blend of its unit types' own full-sheet capacities, with
+/// the weights summing to at most 1 - never more than the largest of them.
+fn sheet_capacity(sheet_bounds: Bounds, catalogue: &[Unit], source_id: usize) -> usize {
+    catalogue
+        .iter()
+        .filter(|u| u.source_id == source_id && u.width > 0.0 && u.height > 0.0)
+        .map(|u| {
+            let across = (sheet_bounds.width / u.width).floor().max(0.0) as usize;
+            let down = (sheet_bounds.height / u.height).floor().max(0.0) as usize;
+            across.saturating_mul(down).saturating_mul(u.count())
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// `build_catalogue`'s own output, cached whole.
@@ -259,19 +349,44 @@ fn plan_cache_key(sheet_bounds: Bounds, shapes: &[(UnitCacheKey, usize)], anchor
 /// catalogue still paid for a full `Vec<Unit>` clone out of that cache per
 /// shape per base angle, once per `pack_sheet` - 13s of an 800-part run.
 /// An `Arc` hands the same list back instead.
-static CATALOGUE_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<Vec<(UnitCacheKey, usize)>, std::sync::Arc<Vec<Unit>>>>> = std::sync::LazyLock::new(Default::default);
+/// **Keyed on the shape fingerprints alone, without their pool counts.** The
+/// catalogue is built by `build_catalogue` -> `build_units`, and the only
+/// thing either reads off a count is `available >= 2`, which `unit_cache_key`
+/// already folds into the fingerprint. Including the raw count as well meant a
+/// brand-new key every sheet, since a sheet consumes parts: measured on the
+/// `test05` board row, 9.97s of thread time rebuilding a catalogue that was
+/// bit-identical every time.
+/// **A `OnceLock` slot per key, not a plain value** - the same structure
+/// `cache::NfpCache` uses, and for the same reason. Check-then-insert leaves
+/// the build happening between two lock acquisitions, unlocked, so every
+/// `dispatch` thread that wants a cold key misses together and each builds it
+/// independently. Measured on the `test05` board row: 7 misses serving 4
+/// distinct keys, at roughly a third of a second of Minkowski work apiece.
+/// The map lock is now only ever held long enough to fetch-or-create a slot;
+/// the build runs outside it, and every racer after the first blocks on that
+/// one build instead of duplicating it.
+type CatalogueSlot = std::sync::Arc<std::sync::OnceLock<std::sync::Arc<Vec<Unit>>>>;
+static CATALOGUE_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<Vec<UnitCacheKey>, CatalogueSlot>>> = std::sync::LazyLock::new(Default::default);
 
 fn cached_catalogue(parts: &[NestPart], curve_tolerance: f64, rules: &PartRules, shapes: &[(UnitCacheKey, usize)]) -> std::sync::Arc<Vec<Unit>> {
-    if let Some(hit) = CATALOGUE_CACHE.lock().ok().and_then(|c| c.get(shapes).cloned()) {
-        return hit;
-    }
-    let built = std::sync::Arc::new(build_catalogue(parts, curve_tolerance, rules));
-    if let Ok(mut cache) = CATALOGUE_CACHE.lock() {
-        if cache.len() < MAX_UNIT_CACHE_ENTRIES {
-            cache.insert(shapes.to_vec(), std::sync::Arc::clone(&built));
+    let key: Vec<UnitCacheKey> = shapes.iter().map(|(k, _)| *k).collect();
+    let slot: CatalogueSlot = {
+        let Ok(mut cache) = CATALOGUE_CACHE.lock() else {
+            return std::sync::Arc::new(build_catalogue(parts, curve_tolerance, rules));
+        };
+        match cache.get(&key) {
+            Some(existing) => std::sync::Arc::clone(existing),
+            // Past the cap, build uncached and uncoalesced rather than growing
+            // the map - same policy the cap had before.
+            None if cache.len() >= MAX_UNIT_CACHE_ENTRIES => return std::sync::Arc::new(build_catalogue(parts, curve_tolerance, rules)),
+            None => {
+                let slot = CatalogueSlot::default();
+                cache.insert(key, std::sync::Arc::clone(&slot));
+                slot
+            }
         }
-    }
-    built
+    };
+    std::sync::Arc::clone(slot.get_or_init(|| std::sync::Arc::new(build_catalogue(parts, curve_tolerance, rules))))
 }
 
 /// Rewrites every member's angle from "relative to the polygon we were
@@ -679,8 +794,9 @@ fn build_catalogue(parts: &[NestPart], curve_tolerance: f64, rules: &PartRules) 
         }
         seen.push(part.source_id);
         let available = counts.available(part.source_id);
+        let part = canonical_part(part);
         for angle in ANGLES {
-            out.extend(build_units(part, angle, available, curve_tolerance, rules));
+            out.extend(build_units(&part, angle, available, curve_tolerance, rules));
         }
     }
     out
@@ -740,7 +856,7 @@ pub fn pack_sheet(sheet_bounds: Bounds, parts: &[NestPart], curve_tolerance: f64
     if parts.is_empty() || sheet_bounds.width <= 0.0 || sheet_bounds.height <= 0.0 {
         return None;
     }
-    let shapes = crate::profile::BANDED_CATALOGUE.time(|| shape_fingerprints(parts, curve_tolerance, rules));
+    let shapes = crate::profile::BANDED_FINGERPRINT.time(|| shape_fingerprints(parts, curve_tolerance, rules));
     let full_catalogue = crate::profile::BANDED_CATALOGUE.time(|| cached_catalogue(parts, curve_tolerance, rules, &shapes));
     // Only the anchored pass needs its own list; the common case borrows.
     let anchored: Vec<Unit>;
@@ -788,7 +904,7 @@ pub fn pack_sheet(sheet_bounds: Bounds, parts: &[NestPart], curve_tolerance: f64
             }
         }
     });
-    let plan_key = plan_cache_key(sheet_bounds, &shapes, anchor);
+    let plan_key = plan_cache_key(sheet_bounds, &shapes, anchor, catalogue);
     match PLAN_CACHE.lock().ok().and_then(|c| c.get(&plan_key).cloned()) {
         Some(bands) => {
             crate::profile::PLAN_CACHE_HIT.add(1);
@@ -1027,6 +1143,60 @@ mod tests {
 
     fn sheet(w: f64, h: f64) -> Bounds {
         Bounds { x: 0.0, y: 0.0, width: w, height: h }
+    }
+
+    /// `canonical_part` de-rotates by `-part.rotation`, which is floating
+    /// point, so the same shape reached from four different GA rotations
+    /// lands on four slightly different point sets. `unit_cache_key` has to
+    /// hash all four the same or `CATALOGUE_CACHE` misses every individual -
+    /// which is exactly what it did before `quantise`.
+    #[test]
+    fn a_shapes_fingerprint_survives_being_de_rotated_from_any_angle() {
+        // **Two details are load-bearing, and without either the test passes
+        // whether `quantise` is there or not.** The outline must start at an
+        // angle that is not a multiple of 90, as a real one does - imports go
+        // through `commands::normalise_orientation`. And the walk through the
+        // rotations must be *cumulative*, because that is how `place_parts`
+        // does it: `trial_polygon = rotate_layered_polygon(&trial_polygon,
+        // delta)`, one delta at a time. Reaching 270 in three 90-degree steps
+        // does not land on the same bits as one 270-degree rotation, so
+        // de-rotating by 270 does not recover the original outline exactly.
+        let base = rotate_layered_polygon(&rect_part(0, 0, 250.0, 400.0).polygon, 37.6);
+        let mut walked = base.clone();
+        let mut angle = 0.0f64;
+        let mut keys: std::collections::HashSet<UnitCacheKey> = std::collections::HashSet::new();
+        for _ in 0..4 {
+            // What `place_parts` hands the packer: geometry already turned,
+            // with the angle recorded alongside it.
+            let turned = NestPart { polygon: walked.clone(), rotation: angle, ..rect_part(0, 0, 250.0, 400.0) };
+            keys.insert(unit_cache_key(&canonical_part(&turned), 0.0, 2, 0.3, &PartRules::default()));
+            walked = rotate_layered_polygon(&walked, 90.0);
+            angle += 90.0;
+        }
+        assert_eq!(keys.len(), 1, "one shape at four rotations must produce one fingerprint, got {} - CATALOGUE_CACHE will miss every individual", keys.len());
+    }
+
+    /// The plan key saturates each pool count at `sheet_capacity`, so two
+    /// pools that both hold more copies than the sheet could ever take share
+    /// a key. Without it the count falls by a few every sheet and the key
+    /// almost never repeats.
+    #[test]
+    fn plan_keys_match_once_both_pools_exceed_what_the_sheet_can_hold() {
+        let bounds = sheet(350.0, 150.0);
+        let big: Vec<NestPart> = (0..500).map(|i| rect_part(i, 0, 100.0, 50.0)).collect();
+        let smaller: Vec<NestPart> = (0..60).map(|i| rect_part(i, 0, 100.0, 50.0)).collect();
+        let rules = PartRules::default();
+        let key_of = |parts: &[NestPart]| {
+            let shapes = shape_fingerprints(parts, 0.3, &rules);
+            let catalogue = cached_catalogue(parts, 0.3, &rules, &shapes);
+            plan_cache_key(bounds, &shapes, None, &catalogue)
+        };
+        assert_eq!(key_of(&big), key_of(&smaller), "500 and 60 copies are indistinguishable to a sheet that holds at most 9");
+
+        // ...and a pool genuinely small enough to constrain the search still
+        // keys apart, or the saturation would be hiding a real difference.
+        let tiny: Vec<NestPart> = (0..2).map(|i| rect_part(i, 0, 100.0, 50.0)).collect();
+        assert_ne!(key_of(&big), key_of(&tiny), "2 copies constrains the search and must not share a key with 500");
     }
 
     #[test]

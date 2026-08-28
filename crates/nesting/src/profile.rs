@@ -71,13 +71,14 @@ pub static ROTATE_PART: Phase = Phase::new("rotate part");
 pub static BANDED_PACK: Phase = Phase::new("banded pack_sheet");
 pub static BANDED_CATALOGUE: Phase = Phase::new("  of which: catalogue");
 pub static BANDED_SEARCH: Phase = Phase::new("  of which: search");
+pub static BANDED_FINGERPRINT: Phase = Phase::new("  of which: fingerprint");
 pub static BANDED_UNIFORM: Phase = Phase::new("  of which: uniform");
 pub static OVERLAP_VALIDATE: Phase = Phase::new("overlap validation");
 pub static TRY_PLACE: Phase = Phase::new("TOTAL try_place_part");
 pub static OBSTACLE_NFP_COMPUTE: Phase = Phase::new("  of which: compute");
 
 static ALL: &[&Phase] =
-    &[&OBSTACLE_NFP_LOOKUP, &OBSTACLE_SHIFT, &CLIP_DIFFERENCE, &CLIP_UNION, &INNER_NFP_LOOKUP, &CANDIDATE_SCORING, &CONTACT_INTERSECT, &CONTACT_PREP, &ROTATE_PART, &OBSTACLE_NFP_COMPUTE, &BANDED_PACK, &OVERLAP_VALIDATE, &TRY_PLACE, &BANDED_CATALOGUE, &BANDED_SEARCH, &BANDED_UNIFORM];
+    &[&OBSTACLE_NFP_LOOKUP, &OBSTACLE_SHIFT, &CLIP_DIFFERENCE, &CLIP_UNION, &INNER_NFP_LOOKUP, &CANDIDATE_SCORING, &CONTACT_INTERSECT, &CONTACT_PREP, &ROTATE_PART, &OBSTACLE_NFP_COMPUTE, &BANDED_PACK, &OVERLAP_VALIDATE, &TRY_PLACE, &BANDED_CATALOGUE, &BANDED_SEARCH, &BANDED_UNIFORM, &BANDED_FINGERPRINT];
 
 /// A plain event count, for questions of the form "how often is X already
 /// known" - no timing, just a tally.
@@ -112,7 +113,8 @@ pub static CANDIDATES_UNAFFECTED: Counter = Counter::new("  and score unchanged"
 pub static PLAN_CACHE_HIT: Counter = Counter::new("band plan cache hit");
 pub static PLAN_CACHE_MISS: Counter = Counter::new("band plan searched");
 
-static COUNTERS: &[&Counter] = &[&CANDIDATES_TOTAL, &CANDIDATES_REPEATED, &CANDIDATES_UNAFFECTED, &PLAN_CACHE_HIT, &PLAN_CACHE_MISS];
+pub static ACC_NFP_MISS: Counter = Counter::new("accumulator nfp miss (hits shared cache)");
+static COUNTERS: &[&Counter] = &[&CANDIDATES_TOTAL, &CANDIDATES_REPEATED, &CANDIDATES_UNAFFECTED, &PLAN_CACHE_HIT, &PLAN_CACHE_MISS, &ACC_NFP_MISS];
 
 /// Every counter as `(name, hits)`, in declaration order.
 #[must_use]
