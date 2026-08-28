@@ -893,17 +893,6 @@ pub fn pack_sheet(sheet_bounds: Bounds, parts: &[NestPart], curve_tolerance: f64
     // Seeded with the best single-height plan before the search, because the
     // search cannot be trusted to find it - see `uniform_plan`.
     let mut best = Plan::default();
-    let mut heights: Vec<f64> = catalogue.iter().filter(|u| u.width <= sheet_bounds.width && u.height <= sheet_bounds.height).map(|u| u.height).collect();
-    heights.sort_by(f64::total_cmp);
-    heights.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
-    crate::profile::BANDED_UNIFORM.time(|| {
-        for height in heights {
-            let plan = uniform_plan(sheet_bounds, parts, catalogue, height);
-            if plan.area > best.area {
-                best = plan;
-            }
-        }
-    });
     let plan_key = plan_cache_key(sheet_bounds, &shapes, anchor, catalogue);
     match PLAN_CACHE.lock().ok().and_then(|c| c.get(&plan_key).cloned()) {
         Some(bands) => {
@@ -914,6 +903,21 @@ pub fn pack_sheet(sheet_bounds: Bounds, parts: &[NestPart], curve_tolerance: f64
             best = Plan { bands, area: 0.0 };
         }
         None => {
+            // Seeded *inside the miss branch*: a cached plan replaces `best`
+            // wholesale, so seeding before the lookup is a `fill_band` per
+            // band per distinct height thrown away on every hit - and hits
+            // are the overwhelming majority.
+            let mut heights: Vec<f64> = catalogue.iter().filter(|u| u.width <= sheet_bounds.width && u.height <= sheet_bounds.height).map(|u| u.height).collect();
+            heights.sort_by(f64::total_cmp);
+            heights.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+            crate::profile::BANDED_UNIFORM.time(|| {
+                for height in heights {
+                    let plan = uniform_plan(sheet_bounds, parts, catalogue, height);
+                    if plan.area > best.area {
+                        best = plan;
+                    }
+                }
+            });
             let mut budget = NODE_BUDGET;
             crate::profile::BANDED_SEARCH.time(|| search(sheet_bounds, parts, catalogue, &mut pool, sheet_bounds.height, &mut Plan::default(), &mut best, &mut budget));
             crate::profile::PLAN_CACHE_MISS.add(1);
@@ -1066,10 +1070,10 @@ fn fill_band(
 
     loop {
         let origin = |u: &Unit| if previous.as_ref() == Some(u) { cursor_repeat } else { cursor };
-        let Some(chosen) = shape_options(catalogue, pool)
-            .into_iter()
+        let Some(chosen) = catalogue
+            .iter()
+            .filter(|u| pool.available(u.source_id) >= u.count())
             .filter(|&u| origin(u) + u.width <= right + f64::EPSILON && u.height <= band_height + f64::EPSILON)
-            .cloned()
             // **Occupancy of the band slice**, not raw area. Two orientations
             // of one shape have identical area, so an area score ties and any
             // width tie-break picks the *wider* one. In a 776.5-tall band that
@@ -1085,6 +1089,10 @@ fn fill_band(
                 let occupancy = |u: &Unit| u.area / (u.step * band_height).max(f64::MIN_POSITIVE);
                 occupancy(a).total_cmp(&occupancy(b)).then(a.area.total_cmp(&b.area))
             })
+            // Cloned *after* the pick, not before it: `max_by` over owned
+            // units cloned every candidate on every placement, and this loop
+            // runs once per unit of every band of every search node.
+            .cloned()
         else {
             break;
         };

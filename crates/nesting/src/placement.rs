@@ -976,6 +976,27 @@ impl PlaceOnSheetOutcome {
 type ContactObstacle = (Bounds, Vec<Point>, Option<(usize, i64)>);
 type TightFitNeighborhood = (Vec<ContactObstacle>, Vec<ContactObstacle>);
 
+/// The obstacle half of `tight_fit_neighborhood`, given a border band the
+/// caller already has.
+///
+/// **The band depends on the sheet alone.** Rebuilding it per part attempt -
+/// and, in the band top-up pass, per part *placed* - paid for
+/// `sheet_border_band`'s Clipper offset plus difference every time, for a
+/// polygon that cannot have changed. A sheet computes it once and hands it
+/// here.
+fn tight_fit_neighborhood_with_border(placed: &[PlacedObstacle], border: &[ContactObstacle], placement_type: PlacementType) -> TightFitNeighborhood {
+    if matches!(placement_type, PlacementType::TightFit | PlacementType::GravityTightFit | PlacementType::GravityCorrective) {
+        let parts: Vec<ContactObstacle> = placed
+            .iter()
+            .map(|o| (shift_points(&o.polygon.points, o.placement.x, o.placement.y), (o.source_id, crate::cache_key::normalize_rotation(o.rotation))))
+            .filter_map(|(p, id)| get_polygon_bounds(&p).map(|b| (b, p, Some(id))))
+            .collect();
+        (parts, border.to_vec())
+    } else {
+        (Vec::new(), Vec::new())
+    }
+}
+
 /// Builds `TightFit`'s "neighborhood", kept as two separate lists (not
 /// merged) so `tight_fit_contact_area` can weight contact against an
 /// already-placed part higher than contact against the empty sheet border -
@@ -1283,10 +1304,23 @@ pub(crate) fn try_place_part_on_sheet_accumulated(
     }
 
     // choose the placement that results in the smallest bounding box/hull etc.
+    //
+    // **Only for the scorers that read it.** `TightFit` scores contact alone
+    // and never looks at the placed set's aggregate bounds, but this ran on
+    // every call regardless - copying every already-placed part's every point
+    // into a fresh vector, once per part attempt per rotation, ~900k times on
+    // the test05 board row, for a value the branch below then ignored.
+    let needs_aggregate = match config.placement_type {
+        PlacementType::Gravity | PlacementType::Box | PlacementType::GravityTightFit | PlacementType::ConvexHull => true,
+        PlacementType::GravityCorrective => placed.len() <= 1,
+        PlacementType::TightFit => false,
+    };
     let mut all_points: Vec<Point> = Vec::new();
-    for obstacle in placed {
-        for pt in &obstacle.polygon.points {
-            all_points.push(Point::new(pt.x + obstacle.placement.x, pt.y + obstacle.placement.y));
+    if needs_aggregate {
+        for obstacle in placed {
+            for pt in &obstacle.polygon.points {
+                all_points.push(Point::new(pt.x + obstacle.placement.x, pt.y + obstacle.placement.y));
+            }
         }
     }
 
@@ -1479,7 +1513,16 @@ pub(crate) fn try_place_part_on_sheet_accumulated(
             if has_material_outside_sheet(&test_shifted, sheet) {
                 return true;
             }
-            placed.iter().any(|obstacle| has_material_overlap(&test_shifted, &shift_layered_polygon(&obstacle.polygon, obstacle.placement.x, obstacle.placement.y)))
+            let shifted_bounds = get_polygon_bounds(&test_shifted.points);
+            placed.iter().any(|obstacle| {
+                if let (Some(a), Some(b)) = (shifted_bounds, get_polygon_bounds(&obstacle.polygon.points)) {
+                    let b = Bounds { x: b.x + obstacle.placement.x, y: b.y + obstacle.placement.y, ..b };
+                    if !bounds_within_distance(&a, &b, 0.0) {
+                        return false;
+                    }
+                }
+                has_material_overlap(&test_shifted, &shift_layered_polygon(&obstacle.polygon, obstacle.placement.x, obstacle.placement.y))
+            })
         });
 
         if !is_overlapping {
@@ -1718,6 +1761,13 @@ pub fn place_parts(
         fitness += sheet_area;
 
         let mut placed: Vec<PlacedObstacle> = Vec::new();
+        // Once per sheet - see `tight_fit_neighborhood_with_border`.
+        let sheet_border: Vec<ContactObstacle> =
+            if matches!(config.placement_type, PlacementType::TightFit | PlacementType::GravityTightFit | PlacementType::GravityCorrective) {
+                sheet_border_band(sheet).into_iter().filter_map(|p| get_polygon_bounds(&p).map(|b| (b, p, None))).collect()
+            } else {
+                Vec::new()
+            };
         // One accumulator per sheet *per rotation slot*: `placed` below is
         // append-only for this sheet's whole scan and starts empty for the
         // next one, which is exactly `NfpAccumulator`'s contract.
@@ -1803,8 +1853,7 @@ pub fn place_parts(
             // job's search space isn't noisy enough for run-to-run luck to
             // explain the gap either way).
             if placed.is_empty() && config.rotations > 1 && matches!(config.placement_type, PlacementType::TightFit | PlacementType::GravityTightFit | PlacementType::GravityCorrective) {
-                let border_neighborhood: Vec<ContactObstacle> =
-                    sheet_border_band(sheet).into_iter().filter_map(|p| get_polygon_bounds(&p).map(|b| (b, p, None))).collect();
+                let border_neighborhood: &[ContactObstacle] = &sheet_border;
                 // Both are set from the first `rotation_steps` entry below,
                 // whose delta is always 0 - i.e. they start exactly where the
                 // part already is.
@@ -1869,7 +1918,7 @@ pub fn place_parts(
                                     if has_material_outside_sheet(&shifted, sheet) {
                                         continue;
                                     }
-                                    let contact = tight_fit_contact_area(&trial_probe, (parts[i].source_id, crate::cache_key::normalize_rotation(trial_rotation)), candidate, trial_bounds, &[], &border_neighborhood);
+                                    let contact = tight_fit_contact_area(&trial_probe, (parts[i].source_id, crate::cache_key::normalize_rotation(trial_rotation)), candidate, trial_bounds, &[], border_neighborhood);
                                     let better = match &best {
                                         None => true,
                                         Some((best_contact, best_pos, ..)) => {
@@ -2084,7 +2133,7 @@ pub fn place_parts(
             // Clipper offset/difference call `config.rotations` times over
             // for no reason - exactly the densely-packed-sheet workload this
             // rotation search itself targets.
-            let neighborhood = tight_fit_neighborhood(sheet, &placed, config.placement_type);
+            let neighborhood = tight_fit_neighborhood_with_border(&placed, &sheet_border, config.placement_type);
 
             // The rotations are evaluated in parallel, then reduced in slot
             // order. See `nfp_accumulators` for why the memo survives this,
@@ -2380,7 +2429,7 @@ pub fn place_parts(
                 let mut topup_accumulator = NfpAccumulator::default();
                 // Rebuilt only when a part lands, since that is the only thing
                 // the neighborhood depends on.
-                let mut neighborhood = tight_fit_neighborhood(sheet, &cand_placed, config.placement_type);
+                let mut neighborhood = tight_fit_neighborhood_with_border(&cand_placed, &sheet_border, config.placement_type);
                 for i in 0..parts.len() {
                     if rejected {
                         break;
@@ -2434,7 +2483,7 @@ pub fn place_parts(
                         cand_parts_out.push(PlacedPart { id: part_id, placement: result.position, rotation });
                         cand_placed.push(PlacedObstacle { polygon: polygon.clone(), id: part_id, source_id: part_source_id, rotation, placement: result.position });
                         rotated_parts.push((i, polygon, rotation));
-                        neighborhood = tight_fit_neighborhood(sheet, &cand_placed, config.placement_type);
+                        neighborhood = tight_fit_neighborhood_with_border(&cand_placed, &sheet_border, config.placement_type);
                     }
                 }
 
