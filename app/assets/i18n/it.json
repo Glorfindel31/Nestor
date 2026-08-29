@@ -5,6 +5,7 @@
   "btn_browse": "SFOGLIA...",
   "dropzone_text": "oppure trascina qui uno o più file .dxf/.svg",
   "rect_hint": "oppure aggiungi direttamente un rettangolo (una misura di lamiera, o un pezzo rettangolare semplice) senza file DXF/SVG:",
+  "samples_hint": "oppure carica un lavoro di esempio: pezzi di prova più una lamiera, pronto da annidare:",
   "rect_width_label": "LARGHEZZA (mm)",
   "rect_height_label": "ALTEZZA (mm)",
   "rect_layer_label": "NOME LAYER",

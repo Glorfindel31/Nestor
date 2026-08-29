@@ -5,6 +5,7 @@
   "btn_browse": "DURCHSUCHEN...",
   "dropzone_text": "oder eine oder mehrere .dxf/.svg-Dateien hierher ziehen",
   "rect_hint": "oder direkt ein Rechteck hinzufügen (ein Tafelmaß oder ein einfaches rechteckiges Teil) ohne DXF/SVG-Datei:",
+  "samples_hint": "oder ein Beispielprojekt laden - Musterteile samt Blechtafel, sofort schachtelbar:",
   "rect_width_label": "BREITE (mm)",
   "rect_height_label": "HÖHE (mm)",
   "rect_layer_label": "LAYERNAME",

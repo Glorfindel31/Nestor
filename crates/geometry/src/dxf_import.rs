@@ -267,12 +267,23 @@ const MIN_ARC_SEGMENTS: u32 = 2;
 /// `curve_tolerance` on a huge-radius circle can't runaway-allocate.
 const MAX_ARC_SEGMENTS: u32 = 720;
 
+/// Ceiling on the chord error as a fraction of the arc's own radius. A flat
+/// `curve_tolerance` is a sane budget for a 200mm curve and a disaster for a
+/// 2mm fillet: at the 0.3mm default, a 3mm rounded corner is allowed 10% of
+/// its radius in error and collapses to two chords. Capping the tolerance at
+/// 2% of the radius (~7 segments on a 90 degree corner, whatever its size)
+/// makes the budget scale with the feature instead of the drawing.
+const MAX_RELATIVE_SAGITTA: f64 = 0.02;
+
 /// The max angular step (radians) that keeps the chord-to-arc sagitta error
 /// within `tolerance` for the given `radius` (basic circular chord-error
-/// bound: error ~= r*(1 - cos(dtheta/2))).
+/// bound: error ~= r*(1 - cos(dtheta/2))). The tolerance actually applied is
+/// the tighter of `tolerance` and `MAX_RELATIVE_SAGITTA * radius`, so small
+/// curves are never flattened by a budget meant for big ones.
 fn arc_step_angle(radius: f64, tolerance: f64) -> f64 {
     let r = radius.abs().max(1e-9);
-    let ratio = (1.0 - (tolerance / r)).clamp(-1.0, 1.0);
+    let tol = tolerance.min(MAX_RELATIVE_SAGITTA * r);
+    let ratio = (1.0 - (tol / r)).clamp(-1.0, 1.0);
     (2.0 * ratio.acos()).max(0.001)
 }
 
@@ -1163,6 +1174,25 @@ mod tests {
     use super::*;
     use dxf::entities::{Arc, Circle as DxfCircle, EntityCommon, LwPolyline};
     use dxf::{LwPolylineVertex, Point as DxfPoint};
+
+    /// A small fillet must not be flattened by a tolerance sized for the
+    /// whole drawing: the chord error stays within `MAX_RELATIVE_SAGITTA` of
+    /// the arc's own radius, however loose `curve_tolerance` is.
+    #[test]
+    fn tessellation_error_stays_relative_to_the_arc_radius() {
+        for radius in [0.5, 2.0, 3.0, 25.0, 500.0] {
+            for tolerance in [0.05, 0.3, 5.0] {
+                let n = segment_count(std::f64::consts::FRAC_PI_2, radius, tolerance);
+                let step = std::f64::consts::FRAC_PI_2 / f64::from(n);
+                let sagitta = radius * (1.0 - (step / 2.0).cos());
+                assert!(
+                    sagitta <= radius * MAX_RELATIVE_SAGITTA + 1e-9,
+                    "r={radius} tol={tolerance}: {n} segments leave a {sagitta}mm error, over {}% of the radius",
+                    MAX_RELATIVE_SAGITTA * 100.0
+                );
+            }
+        }
+    }
 
     fn entity(layer: &str, specific: EntityType) -> Entity {
         Entity {

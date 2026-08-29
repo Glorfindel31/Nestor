@@ -5,6 +5,7 @@
   "btn_browse": "찾아보기...",
   "dropzone_text": "또는 .dxf/.svg 파일을 하나 이상 여기로 끌어다 놓으세요",
   "rect_hint": "또는 DXF/SVG 파일 없이 직사각형을 직접 추가합니다(원자재 크기, 또는 단순한 직사각형 부품):",
+  "samples_hint": "또는 샘플 작업 불러오기 - 테스트 부품과 원자재 시트, 바로 네스팅 가능:",
   "rect_width_label": "가로 (mm)",
   "rect_height_label": "세로 (mm)",
   "rect_layer_label": "레이어 이름",

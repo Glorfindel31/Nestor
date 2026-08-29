@@ -3,10 +3,39 @@
 
 use egui::RichText;
 
-use super::{console, shell, theme, App};
+use super::{console, shell, state, theme, App};
 use crate::dto::{PointDto, PolygonDto};
 
 const FILTER: [&str; 2] = ["dxf", "svg"];
+
+/// A one-click sample job: fixture parts plus the stock sheet they were
+/// measured on. The files are the repo's own benchmark fixtures - the same
+/// ones `bench.sh` drives - embedded in the binary, so a fresh install has
+/// something real to nest without hunting for a DXF, and a "is it slow for
+/// you too?" question has a shared starting point.
+struct Preset {
+    /// Untranslated on purpose: these name fixtures, not UI concepts.
+    name: &'static str,
+    hint: &'static str,
+    files: &'static [(&'static str, &'static [u8])],
+    sheet: (f64, f64),
+    qty: usize,
+}
+
+/// `include_bytes!` rather than reading `tests/fixtures/` at runtime: the
+/// shipped binary has no repo next to it.
+macro_rules! fixture {
+    ($name:literal) => {
+        ($name, include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/", $name)) as &[u8])
+    };
+}
+
+const PRESETS: [Preset; 4] = [
+    Preset { name: "TILE", hint: "one interlocking tile x60 - the shape the engine nests densest", files: &[fixture!("one.dxf")], sheet: (1500.0, 1500.0), qty: 60 },
+    Preset { name: "MIX", hint: "two unrelated profiles x40 each - tests mixing parts on a sheet", files: &[fixture!("two.dxf"), fixture!("three.dxf")], sheet: (2440.0, 1220.0), qty: 40 },
+    Preset { name: "BENCH", hint: "the four benchmark parts x100 each - the job bench.sh measures", files: &[fixture!("nestTest01.dxf"), fixture!("nestTest02.dxf"), fixture!("nestTest03.dxf"), fixture!("nestTest04.dxf")], sheet: (1500.0, 1500.0), qty: 100 },
+    Preset { name: "CURVES", hint: "small fillets and splines x30 - tests curve tessellation", files: &[fixture!("fillets.dxf"), fixture!("curvy.dxf")], sheet: (500.0, 500.0), qty: 30 },
+];
 
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     shell::panel_frame(ui, |ui| {
@@ -58,6 +87,17 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
             ui.add(egui::TextEdit::singleline(&mut app.rect_layer).desired_width(110.0));
             if ui.add_enabled(!app.controls_locked(), egui::Button::new(app.t("btn_add_rect"))).clicked() {
                 add_rectangle(app);
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.label(RichText::new(app.t("samples_hint")).color(theme::DIM()).small());
+        ui.horizontal(|ui| {
+            let enabled = app.importing == 0 && !app.controls_locked();
+            for preset in &PRESETS {
+                if ui.add_enabled(enabled, egui::Button::new(preset.name)).on_hover_text(preset.hint).clicked() {
+                    load_preset(app, preset);
+                }
             }
         });
 
@@ -168,6 +208,39 @@ pub fn svg_unit_dialog(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// Unpacks a preset's embedded fixtures next to each other in the temp
+/// directory and imports them through the same path a browsed file takes -
+/// nothing downstream can tell a sample job from a real one.
+///
+/// The sheet comes with the job: a "sample" that still needs the user to
+/// guess a stock size before it will nest isn't one click, it's three.
+fn load_preset(app: &mut App, preset: &Preset) {
+    let dir = std::env::temp_dir().join("rustynesting-samples");
+    let mut paths = Vec::with_capacity(preset.files.len());
+    for (name, bytes) in preset.files {
+        let path = dir.join(name);
+        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, bytes)) {
+            app.import_status.err(format!("couldn't unpack {name}: {e}"));
+            return;
+        }
+        paths.push(path);
+    }
+
+    app.rect_w = preset.sheet.0;
+    app.rect_h = preset.sheet.1;
+    app.rect_layer = "SHEET".to_string();
+    add_rectangle(app);
+    if let Some(row) = app.shapes.last_mut() {
+        row.role = state::Role::Sheet;
+    }
+
+    // Applied to each row as it lands, in `Msg::Imported` - the import is
+    // asynchronous, so there is nothing to set a quantity on yet.
+    app.preset_qty = Some(preset.qty);
+    app.console.log(console::Kind::Plain, format!("sample job {}: {} file(s) on a {}x{} sheet", preset.name, preset.files.len(), preset.sheet.0, preset.sheet.1));
+    dispatch(app, paths, None);
+}
+
 /// A stock sheet size (or a plain rectangular part) that isn't in any DXF on
 /// hand. Pushed onto the same shape list an import feeds, so it flows through
 /// role/quantity/nest/export unchanged.
@@ -188,6 +261,25 @@ fn add_rectangle(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every preset file must be a real, importable drawing. `include_bytes!`
+    /// only proves the path existed at compile time - this proves the bytes
+    /// still parse, which is what a user clicking the button finds out.
+    #[test]
+    fn every_preset_ships_files_that_import() {
+        let dir = std::env::temp_dir().join("rustynesting-samples-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        for preset in &PRESETS {
+            assert!(!preset.files.is_empty(), "{} has no files", preset.name);
+            assert!(preset.sheet.0 > 0.0 && preset.sheet.1 > 0.0, "{} has no sheet", preset.name);
+            for (name, bytes) in preset.files {
+                let path = dir.join(name);
+                std::fs::write(&path, bytes).expect("unpack");
+                let shapes = crate::commands::import_dxf(path.to_str().unwrap(), 0.3).unwrap_or_else(|e| panic!("{name} ({}) failed to import: {e}", preset.name));
+                assert!(!shapes.is_empty(), "{name} imported no shapes");
+            }
+        }
+    }
 
     /// The rectangle builder is the one place the UI creates geometry rather
     /// than receiving it, so its winding and extent have to be right or every

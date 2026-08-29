@@ -161,3 +161,30 @@ fn the_hat_fixture_imports_as_one_exact_thirteen_vertex_tile() {
     let area = polygon_area(&tree[0].points).abs();
     assert!((area - 779.4).abs() < 0.5, "hat area drifted: {area}");
 }
+
+/// `fillets.dxf` is a 60x40 plate whose curves are deliberately small: 2mm
+/// corner radii, a 1mm-radius square hole and a 0.75mm notch. At the app's
+/// default 0.3mm `curve_tolerance` a flat error budget lets every one of them
+/// collapse to a two-chord approximation - the plate came in 1.25mm2 light
+/// and the notch lost 15% of its area. `arc_step_angle`'s relative-sagitta
+/// cap is what keeps the error proportional to each arc's own radius, so this
+/// asserts the imported area at the *loose* tolerance, which is the setting
+/// the bug lived at.
+#[test]
+fn small_fillets_survive_a_loose_curve_tolerance() {
+    let drawing = Drawing::load_file(fixture_path("fillets.dxf")).expect("fillets.dxf must parse");
+    let tree = build_polygon_tree(entities_to_polygons(drawing.entities(), 0.3));
+    assert_eq!(tree.len(), 1, "the plate is one profile with two holes");
+
+    // 60x40 less four quarter-circles of r=2 cut off its corners.
+    let true_area = 60.0 * 40.0 - 4.0 * (4.0 - std::f64::consts::PI);
+    let area = polygon_area(&tree[0].points).abs();
+    assert!((area - true_area).abs() < true_area * 0.001, "outline area {area} is off {true_area} by more than 0.1%");
+
+    // The 0.75mm-radius notch: the smallest curve in the file, and the one a
+    // flat tolerance mangles worst.
+    let notch = tree[0].children.iter().min_by(|a, b| polygon_area(&a.points).abs().total_cmp(&polygon_area(&b.points).abs())).expect("the plate has holes");
+    let true_notch = 1.5 * 1.5 + std::f64::consts::PI * 0.75 * 0.75;
+    let notch_area = polygon_area(&notch.points).abs();
+    assert!((notch_area - true_notch).abs() < true_notch * 0.02, "notch area {notch_area} is off {true_notch} by more than 2%");
+}

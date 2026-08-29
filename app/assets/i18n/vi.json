@@ -5,6 +5,7 @@
   "btn_browse": "DUYỆT TỆP...",
   "dropzone_text": "hoặc kéo thả một hoặc nhiều tệp .dxf/.svg vào đây",
   "rect_hint": "hoặc thêm trực tiếp một hình chữ nhật (kích thước tấm phôi, hoặc một chi tiết chữ nhật đơn giản) mà không cần tệp DXF/SVG:",
+  "samples_hint": "hoặc tải một công việc mẫu - các chi tiết thử nghiệm kèm tấm phôi, sẵn sàng để xếp:",
   "rect_width_label": "CHIỀU RỘNG (mm)",
   "rect_height_label": "CHIỀU CAO (mm)",
   "rect_layer_label": "TÊN LỚP",

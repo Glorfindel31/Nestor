@@ -5,6 +5,7 @@
   "btn_browse": "BROWSE...",
   "dropzone_text": "or drag one or more .dxf/.svg files here",
   "rect_hint": "or add a rectangle directly (a stock sheet size, or a simple rectangular part) without a DXF/SVG file:",
+  "samples_hint": "or load a sample job - fixture parts plus a stock sheet, ready to nest:",
   "rect_width_label": "WIDTH (mm)",
   "rect_height_label": "HEIGHT (mm)",
   "rect_layer_label": "LAYER NAME",

@@ -5,6 +5,7 @@
   "btn_browse": "参照...",
   "dropzone_text": "または .dxf / .svg ファイルをここにドラッグしてください",
   "rect_hint": "または DXF / SVG ファイルなしで長方形を直接追加します（母材のサイズ、または単純な長方形の部品）:",
+  "samples_hint": "またはサンプルジョブを読み込みます - テスト用部品と母材シート、そのままネスティング可能:",
   "rect_width_label": "幅 (mm)",
   "rect_height_label": "高さ (mm)",
   "rect_layer_label": "レイヤー名",

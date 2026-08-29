@@ -5,6 +5,7 @@
   "btn_browse": "浏览...",
   "dropzone_text": "或将一个或多个 .dxf/.svg 文件拖到此处",
   "rect_hint": "或不用 DXF/SVG 文件，直接添加一个矩形（一块板材尺寸，或一个简单的矩形零件）：",
+  "samples_hint": "或载入示例作业 - 测试零件加一张母板，可直接排样：",
   "rect_width_label": "宽度 (mm)",
   "rect_height_label": "高度 (mm)",
   "rect_layer_label": "图层名称",

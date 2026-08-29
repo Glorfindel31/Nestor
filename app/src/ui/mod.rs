@@ -263,6 +263,9 @@ pub struct App {
     /// request (which would have to exactly mirror `expand_parts`'s id
     /// assignment, and would silently drift the moment either side changed).
     parts_by_id: HashMap<usize, PolygonDto>,
+    /// Quantity to stamp on every row of the sample job currently importing
+    /// (`import::load_preset`), cleared when that batch finishes.
+    preset_qty: Option<usize>,
     part_rules: HashMap<usize, PartRuleDto>,
     /// Which library entry each *expanded* sheet came from, index-aligned with
     /// the `sheets` of the run in flight. Built at the same time and in the
@@ -379,6 +382,7 @@ impl App {
             history: Vec::new(),
             history_index: 0,
             parts_by_id: Default::default(),
+            preset_qty: None,
             part_rules: Default::default(),
             sheet_origin: Vec::new(),
             result_sheets: Vec::new(),
@@ -475,6 +479,11 @@ impl App {
                 self.imported_this_batch += shapes.len();
                 for poly in shapes {
                     self.push_shape(file.clone(), poly);
+                    // A sample job's parts arrive at the quantity that makes
+                    // it a job rather than a single lonely part.
+                    if let (Some(qty), Some(row)) = (self.preset_qty, self.shapes.last_mut()) {
+                        row.qty = qty;
+                    }
                 }
             }
             Msg::ImportFailed { file, error } => {
@@ -482,6 +491,7 @@ impl App {
             }
             Msg::ImportBatchDone { ok, failed } => {
                 self.importing = 0;
+                self.preset_qty = None;
                 let imported = std::mem::take(&mut self.imported_this_batch);
                 if ok == 0 {
                     self.import_status.err(self.t("import_status_none"));
