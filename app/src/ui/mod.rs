@@ -563,6 +563,16 @@ impl App {
                 self.live = None;
                 self.live_ghost = None;
 
+                // Rung for a failure too, and deliberately: the operator who
+                // walked away needs to know the wait is over, not that it went
+                // well. The one case that stays silent is a cancel, because
+                // the only way to cancel is to be sitting at the window with a
+                // hand on the button.
+                let cancelled = matches!(&*result, Ok(r) if r.cancelled);
+                if self.prefs.sound_on_finish && !cancelled {
+                    crate::sound::finished();
+                }
+
 
                 match *result {
                     Ok(response) => {

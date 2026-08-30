@@ -4,6 +4,15 @@
 //! are job parameters a shop-floor operator sets, not developer knobs, and
 //! several of them (dominant threshold, rotations, runs) do something
 //! non-obvious enough that the tooltip is the only explanation there is.
+//!
+//! **Four options carry a `+` box and an on/off switch**: rotations,
+//! population, mutation and generations. Those are the search's own budget,
+//! and the `runs` loop spends more of it on each successive attempt - the box
+//! is how much more, the switch is whether that option joins in at all. The
+//! escalation used to be hardcoded at +1 / +4 / +5 with mutation flat, and the
+//! defaults still are exactly that. Nothing else in the panel gets one: see
+//! `dto::RunScales` for why growing a *job* parameter like margin or kerf
+//! between attempts would mean comparing two different jobs.
 
 use egui::RichText;
 
@@ -36,7 +45,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         // See `shell::help_bubble`.
         let cleanup_row = ui
             .horizontal(|ui| {
-                let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("cleanup_label")).color(theme::DIM())));
+                let name = ui.add_sized([shell::LABEL_W, 20.0], egui::Label::new(RichText::new(t("cleanup_label")).color(theme::DIM())));
                 let field = ui.add(egui::TextEdit::singleline(&mut app.cfg.cleanup_threshold).desired_width(70.0).hint_text(t("cleanup_placeholder")));
                 name.union(field)
             })
@@ -75,11 +84,13 @@ fn advanced(app: &mut App, ui: &mut egui::Ui) {
         super::i18n::t(lang, k)
     }
     let t = |k: &'static str| tr(lang, k);
+    let step_tip = t("scale_step_tooltip");
+    let switch_tip = t("scale_switch_tooltip");
     ui.separator();
 
     let placement_row = ui
         .horizontal(|ui| {
-            let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("placement_label")).color(theme::DIM())));
+            let name = ui.add_sized([shell::LABEL_W, 20.0], egui::Label::new(RichText::new(t("placement_label")).color(theme::DIM())));
             let options: Vec<PlacementTypeDto> = PLACEMENT_TYPES.iter().map(|(v, _)| *v).collect();
             let combo = shell::choice(ui, "placement", &mut app.cfg.placement_type, &options, |v| {
                 PLACEMENT_TYPES.iter().find(|(o, _)| *o == v).map(|(_, k)| t(k).to_string()).unwrap_or_default()
@@ -90,20 +101,30 @@ fn advanced(app: &mut App, ui: &mut egui::Ui) {
     shell::help_bubble(placement_row, t("placement_label"), t("placement_tooltip"));
     ui.label(RichText::new(t("placement_hint")).color(theme::DIM()).small());
 
+    // The four the `runs` escalation is allowed to grow, and the only rows in
+    // the panel with a `+` box and a switch.
+    //
     // The rotation grid is left exactly as the engine takes it, including the
     // known quirk that `rotations = 6` produces poor angles for rectangular
     // parts (confirmed by a 60-run sweep). It stays a user-facing setting
     // rather than being silently corrected - a shop that has tuned around it
     // must keep getting the same result.
-    shell::number_row(ui, t("rotations_label"), t("rotations_tooltip"), &mut app.cfg.rotations, 0.1, 1..=64);
-    shell::number_row(ui, t("population_label"), t("population_tooltip"), &mut app.cfg.population_size, 0.1, 2..=1000);
-    shell::number_row(ui, t("mutation_label"), t("mutation_tooltip"), &mut app.cfg.mutation_rate, 0.5, 0.0..=100.0);
+    shell::scale_row(ui, t("rotations_label"), t("rotations_tooltip"), step_tip, switch_tip, &mut app.cfg.rotations, 0.1, 1..=64, &mut app.cfg.scales.rotations);
+    shell::scale_row(ui, t("population_label"), t("population_tooltip"), step_tip, switch_tip, &mut app.cfg.population_size, 0.1, 2..=1000, &mut app.cfg.scales.population);
+    shell::scale_row(ui, t("mutation_label"), t("mutation_tooltip"), step_tip, switch_tip, &mut app.cfg.mutation_rate, 0.5, 0.0..=100.0, &mut app.cfg.scales.mutation);
+    shell::scale_row(ui, t("generations_label"), t("generations_tooltip"), step_tip, switch_tip, &mut app.cfg.generations, 0.2, 1..=10_000, &mut app.cfg.scales.generations);
+    // Said once under the group rather than in four tooltips nobody hovers:
+    // with RUNS at 1 there is no second attempt for any of this to apply to.
+    ui.label(
+        RichText::new(if app.cfg.runs > 1 { t("scale_hint") } else { t("scale_hint_single_run") })
+            .color(if app.cfg.runs > 1 { theme::DIM() } else { theme::ACCENT() })
+            .small(),
+    );
     ui.label(RichText::new(t("mutation_hint")).color(theme::DIM()).small());
-    shell::number_row(ui, t("generations_label"), t("generations_tooltip"), &mut app.cfg.generations, 0.2, 1..=10_000);
 
     let dominant_row = ui
         .horizontal(|ui| {
-            let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(t("dominant_label")).color(theme::DIM())));
+            let name = ui.add_sized([shell::LABEL_W, 20.0], egui::Label::new(RichText::new(t("dominant_label")).color(theme::DIM())));
             let slider = ui.add(egui::Slider::new(&mut app.cfg.dominant_threshold, 0.01..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
             name.union(slider)
         })

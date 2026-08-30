@@ -18,7 +18,7 @@
 use std::time::Instant;
 
 use rustynesting::commands;
-use rustynesting::dto::{ExportRequest, NestConfigDto, PartDto, PlacementTypeDto, PointDto, PolygonDto, RunNestRequest};
+use rustynesting::dto::{ExportRequest, NestConfigDto, PartDto, PlacementTypeDto, PointDto, PolygonDto, RunNestRequest, RunScales};
 
 const USAGE: &str = "\
 nest - headless nesting
@@ -114,6 +114,8 @@ impl Default for Options {
                 runs: 1,
                 cleanup_threshold_percent: None,
                 mirror: false,
+                // The same escalation the window ships with.
+                scales: RunScales::default(),
             },
         }
     }

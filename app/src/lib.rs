@@ -15,6 +15,7 @@
 pub mod commands;
 pub mod dto;
 pub mod paths;
+pub mod sound;
 pub mod update;
 mod ui;
 mod worker;

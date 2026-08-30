@@ -31,7 +31,7 @@ use nesting::repack;
 
 use crate::dto::{
     expand_parts, BestResultDto, ExpandedParts, PartRuleDto, ReportRequest, ValidatePlacementRequest, ValidatePlacementResponse, ExportRequest, NestConfigDto, NestRunCompleteDto, NestRunStartDto, NestSnapshotDto,
-    PlacedPartDto, PolygonDto, RepackSheetRequest, RepackSheetResponse, RunNestRequest, RunNestResponse, SheetPlacementDto,
+    PlacedPartDto, PolygonDto, RepackSheetRequest, RepackSheetResponse, RunNestRequest, RunNestResponse, RunScales, SheetPlacementDto,
 };
 
 /// Shared per-process nest-run state, managed Tauri state
@@ -1007,28 +1007,25 @@ fn to_placements_dto(placements: Vec<nesting::placement::SheetPlacement>) -> Vec
         .collect()
 }
 
-/// Auto-escalation step sizes for the "Runs" loop (see `NestConfigDto::runs`'s
-/// own doc comment for the user-facing framing): each successive run tries
-/// one more rotation angle than the last, plus a proportionally larger
-/// population/generation budget so it can actually search that wider grid,
-/// not just try more angles once with the same shallow search. Plain linear
-/// growth, not anything self-tuning - simple and predictable beats clever
-/// here; revisit with real multi-job benchmark data if it proves too
-/// aggressive/conservative in practice.
-/// `pub` so `ui::state::ConfigForm::search_cost_multiple` can price a run
-/// with the real numbers instead of a second, hand-synced copy of them.
-pub const RUN_POPULATION_STEP: usize = 4;
-pub const RUN_GENERATIONS_STEP: usize = 5;
-
-/// This run's rotations/population_size/generations, escalated from
-/// `request.config`'s own values (this escalation's *starting* point,
-/// 0-indexed `run_index` away) per `RUN_POPULATION_STEP`/`RUN_GENERATIONS_STEP`
-/// above.
-fn escalated_run_config(base_ga_config: &GaConfig, base_generations: usize, run_index: usize, total_runs: usize) -> (GaConfig, usize) {
-    let rotations = base_ga_config.rotations + run_index as u32;
+/// This run's rotations/population_size/mutation_rate/generations, escalated
+/// from `request.config`'s own values (this escalation's *starting* point,
+/// 0-indexed `run_index` away).
+///
+/// **The step sizes are configuration now, not constants.** Each of the four
+/// knobs carries its own `RunScale` (`dto::NestConfigDto::rotations_scale` and
+/// friends): whether it escalates at all, and by how much per run. The
+/// defaults reproduce the escalation this used to hardcode - +1 rotation, +4
+/// population, +5 generations, mutation flat - so nothing changes for a caller
+/// that does not set them. Plain linear growth, not anything self-tuning:
+/// simple and predictable beats clever, and now a shop that disagrees can just
+/// say so instead of waiting for a rebuild.
+fn escalated_run_config(scales: RunScales, base_ga_config: &GaConfig, base_generations: usize, run_index: usize, total_runs: usize) -> (GaConfig, usize) {
+    let rotations = base_ga_config.rotations + scales.rotations.growth(run_index);
     let ga_config = GaConfig {
-        population_size: base_ga_config.population_size + run_index * RUN_POPULATION_STEP,
-        mutation_rate: base_ga_config.mutation_rate,
+        population_size: base_ga_config.population_size + scales.population.growth(run_index) as usize,
+        // Clamped because it is a percentage, and an escalation left running
+        // long enough would otherwise walk it past 100 into nonsense.
+        mutation_rate: (base_ga_config.mutation_rate + f64::from(scales.mutation.growth(run_index))).clamp(0.0, 100.0),
         rotations,
         // With `mirror` on, run 1 is deliberately still run *without* it, so
         // the escalation always measures a real un-flipped baseline and
@@ -1042,7 +1039,7 @@ fn escalated_run_config(base_ga_config: &GaConfig, base_generations: usize, run_
         mirror: base_ga_config.mirror && (run_index > 0 || total_runs == 1),
         part_rules: base_ga_config.part_rules.clone(),
     };
-    let generations = base_generations + run_index * RUN_GENERATIONS_STEP;
+    let generations = base_generations + scales.generations.growth(run_index) as usize;
     (ga_config, generations)
 }
 
@@ -1124,6 +1121,7 @@ pub fn run_nest_with_progress(
     let seed = request.config.seed;
     let total_runs = request.config.runs;
     let cleanup_threshold = request.config.cleanup_threshold_percent;
+    let scales = request.config.scales;
 
     let PreparedNestInputs { sheets, parts_by_id, parts_by_id_dto, shape_ids, adam, placement_config, part_rules } = prepare_nest_inputs(request)?;
     // Handed over before any placement starts - see `on_parts_ready` above.
@@ -1203,7 +1201,7 @@ pub fn run_nest_with_progress(
             overall_cancelled = true;
             break;
         }
-        let (run_ga_config, generations_for_run) = escalated_run_config(&base_ga_config, base_generations, run_index, total_runs);
+        let (run_ga_config, generations_for_run) = escalated_run_config(scales, &base_ga_config, base_generations, run_index, total_runs);
         let mut run_placement_config = placement_config.clone();
         run_placement_config.rotations = run_ga_config.rotations;
 
@@ -1525,6 +1523,7 @@ mod tests {
 
     fn config(generations: usize) -> NestConfigDto {
         NestConfigDto {
+            scales: RunScales::default(),
             placement_type: PlacementTypeDto::Gravity,
             rotations: 1,
             population_size: 6,
@@ -2095,8 +2094,8 @@ mod tests {
         let completes = completes.into_inner().unwrap();
 
         // 3 runs configured: rotations 2,3,4 / population 2,6,10 /
-        // generations 8,13,18 - each escalating by RUN_POPULATION_STEP/
-        // RUN_GENERATIONS_STEP per run, matching `escalated_run_config`.
+        // generations 8,13,18 - each escalating by its own `RunScale`'s
+        // default step per run, matching `escalated_run_config`.
         assert_eq!(starts.len(), 3);
         assert_eq!(completes.len(), 3);
         for (i, start) in starts.iter().enumerate() {
@@ -2974,18 +2973,73 @@ mod tests {
         }
     }
 
+    /// The defaults must reproduce, exactly, the escalation that used to be
+    /// hardcoded here: +1 rotation, +4 population, +5 generations per run,
+    /// mutation flat. An existing `config.json` predates the field entirely
+    /// and takes these, so anything else silently renests every saved job
+    /// differently.
+    #[test]
+    fn the_default_scales_are_the_escalation_that_used_to_be_hardcoded() {
+        let base = GaConfig { population_size: 6, mutation_rate: 10.0, rotations: 2, mirror: false, part_rules: Default::default() };
+        let steps: Vec<(u32, usize, f64, usize)> = (0..4)
+            .map(|i| {
+                let (ga, gens) = escalated_run_config(RunScales::default(), &base, 5, i, 4);
+                (ga.rotations, ga.population_size, ga.mutation_rate, gens)
+            })
+            .collect();
+
+        assert_eq!(steps[0], (2, 6, 10.0, 5), "the first run is the baseline and must never escalate");
+        assert_eq!(steps[1], (3, 10, 10.0, 10));
+        assert_eq!(steps[2], (4, 14, 10.0, 15));
+        assert_eq!(steps[3], (5, 18, 10.0, 20));
+    }
+
+    /// A knob switched off stays flat however many runs the escalation makes,
+    /// and one switched on grows by the step it was actually given rather
+    /// than by a constant.
+    #[test]
+    fn switching_a_scale_off_holds_that_knob_flat_across_every_run() {
+        let base = GaConfig { population_size: 6, mutation_rate: 10.0, rotations: 2, mirror: false, part_rules: Default::default() };
+        let scales = RunScales {
+            rotations: crate::dto::RunScale::new(false, 9),
+            population: crate::dto::RunScale::new(true, 1),
+            mutation: crate::dto::RunScale::new(true, 3),
+            generations: crate::dto::RunScale::new(false, 9),
+        };
+
+        for run in 0..4 {
+            let (ga, generations) = escalated_run_config(scales, &base, 5, run, 4);
+            assert_eq!(ga.rotations, 2, "rotations is switched off; its step of 9 must not be applied on run {run}");
+            assert_eq!(generations, 5, "generations is switched off, so every run gets the base budget");
+            assert_eq!(ga.population_size, 6 + run, "population grows by its own step of 1, not by the old constant 4");
+            assert!((ga.mutation_rate - (10.0 + 3.0 * run as f64)).abs() < 1e-9, "mutation must escalate once switched on");
+        }
+    }
+
+    /// Mutation is a percentage. Enough runs at any step walks it past 100,
+    /// where it stops meaning anything - the growth has to stop at the top of
+    /// the range rather than handing the GA a nonsense rate.
+    #[test]
+    fn an_escalating_mutation_rate_stops_at_a_hundred_percent() {
+        let base = GaConfig { population_size: 6, mutation_rate: 90.0, rotations: 2, mirror: false, part_rules: Default::default() };
+        let scales = RunScales { mutation: crate::dto::RunScale::new(true, 25), ..RunScales::default() };
+
+        let rates: Vec<f64> = (0..4).map(|i| escalated_run_config(scales, &base, 5, i, 4).0.mutation_rate).collect();
+        assert_eq!(rates, vec![90.0, 100.0, 100.0, 100.0]);
+    }
+
     /// "Flip allowed" must not mean "flip-free never tried": the first of
     /// several runs stays un-mirrored so the escalation has a real baseline
     /// to compare against - unless there is only one run to give.
     #[test]
     fn mirror_leaves_the_first_run_of_several_un_mirrored() {
         let base = GaConfig { population_size: 6, mutation_rate: 10.0, rotations: 2, mirror: true, part_rules: Default::default() };
-        let mirrors: Vec<bool> = (0..3).map(|i| escalated_run_config(&base, 5, i, 3).0.mirror).collect();
+        let mirrors: Vec<bool> = (0..3).map(|i| escalated_run_config(RunScales::default(), &base, 5, i, 3).0.mirror).collect();
         assert_eq!(mirrors, vec![false, true, true]);
-        assert!(escalated_run_config(&base, 5, 0, 1).0.mirror, "a single-run job must still honour the setting");
+        assert!(escalated_run_config(RunScales::default(), &base, 5, 0, 1).0.mirror, "a single-run job must still honour the setting");
 
         let off = GaConfig { mirror: false, ..base };
-        assert!((0..3).all(|i| !escalated_run_config(&off, 5, i, 3).0.mirror));
+        assert!((0..3).all(|i| !escalated_run_config(RunScales::default(), &off, 5, i, 3).0.mirror));
     }
 
     /// Per-part mirror override, both directions, in one job - the whole

@@ -197,22 +197,70 @@ impl Cell {
     }
 }
 
+/// One table row: its cells, and an optional part outline to draw as a
+/// thumbnail at that x.
+type Row = (Vec<Cell>, Option<(f64, LayeredPolygon)>);
+
 /// A bordered table: header band, a dashed rule under it, body rows, a solid
 /// rule, then a totals row. Draws itself top-down from `y_top` and reports
 /// where it ended so the next block can follow.
+///
+/// A table longer than the page it starts on **splits** across pages rather
+/// than running off the bottom of one - see `draw_paged`.
 struct Table {
     left: f64,
     right: f64,
     header: Vec<Cell>,
-    /// `(cells, optional part outline to draw as a thumbnail at this x)`.
-    rows: Vec<(Vec<Cell>, Option<(f64, LayeredPolygon)>)>,
+    rows: Vec<Row>,
     totals: Vec<Cell>,
     /// The reference bolds the Sheet-List totals and not the Part-List's.
     bold_totals: bool,
 }
 
 impl Table {
-    fn draw(&self, out: &mut String, y_top: f64) -> f64 {
+    /// Draws the whole table from `y_top`, breaking to a new page and
+    /// repeating the header band whenever the rows run out of room. Returns
+    /// where the last chunk ended, so the next block can follow it.
+    ///
+    /// `reserve` is vertical space the *caller* needs immediately under the
+    /// table - the boxed part count below the Part-List. Without it the table
+    /// can end exactly at the bottom margin and push that box off the page,
+    /// which is how `Total Parts Count` came to be printed below the frame on
+    /// a 29-part job.
+    ///
+    /// **This is the fix for a shipped bug.** `fit` moves a table that will
+    /// not fit onto a fresh page, but a table taller than a whole page does
+    /// not fit there either, and nothing split it - so every row past the
+    /// bottom margin was drawn over the footer and then off the sheet. The
+    /// ceiling was about 26 part rows.
+    fn draw_paged(&self, pages: &mut Vec<String>, out: &mut String, y_top: f64, reserve: f64) -> f64 {
+        debug_assert!(
+            rows_that_fit(NEXT_PAGE_TOP, false, 0.0) > 0,
+            "a fresh page must fit at least one row, or this loop cannot terminate"
+        );
+        let with_totals = !self.totals.is_empty();
+        let mut y = y_top;
+        let mut at = 0usize;
+        loop {
+            // The chunk that finishes the table is the only one carrying the
+            // totals row and the caller's reserved space; an intermediate
+            // chunk only has to fit its own rows and its closing rule.
+            if self.rows.len() - at <= rows_that_fit(y, with_totals, reserve) {
+                return self.draw_chunk(out, y, &self.rows[at..], true);
+            }
+            let here = rows_that_fit(y, false, 0.0).min(self.rows.len() - at);
+            if here > 0 {
+                self.draw_chunk(out, y, &self.rows[at..at + here], false);
+                at += here;
+            }
+            pages.push(std::mem::take(out));
+            y = NEXT_PAGE_TOP;
+        }
+    }
+
+    /// One page's worth of the table: header band, `rows`, the closing rule,
+    /// and the totals row only on the chunk that ends the table.
+    fn draw_chunk(&self, out: &mut String, y_top: f64, rows: &[Row], last: bool) -> f64 {
         hline(out, self.left, self.right, y_top);
         for cell in &self.header {
             cell.draw(out, y_top - HEAD_DROP, 10.0, true);
@@ -220,7 +268,7 @@ impl Table {
         dashed_hline(out, self.left, self.right, y_top - HEAD_RULE_DROP);
 
         let mut y = y_top - FIRST_ROW_DROP;
-        for (cells, thumb) in &self.rows {
+        for (cells, thumb) in rows {
             for cell in cells {
                 cell.draw(out, y, 10.0, false);
             }
@@ -230,28 +278,36 @@ impl Table {
             y -= ROW_PITCH;
         }
         // `y` has already stepped past the last row.
-        let last = y + ROW_PITCH;
-        let rule_y = last - ROW_RULE_DROP;
+        let rule_y = y + ROW_PITCH - ROW_RULE_DROP;
         hline(out, self.left + 1.87, self.right - 1.87, rule_y);
 
-        let bottom = if self.totals.is_empty() {
-            rule_y - TABLE_TAIL
-        } else {
+        let bottom = if last && !self.totals.is_empty() {
             for cell in &self.totals {
                 cell.draw(out, rule_y - TOTAL_DROP, 10.0, self.bold_totals);
             }
             rule_y - TOTAL_DROP - TABLE_TAIL
+        } else {
+            rule_y - TABLE_TAIL
         };
         hline(out, self.left, self.right, bottom);
         vline(out, self.left, y_top + 0.37, bottom);
         vline(out, self.right, y_top + 0.37, bottom);
         bottom
     }
+}
 
-    /// Height this table will occupy, so a caller can decide whether it fits.
-    fn height(&self) -> f64 {
-        let body = FIRST_ROW_DROP + ROW_PITCH * (self.rows.len().max(1) - 1) as f64;
-        body + ROW_RULE_DROP + if self.totals.is_empty() { 0.0 } else { TOTAL_DROP } + TABLE_TAIL
+/// How many rows fit under `y_top` while still leaving room for the closing
+/// rule, the totals row if this chunk carries one, and `reserve` for whatever
+/// the caller draws underneath.
+fn rows_that_fit(y_top: f64, with_totals: bool, reserve: f64) -> usize {
+    let fixed = FIRST_ROW_DROP + ROW_RULE_DROP + if with_totals { TOTAL_DROP } else { 0.0 } + TABLE_TAIL + reserve;
+    // `n` rows are `FIRST_ROW_DROP + ROW_PITCH * (n - 1)` tall, so the room
+    // left over after the first row is what the remaining ones divide into.
+    let room = y_top - CONTENT_BOTTOM - fixed;
+    if room < 0.0 {
+        0
+    } else {
+        (room / ROW_PITCH) as usize + 1
     }
 }
 
@@ -278,6 +334,13 @@ const REMNANT_HEADS: [&str; 4] = ["Width [mm]", "Height [mm]", "Qty", "Area [m²
 const CONTENT_TOP: f64 = 513.45;
 const CONTENT_BOTTOM: f64 = 44.0;
 
+/// Where content resumes after a page break.
+const NEXT_PAGE_TOP: f64 = FRAME_T - 20.0;
+
+/// Height of the boxed `Total Parts Count` under the Part-List, which has to
+/// be reserved on whichever page that table's last chunk lands on.
+const PART_COUNT_BOX: f64 = 15.65;
+
 fn summary_pages(
     meta: &ReportMeta,
     layouts: &[SheetLayout],
@@ -298,7 +361,7 @@ fn summary_pages(
 
     // --- Part-List ---
     y = section(&mut pages, &mut out, y, "Part-List");
-    let part_rows: Vec<(Vec<Cell>, Option<(f64, LayeredPolygon)>)> = meta
+    let part_rows: Vec<Row> = meta
         .parts
         .iter()
         .enumerate()
@@ -331,8 +394,7 @@ fn summary_pages(
         totals: vec![Cell::Centre(PART_COLS[0], ordered.to_string()), Cell::Centre(PART_COLS[1], nested.to_string())],
         bold_totals: false,
     };
-    y = fit(&mut pages, &mut out, y, part_table.height());
-    y = part_table.draw(&mut out, y);
+    y = part_table.draw_paged(&mut pages, &mut out, y, PART_COUNT_BOX);
 
     // The little boxed count under the part table.
     y -= 0.37;
@@ -348,7 +410,7 @@ fn summary_pages(
     y = section(&mut pages, &mut out, y, "Sheet-List");
     let mut total_length = 0.0;
     let mut total_pieces = 0usize;
-    let sheet_rows: Vec<(Vec<Cell>, Option<(f64, LayeredPolygon)>)> = groups
+    let sheet_rows: Vec<Row> = groups
         .iter()
         .enumerate()
         .map(|(n, group)| {
@@ -386,22 +448,26 @@ fn summary_pages(
         ],
         bold_totals: true,
     };
-    y = fit(&mut pages, &mut out, y, sheet_table.height());
-    y = sheet_table.draw(&mut out, y);
+    y = sheet_table.draw_paged(&mut pages, &mut out, y, 0.0);
 
     // --- Remnant Info ---
     let remnants = remnant_rows(layouts, groups, meta.spacing);
     if !remnants.is_empty() {
-        y = fit(&mut pages, &mut out, y, 40.0 + ROW_PITCH * remnants.len() as f64);
+        // Enough for the heading and one row, not for the whole block: a long
+        // remnant list pages itself in the loop below rather than being moved
+        // wholesale onto a page it still would not fit on.
+        y = fit(&mut pages, &mut out, y, 40.0 + ROW_PITCH);
         y -= 15.97;
         text_centre(&mut out, "Remnant Info", (REMNANT_L + REMNANT_R) / 2.0, y, 10.0, true);
         y -= 2.81;
-        hline(&mut out, REMNANT_L, REMNANT_R, y);
-        for (&cx, head) in REMNANT_COLS.iter().zip(REMNANT_HEADS) {
-            text_centre(&mut out, head, cx, y - 14.47, 10.0, true);
-        }
-        let mut row_y = y - 30.63;
+        let mut row_y = remnant_head(&mut out, y);
         for (w, h, qty) in &remnants {
+            if row_y < CONTENT_BOTTOM {
+                pages.push(std::mem::take(&mut out));
+                // The heads come back on the continuation page - four bare
+                // numbers in a row say nothing without them.
+                row_y = remnant_head(&mut out, NEXT_PAGE_TOP);
+            }
             let values = [grouped(*w), grouped(*h), qty.to_string(), format!("{:.3}", w * h / 1e6)];
             for (&cx, value) in REMNANT_COLS.iter().zip(values) {
                 text_centre(&mut out, &value, cx, row_y, 10.0, false);
@@ -412,6 +478,16 @@ fn summary_pages(
 
     pages.push(out);
     pages
+}
+
+/// The Remnant Info rule and column heads at `y`, returning where its first
+/// row goes. Drawn once per page the remnant list runs onto.
+fn remnant_head(out: &mut String, y: f64) -> f64 {
+    hline(out, REMNANT_L, REMNANT_R, y);
+    for (&cx, head) in REMNANT_COLS.iter().zip(REMNANT_HEADS) {
+        text_centre(out, head, cx, y - 14.47, 10.0, true);
+    }
+    y - 30.63
 }
 
 /// A centred section heading, starting a new page first if it would not have
@@ -426,7 +502,7 @@ fn section(pages: &mut Vec<String>, out: &mut String, y: f64, title: &str) -> f6
 fn fit(pages: &mut Vec<String>, out: &mut String, y: f64, space: f64) -> f64 {
     if y - space < CONTENT_BOTTOM {
         pages.push(std::mem::take(out));
-        FRAME_T - 20.0
+        NEXT_PAGE_TOP
     } else {
         y
     }
@@ -1081,6 +1157,83 @@ mod tests {
 
     /// A long job must not run off the bottom of the page - the numbers would
     /// simply be missing, and nothing else here would notice.
+    /// Every `y` a page draws text at. The content streams are the writer's
+    /// own output, so parsing them back is exact rather than a guess.
+    fn text_ys(page: &str) -> Vec<f64> {
+        page.lines()
+            .filter_map(|line| {
+                let head = line.split(" Td (").next()?;
+                head.rsplit(' ').next()?.parse::<f64>().ok()
+            })
+            .collect()
+    }
+
+    fn long_summary(parts: usize, sheets: usize) -> Vec<String> {
+        let mut meta = meta();
+        meta.parts = (0..parts)
+            .map(|i| ReportPart { name: format!("part-{i}"), quantity: 2, nested: 1, shape: square(10.0) })
+            .collect();
+        let layouts: Vec<SheetLayout> = (0..sheets).map(|i| layout(i % 5 + 1)).collect();
+        let stats: Vec<SheetStats> = layouts.iter().map(sheet_stats).collect();
+        let groups = nest_groups(&layouts);
+        let materials = material_names(&layouts);
+        summary_pages(&meta, &layouts, &stats, &groups, &materials)
+    }
+
+    /// **The bug this file shipped.** `fit` moves a table that will not fit
+    /// onto a fresh page, but a table taller than a whole page does not fit
+    /// there either and nothing split it, so every row past the bottom margin
+    /// was drawn over the footer and then clean off the sheet. A real 29-part
+    /// job printed its totals row on the footer rule and `Total Parts Count`
+    /// *below the page frame entirely*.
+    #[test]
+    fn no_summary_row_is_ever_drawn_below_the_bottom_margin() {
+        // 29 is the job that exposed it; 200 proves it is not just off by one
+        // page, and 1 proves the short case did not regress.
+        for parts in [1, 26, 29, 200] {
+            for page in long_summary(parts, 40) {
+                for y in text_ys(&page) {
+                    assert!(
+                        y >= CONTENT_BOTTOM,
+                        "a {parts}-part job drew text at y={y}, below the {CONTENT_BOTTOM} margin - it lands on the footer"
+                    );
+                    assert!(y <= FRAME_T, "a {parts}-part job drew text at y={y}, above the page frame");
+                }
+            }
+        }
+    }
+
+    /// A continuation page opens with the column heads repeated. Without them
+    /// the reader gets eight unlabelled numbers per row and has to page back.
+    #[test]
+    fn a_table_split_across_pages_repeats_its_column_headers() {
+        let pages = long_summary(60, 4);
+        let with_part_heads = pages.iter().filter(|p| p.contains("(Nested)") && p.contains("(Left)")).count();
+        assert!(with_part_heads >= 2, "a 60-row Part-List must span pages and head each one, headed {with_part_heads}");
+
+        // ...and the totals row belongs to the chunk that ends the table, not
+        // to every chunk. `85` style totals are the ordered/nested sums: 120
+        // ordered, 60 nested here.
+        let with_totals = pages.iter().filter(|p| p.contains("(120)")).count();
+        assert_eq!(with_totals, 1, "the Part-List totals row must be drawn once, on the last page of the table");
+    }
+
+    /// The boxed count is drawn immediately under the Part-List by the caller,
+    /// so the table has to leave room for it on whichever page it ends on.
+    #[test]
+    fn the_part_count_box_is_never_orphaned_off_the_page() {
+        for parts in [25, 26, 27, 28, 29, 30] {
+            let pages = long_summary(parts, 2);
+            let page = pages
+                .iter()
+                .find(|p| p.contains("Total Parts Count"))
+                .unwrap_or_else(|| panic!("a {parts}-part job never drew its part count at all"));
+            let line = page.lines().find(|l| l.contains("Total Parts Count")).unwrap();
+            let y: f64 = line.split(" Td (").next().unwrap().rsplit(' ').next().unwrap().parse().unwrap();
+            assert!(y >= CONTENT_BOTTOM, "a {parts}-part job put its part count at y={y}, under the footer");
+        }
+    }
+
     #[test]
     fn a_job_with_more_rows_than_fit_spills_onto_another_summary_page() {
         let mut meta = meta();

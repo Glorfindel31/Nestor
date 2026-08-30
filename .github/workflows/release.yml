@@ -68,6 +68,10 @@ jobs:
             true
           # Copy rather than pass `path#label`: gh's `#` syntax sets the
           # asset's *label*, and the file still downloads under its own name.
-          asset="Nestor_${tag#v}_${{ matrix.suffix }}"
+          # Deliberately NOT versioned. Defender and SmartScreen build reputation
+          # against the hash *and* the filename; a new name every tag resets that
+          # to zero prevalence forever, which is one of the inputs behind the
+          # Wacatac.B!ml false positives. The tag already names the version.
+          asset="Nestor_${{ matrix.suffix }}"
           cp "target/release/${{ matrix.bin }}" "$asset"
           gh release upload "$tag" "$asset" --clobber

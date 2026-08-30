@@ -345,6 +345,13 @@ pub fn run_float(app: &mut App, ctx: &egui::Context) {
         if ui.checkbox(&mut live, RichText::new(app.t("live_view")).color(theme::TEXT())).on_hover_text(app.t("live_view_hint")).changed() {
             app.set_live_view(live);
         }
+        // Same reasoning as the live-view checkbox above for living outside
+        // the `if app.running` block: this is read when the run *ends*, so
+        // changing it mid-run still takes effect for the run in progress.
+        let mut chime = app.prefs.sound_on_finish;
+        if ui.checkbox(&mut chime, RichText::new(app.t("sound_on_finish")).color(theme::TEXT())).on_hover_text(app.t("sound_on_finish_hint")).changed() {
+            app.prefs.sound_on_finish = chime;
+        }
         if app.cfg.mirror {
             ui.label(RichText::new(app.t("mirror_run_warning")).color(theme::ERROR()).small());
         }
@@ -523,12 +530,92 @@ pub fn help_bubble(response: egui::Response, title: &str, body: &str) -> egui::R
     })
 }
 
+/// Width of a CONFIGURE row's label column, shared by `number_row`,
+/// `scale_row` and the three rows in `ui::config` that build themselves (the
+/// cleanup text field, the placement dropdown, the dominant-area slider).
+///
+/// Wide enough for the longest English label at Normal text scale
+/// (`STARTING GENERATIONS`). A longer translation, or Large scale, overflows
+/// it and pushes that row's controls right - preferable to truncating a label
+/// the operator has to read.
+pub const LABEL_W: f32 = 226.0;
+
+/// Width of a value field. Fixed rather than fitted to its digits, so the
+/// scale controls beside the four escalating options land in a column instead
+/// of following `0.00` and `2` to different x on every row.
+pub const VALUE_W: f32 = 66.0;
+
 /// A labelled numeric field, the shape almost every config row takes.
 pub fn number_row<T: egui::emath::Numeric>(ui: &mut egui::Ui, label: &str, tooltip: &str, value: &mut T, speed: f64, range: std::ops::RangeInclusive<T>) {
     let row = ui
         .horizontal(|ui| {
-            let name = ui.add_sized([150.0, 20.0], egui::Label::new(RichText::new(label).color(theme::DIM())));
-            let field = ui.add(number(value, speed, range));
+            let name = ui.add_sized([LABEL_W, 20.0], egui::Label::new(RichText::new(label).color(theme::DIM())));
+            let field = ui.add_sized([VALUE_W, 20.0], number(value, speed, range));
+            name.union(field)
+        })
+        .inner;
+    help_bubble(row, label, tooltip);
+}
+
+/// A sliding on/off switch.
+///
+/// egui ships a checkbox and nothing else, and a tick beside a tick (the
+/// mirror row already has one) reads as two of the same control doing
+/// unrelated things. A switch says "this mode is on" where a tick says "I
+/// selected this", which is what the four scaling rows actually mean.
+pub fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let (rect, mut response) = ui.allocate_exact_size(egui::vec2(32.0, 16.0), egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        // Animated, so the knob visibly travels: the state changed *because
+        // you clicked it* is worth half a frame of motion, and a switch that
+        // teleports reads as a redraw glitch.
+        let how = ui.ctx().animate_bool_responsive(response.id, *on);
+        let radius = rect.height() / 2.0;
+        let track = if *on { theme::ACCENT() } else { theme::DIM().gamma_multiply(0.4) };
+        ui.painter().rect_filled(rect, radius, track);
+        let cx = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how);
+        ui.painter().circle_filled(egui::pos2(cx, rect.center().y), radius - 2.5, theme::TEXT());
+    }
+    response
+}
+
+/// A `number_row` for one of the four options the run escalation may grow:
+/// the value, how much it gains per run, and the switch that turns that
+/// growth on. See `dto::RunScales` for why only four options have this.
+#[allow(clippy::too_many_arguments)]
+pub fn scale_row<T: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    label: &str,
+    tooltip: &str,
+    step_tooltip: &str,
+    switch_tooltip: &str,
+    value: &mut T,
+    speed: f64,
+    range: std::ops::RangeInclusive<T>,
+    scale: &mut crate::dto::RunScale,
+) {
+    let row = ui
+        .horizontal(|ui| {
+            let name = ui.add_sized([LABEL_W, 20.0], egui::Label::new(RichText::new(label).color(theme::DIM())));
+            let field = ui.add_sized([VALUE_W, 20.0], number(value, speed, range));
+
+            // Greyed rather than hidden while the switch is off: the number is
+            // still there and comes straight back, so switching off is not the
+            // same as losing what you dialled in.
+            ui.add_enabled_ui(scale.on, |ui| {
+                // A `u32`, so the widget cannot offer a fraction in the first
+                // place: three of the four knobs this grows are counts, and
+                // "+1.5 rotations" is not a thing.
+                ui.add_sized([54.0, 20.0], egui::DragValue::new(&mut scale.step).speed(0.1).range(0..=100).prefix("+"))
+            })
+            .inner
+            .on_hover_text(step_tooltip);
+            toggle_switch(ui, &mut scale.on).on_hover_text(switch_tooltip);
+
             name.union(field)
         })
         .inner;

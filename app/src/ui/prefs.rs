@@ -34,14 +34,23 @@ pub struct Prefs {
     /// and a repaint every 33ms for the whole run), and the operator who
     /// just wants the layout should not pay for the show without asking.
     pub live_view: bool,
-}
 
+    /// Play a finished-job chime when a nest completes. On by default: a
+    /// real nest runs long enough that the operator walks away from the
+    /// screen, which is the whole reason to make a noise about it.
+    pub sound_on_finish: bool,
+}
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { lang: Default::default(), scale: Scale::Normal, theme: Default::default(), help_dismissed: false, live_view: false }
-
-
+        Self {
+            lang: Default::default(),
+            scale: Scale::Normal,
+            theme: Default::default(),
+            help_dismissed: false,
+            live_view: false,
+            sound_on_finish: true,
+        }
     }
 }
 

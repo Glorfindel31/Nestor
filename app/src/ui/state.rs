@@ -8,7 +8,7 @@
 //! `ShapeRow`, and egui rebuilds every row from them each frame - so the
 //! table can be rebuilt freely, and that whole class of staleness is gone.
 
-use crate::dto::{NestConfigDto, PlacementTypeDto, PolygonDto};
+use crate::dto::{NestConfigDto, PlacementTypeDto, PolygonDto, RunScales};
 
 /// One imported (or hand-defined) shape, plus everything the user has
 /// decided about it.
@@ -241,6 +241,9 @@ pub struct ConfigForm {
     /// in the web UI - it governs how finely arcs are tessellated on import
     /// *and* is sent along with the run.
     pub curve_tolerance: f64,
+    /// How the four search knobs grow on each successive run. See
+    /// `dto::RunScales` for why only those four have one.
+    pub scales: RunScales,
 }
 
 impl Default for ConfigForm {
@@ -295,6 +298,7 @@ impl Default for ConfigForm {
             max_threads: 0,
             seed: 0,
             curve_tolerance: 0.3,
+            scales: RunScales::default(),
         }
     }
 }
@@ -318,22 +322,24 @@ impl ConfigForm {
     /// deliberately not shown as seconds - that depends on the parts, and a
     /// wrong number in seconds is worse than an honest relative one.
     pub fn search_cost_multiple(&self) -> f64 {
-        fn cost(runs: usize, rotations: u32, population: usize, generations: usize) -> f64 {
-            (0..runs)
+        // Every run's own escalated budget, summed - and escalated by the
+        // *configured* steps, not a second hardcoded copy of them, so turning
+        // a knob's scaling off is visible in the price straight away.
+        fn cost(c: &ConfigForm) -> f64 {
+            (0..c.runs)
                 .map(|i| {
-                    let rotations = f64::from(rotations + i as u32);
-                    let population = (population + i * crate::commands::RUN_POPULATION_STEP) as f64;
-                    let generations = (generations + i * crate::commands::RUN_GENERATIONS_STEP) as f64;
+                    let rotations = f64::from(c.rotations + c.scales.rotations.growth(i));
+                    let population = (c.population_size + c.scales.population.growth(i) as usize) as f64;
+                    let generations = (c.generations + c.scales.generations.growth(i) as usize) as f64;
                     rotations * population * generations
                 })
                 .sum()
         }
-        let d = Self::default();
-        let baseline = cost(d.runs, d.rotations, d.population_size, d.generations);
+        let baseline = cost(&Self::default());
         if baseline <= 0.0 {
             return 1.0;
         }
-        cost(self.runs, self.rotations, self.population_size, self.generations) / baseline
+        cost(self) / baseline
     }
 
     pub fn to_dto(&self) -> NestConfigDto {
@@ -353,6 +359,7 @@ impl ConfigForm {
             runs: self.runs,
             cleanup_threshold_percent: self.cleanup_threshold.trim().parse().ok(),
             mirror: self.mirror,
+            scales: self.scales,
         }
     }
 
@@ -371,6 +378,7 @@ impl ConfigForm {
         self.seed = d.seed;
         self.runs = d.runs;
         self.cleanup_threshold = d.cleanup_threshold_percent.map(|v| v.to_string()).unwrap_or_default();
+        self.scales = d.scales;
         // `mirror` is deliberately NOT restored - it always starts off.
         // A flip setting that quietly survives into a session where the
         // material *does* have a side (grain, coating, printed face)

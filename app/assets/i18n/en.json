@@ -270,5 +270,11 @@
   "help_step_run": "RUN NEST — then review and EXPORT the result.",
   "help_tip": "Hover any label for more detail.",
   "help_dont_show": "Don't show this again",
-  "help_close": "GOT IT"
+  "help_close": "GOT IT",
+  "sound_on_finish": "CHIME WHEN DONE",
+  "sound_on_finish_hint": "Three beeps when a nest finishes, so you can start it and walk away. Stays silent if you cancel the run yourself.",
+  "scale_step_tooltip": "How much this option gains on each successive run of the RUNS loop. The first run always uses the value as set - the growth starts on run 2.",
+  "scale_switch_tooltip": "Switch this option's per-run growth on or off. Off keeps it flat across every run; the + amount is remembered either way.",
+  "scale_hint": "The four options above grow on each successive run - the + box is by how much, the switch turns it on. Only these four scale; margin, spacing and kerf describe the job, not the search.",
+  "scale_hint_single_run": "RUNS is 1, so nothing above scales yet - there is no second attempt to grow into. Raise RUNS to use these."
 }

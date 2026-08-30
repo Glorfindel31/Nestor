@@ -270,5 +270,11 @@
   "help_step_run": "LANCER L'IMBRICATION — puis examinez et EXPORTEZ le résultat.",
   "help_tip": "Survolez n'importe quel libellé pour plus de détails.",
   "help_dont_show": "Ne plus afficher",
-  "help_close": "COMPRIS"
+  "help_close": "COMPRIS",
+  "sound_on_finish": "SIGNAL SONORE À LA FIN",
+  "sound_on_finish_hint": "Trois bips quand l'imbrication est terminée, pour pouvoir la lancer et s'éloigner. Reste silencieux si vous annulez vous-même la passe.",
+  "scale_step_tooltip": "De combien cette option augmente à chaque passe successive de la boucle PASSES. La première passe utilise toujours la valeur telle quelle - la croissance commence à la passe 2.",
+  "scale_switch_tooltip": "Active ou désactive la croissance par passe de cette option. Désactivée, elle reste constante sur toutes les passes ; la valeur + est mémorisée dans les deux cas.",
+  "scale_hint": "Les quatre options ci-dessus augmentent à chaque passe successive - la case + indique de combien, l'interrupteur l'active. Seules ces quatre évoluent ; marge, espacement et saignée décrivent le travail, pas la recherche.",
+  "scale_hint_single_run": "PASSES vaut 1, donc rien ci-dessus n'évolue encore - il n'y a pas de seconde tentative. Augmentez PASSES pour vous en servir."
 }

@@ -479,7 +479,101 @@ pub struct NestConfigDto {
     /// is carried through the run.
     #[serde(default)]
     pub mirror: bool,
+
+    /// How the four search knobs grow on each successive run of the `runs`
+    /// escalation. Defaults to exactly the escalation that used to be
+    /// hardcoded in `commands::escalated_run_config`, so an existing
+    /// `config.json` - and every caller written before this field existed -
+    /// nests identically.
+    #[serde(default)]
+    pub scales: RunScales,
 }
+
+/// The four knobs the `runs` escalation may grow, and by how much.
+///
+/// **Only four**, and deliberately: `rotations`, `population_size`,
+/// `mutation_rate` and `generations` are the search's own budget, and spending
+/// more of it is exactly what "try harder on the next attempt" means.
+/// Everything else in the config describes the *job* - the margin, the kerf,
+/// the spacing, which sheet - and a job whose clearances drifted between
+/// attempts would be comparing two different jobs and then calling one of them
+/// the better nest.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Debug)]
+#[serde(default)]
+pub struct RunScales {
+    pub rotations: RunScale,
+    pub population: RunScale,
+    pub mutation: RunScale,
+    pub generations: RunScale,
+}
+
+impl Default for RunScales {
+    /// The escalation this used to hardcode: one more rotation angle each
+    /// run, plus a proportionally larger population and generation budget so
+    /// it can actually search that wider grid rather than trying more angles
+    /// once with the same shallow search. Mutation never escalated, and still
+    /// does not unless asked - its step is a sensible starting point for
+    /// whoever switches it on, not a change in behaviour.
+    fn default() -> Self {
+        Self {
+            rotations: RunScale::new(true, 1),
+            population: RunScale::new(true, 4),
+            mutation: RunScale::new(false, 2),
+            generations: RunScale::new(true, 5),
+        }
+    }
+}
+
+/// How one search knob grows on each successive run. See `RunScales` for why
+/// only four knobs have one.
+///
+/// `on` is kept separate from a zero `step` so switching a knob off and back
+/// on does not lose the number the operator dialled in.
+///
+/// **The step is a whole number**, because three of the four things it grows
+/// are counts - there is no such thing as one and a half rotation angles, or
+/// half an individual in a population. The fourth, mutation, is a percentage
+/// where a fraction would at least parse, but a knob whose step means
+/// something different on one row than the other three is worse than a
+/// slightly coarse one. Whole percent it is.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(default)]
+pub struct RunScale {
+    pub on: bool,
+    pub step: u32,
+}
+
+impl RunScale {
+    pub const fn new(on: bool, step: u32) -> Self {
+        Self { on, step }
+    }
+
+    /// How much this knob has grown by run `run_index` (0-based, so the first
+    /// run never escalates - it is the baseline the rest are measured
+    /// against).
+    ///
+    /// Saturating rather than wrapping: `runs` is capped at 100 in the UI, so
+    /// this cannot realistically overflow, but a config file is a text file
+    /// and an absurd step should pin the knob at its ceiling rather than wrap
+    /// it back to a small number.
+    pub fn growth(self, run_index: usize) -> u32 {
+        if self.on {
+            self.step.saturating_mul(run_index as u32)
+        } else {
+            0
+        }
+    }
+}
+
+impl Default for RunScale {
+    /// Off. Only reached by a `RunScale` whose own fields are missing from an
+    /// otherwise-present `scales` object; a missing `scales` takes
+    /// `RunScales::default()` below, which is the old hardcoded escalation.
+    fn default() -> Self {
+        Self::new(false, 0)
+    }
+}
+
 
 
 fn default_runs() -> usize {
