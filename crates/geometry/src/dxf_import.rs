@@ -273,7 +273,7 @@ const MAX_ARC_SEGMENTS: u32 = 720;
 /// its radius in error and collapses to two chords. Capping the tolerance at
 /// 2% of the radius (~7 segments on a 90 degree corner, whatever its size)
 /// makes the budget scale with the feature instead of the drawing.
-const MAX_RELATIVE_SAGITTA: f64 = 0.02;
+pub(crate) const MAX_RELATIVE_SAGITTA: f64 = 0.02;
 
 /// The max angular step (radians) that keeps the chord-to-arc sagitta error
 /// within `tolerance` for the given `radius` (basic circular chord-error

@@ -747,12 +747,38 @@ fn point_line_distance(p: Point, a: Point, b: Point) -> f64 {
 
 const MAX_SUBDIVISION_DEPTH: u32 = 24;
 
+/// `arc_step_angle`'s relative-error cap, in the currency this flatness test
+/// actually measures: control-point distance from the chord, as a fraction of
+/// that chord. A Bezier has no radius to take 2% of, but the ratio is
+/// scale-free (a quarter-circle cubic starts at 0.2761 whatever its size and
+/// halves with every subdivision), so capping the ratio is what makes the
+/// segment count depend on the curve's *shape* rather than on how big it
+/// happens to be drawn.
+///
+/// The value is measured, not guessed. Subdivision is binary, so quality comes
+/// in tiers: on a circle-of-cubics, 0.035-0.05 gives 32 points and 0.61% area
+/// error, 0.07-0.10 gives 16 and 2.53%, 0.14 gives 8 and 9.97%. Holding to
+/// `MAX_RELATIVE_SAGITTA`'s 2% budget forces the first tier, and 0.035 sits
+/// mid-tier rather than on its edge, so a curve whose control points sit a
+/// little differently than a circle's does not fall through to the next one.
+/// See `small_beziers_are_not_flattened_by_a_loose_tolerance`.
+const MAX_RELATIVE_FLATNESS: f64 = 0.035;
+
+/// The flatness threshold for one subdivision step: the tighter of the
+/// caller's absolute `tol` and `MAX_RELATIVE_FLATNESS` of this sub-curve's own
+/// chord. Without the relative half, a 0.75mm rounded corner at the app's
+/// default 0.3mm tolerance is "flat" on the first test and imports as a single
+/// straight line - the Bezier twin of the bug `arc_step_angle` fixes for arcs.
+fn flatness_limit(p0: Point, p_end: Point, tol: f64) -> f64 {
+    tol.min(MAX_RELATIVE_FLATNESS * p0.distance_to(p_end))
+}
+
 fn flatten_cubic(p0: Point, c1: Point, c2: Point, p3: Point, tol: f64, out: &mut Vec<Point>) {
     subdivide_cubic(p0, c1, c2, p3, tol, 0, out);
 }
 
 fn subdivide_cubic(p0: Point, c1: Point, c2: Point, p3: Point, tol: f64, depth: u32, out: &mut Vec<Point>) {
-    let flat = point_line_distance(c1, p0, p3).max(point_line_distance(c2, p0, p3)) <= tol;
+    let flat = point_line_distance(c1, p0, p3).max(point_line_distance(c2, p0, p3)) <= flatness_limit(p0, p3, tol);
     if depth >= MAX_SUBDIVISION_DEPTH || flat {
         out.push(p3);
         return;
@@ -772,7 +798,7 @@ fn flatten_quad(p0: Point, c: Point, p2: Point, tol: f64, out: &mut Vec<Point>) 
 }
 
 fn subdivide_quad(p0: Point, c: Point, p2: Point, tol: f64, depth: u32, out: &mut Vec<Point>) {
-    if depth >= MAX_SUBDIVISION_DEPTH || point_line_distance(c, p0, p2) <= tol {
+    if depth >= MAX_SUBDIVISION_DEPTH || point_line_distance(c, p0, p2) <= flatness_limit(p0, p2, tol) {
         out.push(p2);
         return;
     }
@@ -850,6 +876,37 @@ fn flatten_arc(p0: Point, rx: f64, ry: f64, x_axis_rotation_deg: f64, large_arc:
 mod tests {
     use super::*;
     use crate::polygon::{get_polygon_bounds, polygon_area};
+
+    /// The Bezier twin of `dxf_import`'s relative-sagitta cap. A rounded
+    /// corner exported as a cubic is what most CAD tools actually write, and
+    /// at the app's default 0.3mm tolerance a small one used to pass the
+    /// flatness test on its very first check - a 0.75mm fillet imported as a
+    /// single straight line. Asserted at that loose tolerance, across four
+    /// decades of radius, because the whole point is that the result no longer
+    /// depends on how big the curve is.
+    #[test]
+    fn small_beziers_are_not_flattened_by_a_loose_tolerance() {
+        for r in [0.5_f64, 0.75, 2.0, 10.0, 200.0] {
+            // A circle drawn as four cubic quarters (k = the standard
+            // 4/3*tan(pi/8) circle-approximation constant).
+            let k = 0.552_284_749_830_793_6 * r;
+            let svg = format!(
+                "<svg viewBox=\"0 0 1000 1000\" width=\"1000mm\" height=\"1000mm\"><path d=\"M {r} 0 C {r} {k}, {k} {r}, 0 {r} C {mk} {r}, {mr} {k}, {mr} 0 C {mr} {mk}, {mk} {mr}, 0 {mr} C {k} {mr}, {r} {mk}, {r} 0 Z\"/></svg>",
+                r = r, k = k, mk = -k, mr = -r
+            );
+            let polys = parse_svg(&svg, 0.3, None).expect("the circle-of-cubics must parse");
+            let area = polygon_area(&polys[0].points).abs();
+            let truth = std::f64::consts::PI * r * r;
+            let err = (area - truth).abs() / truth;
+            assert!(
+                err <= crate::dxf_import::MAX_RELATIVE_SAGITTA,
+                "r={r}: {} points give {:.3}% area error, over the {:.0}% budget",
+                polys[0].points.len(),
+                err * 100.0,
+                crate::dxf_import::MAX_RELATIVE_SAGITTA * 100.0
+            );
+        }
+    }
 
     #[test]
     fn parses_a_plain_rect_in_mm() {
