@@ -21,11 +21,12 @@
 //! `Drawing::blocks()`, not `Drawing::entities()`, so this needs the whole
 //! drawing rather than an entity iterator.
 //!
-//! Still not supported: `SPLINE` and `ELLIPSE`; 3D polylines and polyface
-//! meshes are rejected deliberately rather than flattened onto XY. A ring
-//! produced by chaining carries no `real_boundary`, so its arcs export as
-//! their tessellation rather than as true arcs - reconstructing bulges from
-//! chained segments is a follow-up, not an oversight.
+//! Still not supported: `ELLIPSE`; 3D polylines and polyface meshes are
+//! rejected deliberately rather than flattened onto XY. A `SPLINE` imports
+//! (see below) but has no arc form, so it exports as its tessellation - a
+//! bulge cannot describe it. A ring produced by chaining *does* now carry a
+//! `real_boundary`, rebuilt from the arcs among its segments (`Edge::real`),
+//! so its curves export as true arcs.
 //!
 //! **`TEXT`/`MTEXT` are carried through, not converted to profiles**: these
 //! entities have no closed boundary (nothing to nest against), so they don't
@@ -607,10 +608,26 @@ pub fn entity_to_polygon(entity: &Entity, curve_tolerance: f64) -> Option<Layere
 #[derive(Clone, Debug)]
 struct Edge {
     points: Vec<Point>,
+    /// The same run of geometry in its *unflattened* form: one vertex per
+    /// real corner, each carrying the bulge of the segment that leaves it.
+    /// An `ARC` is two vertices and a bulge here while `points` holds its
+    /// whole tessellation, which is what lets a ring chained out of loose
+    /// segments export as real arcs instead of as a fan of chords.
+    ///
+    /// Always the same run in the same direction as `points`, with the same
+    /// first and last vertex - `chain_edges` keeps the two in step, and
+    /// export trusts them to describe the same closed profile.
+    real: Vec<RealVertex>,
     layer: String,
 }
 
 impl Edge {
+    /// A straight edge: the sparse form is just its endpoints.
+    fn straight(points: Vec<Point>, layer: String) -> Edge {
+        let real = points.iter().map(|&point| RealVertex { point, bulge: 0.0 }).collect();
+        Edge { points, real, layer }
+    }
+
     fn start(&self) -> Point {
         self.points[0]
     }
@@ -619,8 +636,20 @@ impl Edge {
         self.points[self.points.len() - 1]
     }
 
+    /// Walking an edge backwards moves each bulge onto the vertex the
+    /// segment now *leaves* (its old far end) and flips its sign, since a
+    /// bulge is signed by the direction of travel. The new tail keeps no
+    /// bulge: nothing leaves it yet.
     fn reversed(&self) -> Edge {
-        Edge { points: self.points.iter().rev().copied().collect(), layer: self.layer.clone() }
+        let n = self.real.len();
+        let real = (0..n)
+            .map(|j| {
+                let src = n - 1 - j;
+                let bulge = if src == 0 { 0.0 } else { -self.real[src - 1].bulge };
+                RealVertex { point: self.real[src].point, bulge }
+            })
+            .collect();
+        Edge { points: self.points.iter().rev().copied().collect(), real, layer: self.layer.clone() }
     }
 }
 
@@ -646,7 +675,7 @@ fn open_polyline_edge(verts: &[RealVertex], is_closed: bool, layer: String, tole
     if is_closed || closes_itself_by_duplicate_point(verts) || verts.len() < 2 {
         return None; // already a closed profile (or too short to be an edge)
     }
-    Some(Edge { points: lwpolyline_to_points(verts, false, tolerance), layer })
+    Some(Edge { points: lwpolyline_to_points(verts, false, tolerance), real: verts.to_vec(), layer })
 }
 
 /// The open edge an entity contributes to the chaining pass, if any.
@@ -662,15 +691,28 @@ fn entity_to_edge(entity: &Entity, curve_tolerance: f64) -> Option<Edge> {
             if a.within_distance(b, 1e-9) {
                 return None; // zero-length line: no direction, nothing to chain
             }
-            Some(Edge { points: vec![a, b], layer })
+            Some(Edge::straight(vec![a, b], layer))
         }
-        EntityType::Arc(arc) if !arc_is_full_circle(arc) => Some(Edge { points: arc_to_points(arc, curve_tolerance), layer }),
+        EntityType::Arc(arc) if !arc_is_full_circle(arc) => {
+            let points = arc_to_points(arc, curve_tolerance);
+            // The whole arc as one bulge segment: `bulge` is tan(sweep/4) by
+            // DXF definition, and a DXF arc always sweeps counter-clockwise
+            // (positive) from `start_angle`, so the sign is never in doubt.
+            let sweep = (arc.end_angle - arc.start_angle).rem_euclid(360.0).to_radians();
+            let real = vec![
+                RealVertex { point: points[0], bulge: (sweep / 4.0).tan() },
+                RealVertex { point: points[points.len() - 1], bulge: 0.0 },
+            ];
+            Some(Edge { points, real, layer })
+        }
         EntityType::Spline(spline) => {
             let points = tessellate_spline(spline, curve_tolerance);
             // A closed spline is already a profile - `entity_to_polygon` took
             // it - and offering it here as well would let the chainer emit the
             // same ring twice.
-            (points.len() >= 2 && !spline_is_closed(spline, &points)).then_some(Edge { points, layer })
+            // No bulge form for a spline - its sparse vertices *are* its
+            // tessellation, honestly flat rather than a wrong arc.
+            (points.len() >= 2 && !spline_is_closed(spline, &points)).then(|| Edge::straight(points, layer))
         }
         EntityType::LwPolyline(poly) => open_polyline_edge(&real_boundary_from_vertices(&poly.vertices), poly.is_closed(), layer, curve_tolerance),
         EntityType::Polyline(poly) if !poly.is_3d_polyline() && !poly.is_3d_polygon_mesh() && !poly.is_polyface_mesh() => {
@@ -722,9 +764,19 @@ fn chain_edges(edges: Vec<Edge>, epsilon: f64) -> Vec<LayeredPolygon> {
         loop {
             if walk.points.len() >= 4 && walk.end().within_distance(walk.start(), epsilon) {
                 // Closed. Drop the duplicated closing point - a
-                // `LayeredPolygon` never repeats its first vertex.
+                // `LayeredPolygon` never repeats its first vertex - from both
+                // representations, which end on the same vertex by
+                // construction.
                 walk.points.pop();
-                rings.push(LayeredPolygon::new(std::mem::take(&mut walk.points), walk.layer.clone(), None));
+                walk.real.pop();
+                let ring = LayeredPolygon::new(std::mem::take(&mut walk.points), walk.layer.clone(), None);
+                // Only worth carrying when it actually says something the
+                // tessellation doesn't. A ring of pure straight segments is
+                // already described exactly by its own points, and attaching
+                // a second, redundant description of it is just another thing
+                // that can drift out of step.
+                let curved = walk.real.iter().any(|v| v.bulge != 0.0);
+                rings.push(LayeredPolygon { real_boundary: curved.then(|| std::mem::take(&mut walk.real)), ..ring });
                 break;
             }
 
@@ -738,8 +790,16 @@ fn chain_edges(edges: Vec<Edge>, epsilon: f64) -> Vec<LayeredPolygon> {
                 Some((i, edge)) => {
                     used[i] = true;
                     let oriented = if edge.start().within_distance(tail, epsilon) { edge.clone() } else { edge.reversed() };
-                    // Skip the shared endpoint itself, keep the rest.
+                    // Skip the shared endpoint itself, keep the rest. The
+                    // walk's tail carries no bulge (nothing left it yet), and
+                    // the vertex being skipped is the one holding the bulge of
+                    // the segment about to be appended - so hand it over
+                    // rather than dropping it with the duplicate point.
+                    if let Some(joint) = walk.real.last_mut() {
+                        joint.bulge = oriented.real[0].bulge;
+                    }
                     walk.points.extend_from_slice(&oriented.points[1..]);
+                    walk.real.extend_from_slice(&oriented.real[1..]);
                 }
                 // Ran out of neighbours without closing: not a profile.
                 None => break,
@@ -1174,6 +1234,34 @@ mod tests {
     use super::*;
     use dxf::entities::{Arc, Circle as DxfCircle, EntityCommon, LwPolyline};
     use dxf::{LwPolylineVertex, Point as DxfPoint};
+
+    /// `Edge::reversed` is the one place a bulge has to be *rewritten* rather
+    /// than carried: walking a segment the other way moves it onto the vertex
+    /// the segment now leaves and flips its sign. Get either half wrong and
+    /// the chained ring still exports a valid DXF, just bulging the wrong way
+    /// or on the wrong corner - and `chained.dxf` happens never to walk an
+    /// edge backwards, so nothing else here would notice.
+    ///
+    /// The check is that the sparse form still re-tessellates to the same
+    /// curve the reversed points describe, which is exactly what export
+    /// relies on.
+    #[test]
+    fn reversing_an_edge_keeps_its_arcs_pointing_the_same_way() {
+        let arc = Arc { center: DxfPoint::new(0.0, 0.0, 0.0), radius: 10.0, start_angle: 0.0, end_angle: 90.0, ..Default::default() };
+        let forward = entity_to_edge(&entity("CUT", EntityType::Arc(arc)), 0.05).expect("a partial arc is an edge");
+        assert!(forward.real.iter().any(|v| v.bulge != 0.0), "the arc must survive as a bulge, or this proves nothing");
+
+        let back = forward.reversed();
+        assert_eq!(back.points, forward.points.iter().rev().copied().collect::<Vec<_>>());
+
+        // Re-tessellating the reversed sparse form must land on the reversed
+        // tessellation - same curve, same side, same order.
+        let rebuilt = lwpolyline_to_points(&back.real, false, 0.05);
+        assert_eq!(rebuilt.len(), back.points.len(), "reversed sparse form tessellates to a different number of points");
+        for (a, b) in rebuilt.iter().zip(&back.points) {
+            assert!(a.within_distance(*b, 1e-9), "reversed arc rebuilt at {a:?}, but the points say {b:?}");
+        }
+    }
 
     /// A small fillet must not be flattened by a tolerance sized for the
     /// whole drawing: the chord error stays within `MAX_RELATIVE_SAGITTA` of

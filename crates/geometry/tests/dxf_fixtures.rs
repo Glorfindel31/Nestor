@@ -188,3 +188,56 @@ fn small_fillets_survive_a_loose_curve_tolerance() {
     let notch_area = polygon_area(&notch.points).abs();
     assert!((notch_area - true_notch).abs() < true_notch * 0.02, "notch area {notch_area} is off {true_notch} by more than 2%");
 }
+
+/// `chained.dxf` is the only fixture whose profiles exist solely as loose
+/// `LINE`/`ARC` segments walked end to end. Its arcs used to reach DXF export
+/// as a 15-point fan of chords, because a chained ring carried no
+/// `real_boundary` for the exporter to write bulges from - a part cut from
+/// that file came out faceted.
+///
+/// Exporting and re-importing is what proves the reconstructed arcs are the
+/// *same* geometry and not merely present: a bulge with the wrong sign or
+/// sitting on the wrong vertex still writes a valid DXF, just not this shape.
+/// Rotation is deliberately non-trivial, since that is the transform a real
+/// nest applies and the one a per-vertex bulge list has to survive.
+#[test]
+fn arcs_chained_from_loose_segments_export_as_real_arcs() {
+    use geometry::dxf_export::{export_dxf, PlacedShape, SheetLayout};
+    use geometry::dxf_import::entities_to_polygons_chained;
+
+    let drawing = Drawing::load_file(fixture_path("chained.dxf")).expect("chained.dxf must parse");
+    let rings = entities_to_polygons_chained(drawing.entities(), CURVE_TOLERANCE);
+    let curved: Vec<_> = rings.iter().filter(|r| r.real_boundary.is_some()).collect();
+    assert!(!curved.is_empty(), "the fixture's arc-bearing ring must carry a real_boundary to export from");
+    for ring in &curved {
+        let verts = ring.real_boundary.as_ref().unwrap();
+        assert!(verts.len() < ring.points.len(), "the sparse form must be sparser than the tessellation it replaces");
+        assert!(verts.iter().any(|v| v.bulge != 0.0), "a real_boundary with no bulge in it says nothing the points don't");
+    }
+
+    let sheet = geometry::dxf_import::LayeredPolygon::new(
+        vec![Point::new(0.0, 0.0), Point::new(500.0, 0.0), Point::new(500.0, 500.0), Point::new(0.0, 500.0)],
+        "SHEET".into(),
+        None,
+    );
+    let before: Vec<f64> = rings.iter().map(|r| polygon_area(&r.points).abs()).collect();
+    let parts = rings.iter().map(|shape| PlacedShape { shape: shape.clone(), x: 100.0, y: 100.0, rotation: 37.0 }).collect();
+
+    let out = std::env::temp_dir().join("chained_roundtrip.dxf");
+    export_dxf(&[SheetLayout { sheet, parts }], 0.0, false).save_file(&out).expect("export must write");
+
+    let reloaded = Drawing::load_file(&out).expect("the exported file must parse");
+    let mut after: Vec<f64> = entities_to_polygons_chained(reloaded.entities(), CURVE_TOLERANCE)
+        .iter()
+        .map(|r| polygon_area(&r.points).abs())
+        .filter(|a| (a - 500.0 * 500.0).abs() > 1.0) // drop the sheet, if written
+        .collect();
+    after.sort_by(f64::total_cmp);
+    let mut before_sorted = before.clone();
+    before_sorted.sort_by(f64::total_cmp);
+
+    assert_eq!(after.len(), before_sorted.len(), "every profile must survive the round trip: {before_sorted:?} -> {after:?}");
+    for (a, b) in before_sorted.iter().zip(&after) {
+        assert!((a - b).abs() < a * 0.01, "profile area {a} came back as {b}, off by more than 1%");
+    }
+}
