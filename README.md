@@ -15,10 +15,11 @@ Import your DXF or SVG parts, choose your stock sheets, and let Nestor fit as mu
 <a href="https://ko-fi.com/glorfindel31">Support</a>
 </p>
 
-<!-- SCREENSHOT: put a real screenshot or a short GIF of a nest running here. It is the single most important element on this page. -->
 <p align="center">
-<img src="docs/screenshot.png" alt="Nestor nesting a mixed-shape job" width="900">
+<img src="screenshots/screenshot09.png" alt="Nestor nesting a 350-part job across 19 sheets at 83.1% utilisation" width="900">
 </p>
+
+<p align="center"><em>450 parts, 19 sheets, 83.1% material used, audit passed — with a live log of every generation.</em></p>
 
 **No subscription. No paywall. No limit on how much material you can save.**
 
@@ -35,8 +36,6 @@ No Rust, no build step, no installer — download one file and run it.
 | Linux (x64) | `Nestor_linux_x64` | Best-effort CI build, unsigned |
 
 **→ [Get them from the latest release](https://github.com/Glorfindel31/Nestor/releases/latest)**
-
-<!-- Check these filenames against your current release assets before publishing. -->
 
 **Windows:** the executable is unsigned, so Windows SmartScreen will show *"Windows protected your PC"* the first time you run it. Click **More info → Run anyway**. Nothing is installed and nothing is written outside your own config folder.
 
@@ -77,35 +76,86 @@ Nestor automates that.
 
 ---
 
+## How it works
+
+Three numbered steps, top to bottom. There is no project to create, no wizard, no account.
+
+### 01 — Import
+
+Drop in `.dxf` or `.svg` files, type a rectangle straight in if your stock is just a sheet, or click one of the four sample jobs and nest something in the next five seconds without owning a single file.
+
+<p align="center">
+<img src="screenshots/screenshot01.png" alt="Nestor's import panel, with drag-and-drop, a rectangle builder and four one-click sample jobs" width="900">
+</p>
+
+### 02 — Assign roles
+
+Every shape is either a **SHEET** (stock to cut from) or a **PART** (a thing to cut). Set quantities, allowed rotation angles, and whether a part may be mirrored — per shape, or across everything you have selected.
+
+<p align="center">
+<img src="screenshots/screenshot10.png" alt="The role table: each shape with a preview, bounding box, role, quantity, allowed angles and flip setting" width="900">
+</p>
+
+### 03 — Nest, review, export
+
+Watch it improve generation by generation with **LIVE VIEW** on. When it settles, drag a piece to move it, pin it, nudge it with the arrow keys, rotate it with `R`, or **REPACK** a single sheet around the pieces you pinned. Then export to DXF or SVG — or print a full job report.
+
+<p align="center">
+<img src="screenshots/screenshot11.png" alt="The export bar: format, sheet spacing, sheet outline and unplaced part options, EXPORT and REPORT" width="900">
+</p>
+
+---
+
 ## What it can do
 
 ### Import & export
-- DXF import/export
-- SVG import/export
-- DXF layers preserved
-- Metric units
-- Export the finished nest back to DXF or SVG
+- DXF and SVG import, DXF and SVG export
+- DXF layers preserved end to end (cut / etch / drill)
+- Metric units, enforced rather than guessed
+- Optional sheet outlines, configurable sheet spacing, and an option to include never-placed parts
+- A printable job report — part list, sheet list with duplicate layouts collapsed, and remnant info
 
 ### Nesting
-- Genetic-algorithm search
-- Multiple placement strategies competing against each other
-- Tight-fit placement for irregular shapes
-- Gravity and box packing
-- Convex-hull placement
-- Shelf/band packing
+- Genetic-algorithm search with several placement strategies competing against each other
+- Tight-fit placement for irregular shapes, gravity and box packing, convex-hull placement
+- Shelf / band packing that detects when two parts interlock and steps the row by the real repeat distance, not the bounding box
 - Part rotation and ordering optimisation
-- Interlocking shapes
 - Mirroring for non-symmetric parts (opt-in, per session)
+- Live view of the search, and every attempt kept so you can go back to an earlier one
 
 ### Material management
 - Multiple stock sheets
-- Offcut/remnant tracking
-- Persistent parts library
-- Sheet consolidation and automatic repacking
-- Independent edge clearance and part spacing
+- Offcut / remnant tracking, with a scan that finds the usable rectangle left on a sheet
+- A persistent parts library, so a part you cut often is one click away next time
+- Automatic repacking of under-used sheets, and manual repack of any single sheet
+- Independent edge clearance and part spacing — either one can be zero
+- Kerf compensation
 
 ### Manufacturing safety
 Every result is audited before export. Nestor checks for overlapping parts, parts outside the sheet, and insufficient clearances — and the final audit runs again against the actual geometry being exported, not against the plan that produced it.
+
+### Nine languages
+English, Tiếng Việt, Français, Español, Italiano, Deutsch, 日本語, 한국어, 中文 — the whole interface, not just the menus. Press `F1` for a one-screen explanation of the app in any of them.
+
+<p align="center">
+<img src="screenshots/screenshot02.png" alt="Nestor's F1 help panel, showing the nine interface languages and the keyboard shortcuts" width="900">
+</p>
+
+### Six themes
+Because staring at a nesting tool all day is a real thing. Text size is adjustable too.
+
+<table>
+<tr>
+<td width="33%"><img src="screenshots/screenshot03.png" alt="Nestor theme"><br><sub><b>NESTOR</b></sub></td>
+<td width="33%"><img src="screenshots/screenshot04.png" alt="Matrix theme"><br><sub><b>MATRIX</b></sub></td>
+<td width="33%"><img src="screenshots/screenshot05.png" alt="Terminator theme"><br><sub><b>TERMINATOR</b></sub></td>
+</tr>
+<tr>
+<td><img src="screenshots/screenshot06.png" alt="Kawaii theme"><br><sub><b>KAWAII</b></sub></td>
+<td><img src="screenshots/screenshot07.png" alt="Fallout theme"><br><sub><b>FALLOUT</b></sub></td>
+<td><img src="screenshots/screenshot08.png" alt="Cyberpunk theme"><br><sub><b>CYBERPUNK</b></sub></td>
+</tr>
+</table>
 
 ---
 
@@ -137,10 +187,8 @@ git clone https://github.com/Glorfindel31/Nestor.git
 cd Nestor
 
 cargo build --release
-cargo run --release -p nestor
+cargo run --release -p rustynesting
 ```
-
-<!-- Verify the -p crate name against your Cargo.toml before publishing. -->
 
 Run the tests:
 
