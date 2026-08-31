@@ -1,193 +1,156 @@
-# Nestor
+<h1 align="center">Nestor</h1>
 
-### Free nesting for less waste.
+<p align="center"><strong>Free nesting for less waste.</strong></p>
 
-Nestor is a free, open-source nesting tool for **laser, CNC, and waterjet cutting**.
+<p align="center">
+An open-source nesting tool for <strong>laser, CNC and waterjet cutting</strong>.<br>
+Import your DXF or SVG parts, choose your stock sheets, and let Nestor fit as much as possible onto as little material as possible.
+</p>
 
-Import your DXF or SVG parts, choose your stock sheets, and let Nestor figure out how to fit as much as possible onto them — using as little material as possible.
+<p align="center">
+<a href="https://github.com/Glorfindel31/Nestor/releases/latest"><strong>⬇ Download the latest release</strong></a>
+·
+<a href="#build-from-source">Build from source</a>
+·
+<a href="https://ko-fi.com/glorfindel31">Support</a>
+</p>
+
+<!-- SCREENSHOT: put a real screenshot or a short GIF of a nest running here. It is the single most important element on this page. -->
+<p align="center">
+<img src="docs/screenshot.png" alt="Nestor nesting a mixed-shape job" width="900">
+</p>
 
 **No subscription. No paywall. No limit on how much material you can save.**
 
 ---
 
-## The idea
+## Download
 
-### Nesting should remain free.
+No Rust, no build step, no installer — download one file and run it.
 
-We live in a world where almost everything can become a service, a subscription, or another small payment.
+| Platform | File | Status |
+|---|---|---|
+| **Windows (x64)** | `Nestor_x64.exe` | Tested — this is the primary platform |
+| macOS (Apple Silicon) | `Nestor_macos_arm64` | Best-effort CI build, unsigned |
+| Linux (x64) | `Nestor_linux_x64` | Best-effort CI build, unsigned |
 
-Even tools whose entire purpose is to **help us waste less** can end up behind a paywall.
+**→ [Get them from the latest release](https://github.com/Glorfindel31/Nestor/releases/latest)**
 
-We think this one shouldn't be.
+<!-- Check these filenames against your current release assets before publishing. -->
 
-Nesting is useful to a manufacturing company producing thousands of parts.
+**Windows:** the executable is unsigned, so Windows SmartScreen will show *"Windows protected your PC"* the first time you run it. Click **More info → Run anyway**. Nothing is installed and nothing is written outside your own config folder.
 
-It is also useful to someone with a CNC machine in their garage, a maker cutting plywood, a student learning fabrication, or someone simply trying to make one project without throwing half a sheet in the bin.
+**macOS:** unsigned, so you will need to allow it past Gatekeeper (right-click → Open, then confirm).
 
-The principle is simple:
+**Linux:** `chmod +x` the file before running it.
 
-> **If software can help you use less material, making that software freely available creates less waste.**
+macOS and Linux builds compile and link in CI but have had little real-hardware testing. If you run Nestor on either, [opening an issue](https://github.com/Glorfindel31/Nestor/issues) — working or not — is genuinely useful.
 
-One person saving 10% of a sheet might not seem like much.
+---
 
-Thousands of people doing it on thousands of projects is different.
+## How good is it?
 
-And if the tool costs nothing to use, there is no reason not to try.
+"Free" should not mean "good enough."
 
-This is not just about saving money.
+Nestor is benchmarked against a commercial nesting engine, and matches it on the six benchmark jobs currently in the test suite — including an 800-piece mixed-shape job.
 
-It is about making **material efficiency accessible to everyone**.
+You do not have to take that on trust. Reproduce it yourself:
 
-So Nestor is free because we believe that tools that help people waste less should be as easy to access as possible.
+```sh
+sh bench.sh
+```
+
+> **Free software should not have to apologize for being free.**
 
 ---
 
 ## What is nesting?
 
-When you cut parts from a sheet of material, you usually have a lot of empty space left over.
+When you cut parts from a sheet, you usually leave a lot of empty space behind. Nesting arranges those parts as tightly as possible, which means:
 
-Nesting is the process of arranging those parts as efficiently as possible:
+- less material purchased
+- less material thrown away
+- fewer sheets to cut
+- lower production costs
 
-Better nesting means:
-
-* less material purchased
-* less material thrown away
-* fewer sheets to cut
-* lower production costs
-* less waste
-
-Nestor tries to automate that process.
-
----
-
-## Why Nestor?
-
-Nestor started as a from-scratch Rust rewrite of [Deepnest](https://deepnest.net/).
-
-The goal was not simply to make another nesting application.
-
-It was to build a **native, open-source nesting engine** that could be improved, inspected, reused and freely distributed.
-
-The result is a single native application written in Rust.
-
-No webview.
-No browser.
-No JavaScript runtime.
-No server.
-
-Just the geometry, the nesting engine and the application.
+Nestor automates that.
 
 ---
 
 ## What it can do
 
 ### Import & export
-
-* DXF import/export
-* SVG import/export
-* DXF layers are preserved
-* Metric units supported
-* Export the finished nest back to DXF or SVG
+- DXF import/export
+- SVG import/export
+- DXF layers preserved
+- Metric units
+- Export the finished nest back to DXF or SVG
 
 ### Nesting
-
-* Genetic-algorithm search
-* Multiple placement strategies
-* Tight-fit placement for irregular shapes
-* Gravity and box packing
-* Convex-hull placement
-* Shelf/band packing
-* Multiple strategies can compete against each other
-* Part rotation and ordering optimisation
-* Interlocking shapes
+- Genetic-algorithm search
+- Multiple placement strategies competing against each other
+- Tight-fit placement for irregular shapes
+- Gravity and box packing
+- Convex-hull placement
+- Shelf/band packing
+- Part rotation and ordering optimisation
+- Interlocking shapes
+- Mirroring for non-symmetric parts (opt-in, per session)
 
 ### Material management
-
-* Multiple stock sheets
-* Offcut/remnant tracking
-* Persistent parts library
-* Sheet consolidation
-* Automatic repacking
-* Independent edge clearance and part spacing
+- Multiple stock sheets
+- Offcut/remnant tracking
+- Persistent parts library
+- Sheet consolidation and automatic repacking
+- Independent edge clearance and part spacing
 
 ### Manufacturing safety
-
-Every result is audited before export.
-
-Nestor checks for things such as:
-
-* overlapping parts
-* parts outside the sheet
-* insufficient clearances
-
-The final audit is performed again from the actual geometry being exported.
+Every result is audited before export. Nestor checks for overlapping parts, parts outside the sheet, and insufficient clearances — and the final audit runs again against the actual geometry being exported, not against the plan that produced it.
 
 ---
 
-## How good is it?
+## Why Nestor?
 
-We don't want "free" to mean "good enough."
+Nestor is a from-scratch Rust rewrite of [Deepnest](https://deepnest.net/). The goal was not another nesting application, but a **native, open-source nesting engine** that can be inspected, improved, reused and freely distributed.
 
-Nestor is benchmarked against a commercial nesting engine.
+The result is a single native binary.
 
-As of **v2.4.0**, Nestor matches the commercial target on the six benchmark jobs currently in the test suite — including an 800-piece mixed-shape job.
+No webview. No browser. No JavaScript runtime. No server. Just the geometry, the nesting engine and the application.
 
-The benchmark can be reproduced locally:
-
-```bash
-sh bench.sh
 ```
-
-The goal is simple:
-
-> **Free software should not have to apologize for being free.**
-
----
-
-## Built with Rust
-
-Nestor is a native Rust application.
-
-The project is split into three main parts:
-
-```text
 crates/
 ├── geometry/    geometry, NFP, DXF/SVG, boolean operations
 ├── nesting/     placement, genetic algorithm, packing
 └── app/         native UI and application logic
 ```
 
-The geometry and nesting engines are independent library crates, so they can be tested and reused without the UI.
-
-The application itself uses `egui` / `eframe`, with `rayon` handling parallel computation.
+The geometry and nesting engines are independent library crates, so they can be tested and reused without the UI. The application uses `egui` / `eframe`, with `rayon` for parallel computation.
 
 ---
 
-## Getting started
+## Build from source
 
-You need a recent stable Rust toolchain.
+Most people should just [download a binary](https://github.com/Glorfindel31/Nestor/releases/latest). To build it yourself you need a recent stable Rust toolchain ([rustup](https://rustup.rs/)):
 
-Install Rust with [rustup](https://rustup.rs/).
+```sh
+git clone https://github.com/Glorfindel31/Nestor.git
+cd Nestor
 
-Then:
-
-```bash
-git clone https://github.com/Glorfindel31/RustyNesting.git
-cd RustyNesting
-
-cargo build
-cargo run -p rustynesting
+cargo build --release
+cargo run --release -p nestor
 ```
+
+<!-- Verify the -p crate name against your Cargo.toml before publishing. -->
 
 Run the tests:
 
-```bash
+```sh
 cargo test --workspace
 ```
 
-You can also run the headless nesting engine:
+The nesting engine also runs headless:
 
-```bash
+```sh
 cargo run --release --bin nest -- \
     tests/fixtures/two.dxf \
     --qty 50 \
@@ -198,78 +161,44 @@ cargo run --release --bin nest -- \
 
 ---
 
-## For businesses, makers, and everyone in between
+## Nesting should remain free
 
-Nesting is not only an industrial problem.
+Almost everything can become a service, a subscription, or another small payment. Even tools whose entire purpose is to help us waste less can end up behind a paywall. This one shouldn't.
 
-A factory might use it to save thousands of euros in material.
+Nesting is useful to a factory producing thousands of parts. It is just as useful to someone with a CNC machine in their garage, a maker cutting plywood, a student learning fabrication, or someone trying to finish one project without throwing half a sheet in the bin.
 
-A small workshop might use it to save a few sheets of plywood.
+> **If software can help you use less material, making that software freely available creates less waste.**
 
-A maker might use it to squeeze one more project out of the material they already have.
+One person saving 10% of a sheet is not much. Thousands of people doing it across thousands of projects is a different number entirely. And if the tool costs nothing, there is no reason not to try it.
 
-The scale changes.
+The scale changes. The principle doesn't.
 
-The principle doesn't.
-
-**Use what you have. Waste less.**
+**Material is finite. Waste is not inevitable. Efficiency should not be a luxury.**
 
 ---
 
 ## Open source means more than free
 
-Nestor is released under the **MIT License**.
+Nestor is released under the **MIT License** — use it, modify it, study it, build on it, ship it.
 
-That means you can use it, modify it, study it, build on it and share it.
-
-If you find a bug, improve the algorithm, add a feature, or simply have an idea for making nesting better, contributions are welcome.
-
-This project belongs to everyone who wants to make better use of material.
+Found a bug, improved the algorithm, added a feature, or just have an idea? [Issues](https://github.com/Glorfindel31/Nestor/issues) and pull requests are welcome. This project belongs to everyone who wants to make better use of material.
 
 ---
 
 ## Support the project
 
-Nestor is free to use and will remain free.
-
-That doesn't mean developing it costs nothing.
-
-If Nestor saves you material, saves you time, or simply becomes a useful part of your workshop, you can help keep development going:
+Nestor is free and will stay free. Developing it still costs time.
 
 **[Support Nestor on Ko-fi](https://ko-fi.com/glorfindel31)**
 
-No feature is locked behind a donation.
-
-No material-saving capability is reserved for paying users.
+No feature is locked behind a donation. No material-saving capability is reserved for paying users.
 
 ---
 
-## The manifesto
-
-**Material is finite.**
-
-**Waste is not inevitable.**
-
-**Efficiency should not be a luxury.**
-
-If a small piece of software can help someone use 10% less material, that software has value far beyond its price.
-
-And if we can give that tool to everyone for free, the potential impact becomes much larger than any single business, workshop, or project.
-
-So let's keep the useful things useful.
-
-Let's build tools that help people make more with less.
-
-Let's share them.
-
-Let's improve them.
-
-And let's keep nesting free.
-
----
-
-### Nestor
-
-**Free nesting. Less waste.**
-
-[GitHub](https://github.com/Glorfindel31/RustyNesting) · [License](LICENSE) · [Support](https://ko-fi.com/glorfindel31)
+<p align="center">
+<strong>Nestor — free nesting, less waste.</strong><br>
+<a href="https://github.com/Glorfindel31/Nestor">GitHub</a> ·
+<a href="https://github.com/Glorfindel31/Nestor/releases/latest">Download</a> ·
+<a href="LICENSE">MIT License</a> ·
+<a href="https://ko-fi.com/glorfindel31">Support</a>
+</p>
