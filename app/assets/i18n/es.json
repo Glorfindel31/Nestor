@@ -41,6 +41,8 @@
   "th_grain_tooltip": "Limita los ángulos a los que puede colocarse esta pieza. Úselo cuando el material tenga una dirección: una veta visible, un acabado cepillado, o un motivo impreso que deba correr igual en cada pieza. TODOS deja que el anidado use todos los ángulos que explora (mejor aprovechamiento).",
   "th_part_mirror": "VOLTEO",
   "th_part_mirror_tooltip": "Si esta pieza concreta puede cortarse volteada, ignorando el ajuste general VOLTEAR PIEZAS. Elija PROHIBIR para una pieza que deba mantener una cara hacia arriba (una cara buena, una cara impresa, un detalle asimétrico) en un trabajo donde voltear sea por lo demás aceptable.",
+  "th_keep_holes": "HUECOS VACÍOS",
+  "th_keep_holes_tooltip": "Si los huecos de esta pieza quedan vacíos. Marcado, no se anida nada dentro - úselo cuando un hueco forma parte de la pieza acabada y no es material libre. Sin marcar (por defecto), un hueco lo bastante grande para alojar una pieza menor se aprovecha como material.",
   "rot_any": "TODOS",
   "rot_0_180": "solo 0 / 180",
   "rot_quarter": "pasos de 90°",

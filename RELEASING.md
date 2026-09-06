@@ -19,9 +19,33 @@ same place.
 - [ ] Bump `[workspace.package] version` in the root `Cargo.toml`.
 - [ ] `cargo check` once so `Cargo.lock` picks the new version up.
 - [ ] `git diff Cargo.lock` shows the three workspace crates moving, nothing else.
+- [ ] `git tag v<version>` at the end (§8). Nothing derives the tag from
+      `Cargo.toml`, and the in-app updater compares against the *tag*:
+      `update.rs` reads GitHub's `releases/latest` `tag_name`, strips the
+      leading `v` and compares it numerically against `CARGO_PKG_VERSION`. A
+      tag that disagrees with `Cargo.toml` means every user is told to update
+      to the version they already run, or never told at all.
 
 > This has been shipped wrong once: `v2.4.0: audit, shape library, remnants`
 > never touched `Cargo.toml`, so 36 commits went out under `2.3.1`.
+
+**Everything below derives from that one line - do not edit any of it, and
+do not go looking for a version literal that isn't there** (swept 2026-09-06,
+at `2.6.8`):
+
+| Place | How it gets the version |
+| --- | --- |
+| `app/Cargo.toml`, `crates/geometry/Cargo.toml`, `crates/nesting/Cargo.toml` | `version.workspace = true` |
+| `Cargo.lock` | those same three entries, refreshed by the `cargo check` above |
+| `app/src/ui/shell.rs` (the `v2.6.8` in the window) | `env!("CARGO_PKG_VERSION")` |
+| `app/src/worker.rs`'s update check, `app/src/update.rs`'s `User-Agent` | `env!("CARGO_PKG_VERSION")` |
+| the exe's `FileVersion`/`ProductVersion` | `winresource` reads `CARGO_PKG_VERSION` in `app/build.rs`; the four fields set by hand there carry no version |
+| the release asset name | none - `Nestor_x64.exe` is deliberately version-free, see §5 |
+| `README.md`, `docs/**`, `app/assets/i18n/*.json` | no version literal at all; the README links `/releases/latest`, and i18n's `update_available` fills `{version}` at runtime |
+
+No `.rc` or `.manifest` is checked in - `winresource` generates the resource
+at build time. The only tests that mention a version string are
+`update.rs`'s own `is_newer` tests, which use made-up numbers.
 
 ## 2. Tests
 

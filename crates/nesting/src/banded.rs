@@ -1291,11 +1291,11 @@ mod tests {
             .collect();
 
         let mut map = std::collections::HashMap::new();
-        map.insert(0usize, crate::placement::PartRule { angles: vec![0.0, 180.0], mirror: false });
+        map.insert(0usize, crate::placement::PartRule { angles: vec![0.0, 180.0], mirror: false, no_hole_nesting: false });
         // Every copy carries its own entry, exactly as `dto::expand_parts`
         // writes them - the rule is per part id, not per shape.
         for id in 1..8 {
-            map.insert(id, crate::placement::PartRule { angles: vec![0.0, 180.0], mirror: false });
+            map.insert(id, crate::placement::PartRule { angles: vec![0.0, 180.0], mirror: false, no_hole_nesting: false });
         }
         let rules: PartRules = std::sync::Arc::new(map);
 

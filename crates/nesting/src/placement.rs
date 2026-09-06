@@ -262,6 +262,22 @@ pub struct PartRule {
     pub angles: Vec<f64>,
     /// Whether this part may be mirrored, overriding the job-wide switch.
     pub mirror: bool,
+    /// When true, nothing may be nested inside this part's holes - the
+    /// hole-restore regions `geometry::obstacle_nfp` attaches as `children`
+    /// are dropped, so the part's outer NFP alone decides where a neighbour
+    /// may sit. The driving case is a hole that is a real feature of the
+    /// finished piece (a bore, a cutout kept as scrap-free material, a part
+    /// the cutter's head cannot reach into safely), not free material.
+    pub no_hole_nesting: bool,
+}
+
+/// Whether this part's holes are off-limits as nesting space. Keyed by the
+/// part's *instance* id, like every other `PartRules` lookup - `expand_parts`
+/// writes one entry per quantity-copy, not one per shape. Masks off
+/// `MIRROR_ID_BIT` for the same reason `rotation_steps` does - a mirrored
+/// copy's rule is authored against the un-flipped id.
+fn holes_are_off_limits(rules: &PartRules, part_id: usize) -> bool {
+    rules.get(&(part_id & !crate::dispatch::MIRROR_ID_BIT)).is_some_and(|r| r.no_hole_nesting)
 }
 
 /// Part id -> its constraint. `Arc` because it rides on `PlacementConfig`
@@ -1257,6 +1273,11 @@ pub(crate) fn try_place_part_on_sheet_accumulated(
             break;
         };
         let outer = crate::profile::OBSTACLE_SHIFT.time(|| shift_points(nfp_outer, obstacle.placement.x, obstacle.placement.y));
+
+        // A part whose holes are off-limits behaves exactly like a holeless
+        // one here: no restore regions means its outer NFP is never unioned
+        // back into, so nothing can land inside it.
+        let nfp_children: &[Vec<Point>] = if holes_are_off_limits(&config.part_rules, obstacle.id) { &[] } else { nfp_children.as_slice() };
 
         if nfp_children.is_empty() {
             pending_clips.push(outer);
@@ -3234,6 +3255,33 @@ mod tests {
         assert_eq!(result.placements[1].parts.len(), 1);
     }
 
+    /// `PartRule::no_hole_nesting`: a part whose holes are declared off
+    /// limits must not have anything nested inside them, even when the hole
+    /// is the only free material left on the sheet.
+    #[test]
+    fn a_parts_holes_can_be_declared_off_limits() {
+        // The obstacle fills the sheet exactly, so its 10x10 hole is the
+        // only place a 4x4 part could ever go.
+        let sheet = square(0.0, 0.0, 30.0);
+        let obstacle = PlacedObstacle {
+            polygon: square_with_hole(0.0, 0.0, 30.0, 10.0, 10.0, 10.0),
+            id: 0,
+            source_id: 0,
+            rotation: 0.0,
+            placement: Placement { x: 0.0, y: 0.0 },
+        };
+        let part = square(0.0, 0.0, 4.0);
+        let sheet_nfp = inner_nfp(&sheet, &part, 0.3).expect("part fits the empty sheet");
+        let try_it = |config: &PlacementConfig| try_place_part_on_sheet(&part, 1, 0.0, &sheet_nfp, &sheet, std::slice::from_ref(&obstacle), config, &NfpCache::new(), &|_| {});
+
+        let free = try_it(&config(PlacementType::Gravity));
+        assert!(matches!(free, PlaceOnSheetOutcome::Placed(_)), "the hole is usable material by default: {free:?}");
+
+        let map: HashMap<usize, PartRule> = HashMap::from([(0, PartRule { angles: Vec::new(), mirror: false, no_hole_nesting: true })]);
+        let blocked = try_it(&PlacementConfig { part_rules: std::sync::Arc::new(map), ..config(PlacementType::Gravity) });
+        assert!(matches!(blocked, PlaceOnSheetOutcome::NoRoom), "nothing may be nested in a blocked part's hole: {blocked:?}");
+    }
+
     /// Regression test for the "holed-obstacle path is untested" gap
     /// (reviewer.md finding): a part with a hole, a second part nested
     /// inside that hole, and a third part that must not be allowed to
@@ -3284,7 +3332,7 @@ mod tests {
 
     fn rules(entries: &[(usize, &[f64], bool)]) -> PlacementConfig {
         let map: HashMap<usize, PartRule> =
-            entries.iter().map(|(id, angles, mirror)| (*id, PartRule { angles: angles.to_vec(), mirror: *mirror })).collect();
+            entries.iter().map(|(id, angles, mirror)| (*id, PartRule { angles: angles.to_vec(), mirror: *mirror, no_hole_nesting: false })).collect();
         PlacementConfig { part_rules: std::sync::Arc::new(map), ..config(PlacementType::TightFit) }
     }
 

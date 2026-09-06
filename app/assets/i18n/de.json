@@ -41,6 +41,8 @@
   "th_grain_tooltip": "Schränkt ein, in welchen Winkeln dieses Teil abgelegt werden darf. Zu benutzen, wenn das Material eine Richtung hat: eine sichtbare Maserung, eine gebürstete Oberfläche oder ein gedrucktes Muster, das auf jedem Teil gleich laufen muss. ALLE lässt die Schachtelung jeden gesuchten Winkel nutzen (beste Packung).",
   "th_part_mirror": "WENDEN",
   "th_part_mirror_tooltip": "Ob genau dieses Teil gewendet geschnitten werden darf und damit die auftragsweite Einstellung TEILE WENDEN übergeht. Wählen Sie VERBIETEN für ein Teil, das eine Seite oben behalten muss (eine Schauseite, eine bedruckte Seite, ein unsymmetrisches Merkmal) in einem Auftrag, in dem Wenden sonst in Ordnung ist.",
+  "th_keep_holes": "LÖCHER FREI",
+  "th_keep_holes_tooltip": "Ob die Löcher dieses Teils leer bleiben. Angehakt wird nichts darin verschachtelt - für ein Loch, das zum fertigen Teil gehört und kein freies Material ist. Nicht angehakt (Voreinstellung) wird ein Loch, in das ein kleineres Teil passt, als Material genutzt.",
   "rot_any": "ALLE",
   "rot_0_180": "nur 0 / 180",
   "rot_quarter": "90°-Schritte",

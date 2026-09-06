@@ -203,6 +203,11 @@ pub struct PartDto {
     /// the job-wide switch.
     #[serde(default)]
     pub mirror: Option<bool>,
+    /// When true, this part's holes are not nesting space - no smaller part
+    /// may be placed inside them. Default `false` keeps the old behaviour,
+    /// where a hole big enough to hold a neighbour is used as free material.
+    #[serde(default)]
+    pub no_hole_nesting: bool,
 }
 
 fn one() -> usize {
@@ -286,7 +291,8 @@ pub fn expand_parts(parts: Vec<PartDto>, mirror: bool) -> ExpandedParts {
         // Only parts that actually constrain something get an entry - an
         // empty map is the "everything is unconstrained" fast path every
         // lookup below already treats as free.
-        let rule = (!angles.is_empty() || may_mirror != mirror).then_some(nesting::placement::PartRule { angles, mirror: may_mirror });
+        let rule = (!angles.is_empty() || may_mirror != mirror || part.no_hole_nesting)
+            .then_some(nesting::placement::PartRule { angles, mirror: may_mirror, no_hole_nesting: part.no_hole_nesting });
 
         let polygon: LayeredPolygon = part.polygon.into();
         let Some(last) = part.quantity.checked_sub(1) else { continue };
@@ -680,17 +686,19 @@ pub struct SheetPlacementDto {
 pub struct PartRuleDto {
     pub angles: Vec<f64>,
     pub mirror: bool,
+    #[serde(default)]
+    pub no_hole_nesting: bool,
 }
 
 impl From<&nesting::placement::PartRule> for PartRuleDto {
     fn from(rule: &nesting::placement::PartRule) -> Self {
-        PartRuleDto { angles: rule.angles.clone(), mirror: rule.mirror }
+        PartRuleDto { angles: rule.angles.clone(), mirror: rule.mirror, no_hole_nesting: rule.no_hole_nesting }
     }
 }
 
 impl From<PartRuleDto> for nesting::placement::PartRule {
     fn from(dto: PartRuleDto) -> Self {
-        nesting::placement::PartRule { angles: dto.angles, mirror: dto.mirror }
+        nesting::placement::PartRule { angles: dto.angles, mirror: dto.mirror, no_hole_nesting: dto.no_hole_nesting }
     }
 }
 

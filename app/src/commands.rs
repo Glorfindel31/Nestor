@@ -1514,7 +1514,7 @@ mod tests {
     /// Every test part is unconstrained unless it says otherwise - see
     /// `PartDto::allowed_rotations`/`mirror`.
     fn part(polygon: PolygonDto, quantity: usize) -> PartDto {
-        PartDto { polygon, quantity, allowed_rotations: None, mirror: None }
+        PartDto { polygon, quantity, allowed_rotations: None, mirror: None, no_hole_nesting: false }
     }
 
     fn rect_dto(w: f64, h: f64) -> PolygonDto {
@@ -2915,8 +2915,8 @@ mod tests {
 
         let expanded = expand_parts(
             vec![
-                PartDto { polygon: plain, quantity: 1, allowed_rotations: None, mirror: None },
-                PartDto { polygon: bitten, quantity: 1, allowed_rotations: None, mirror: None },
+                PartDto { polygon: plain, quantity: 1, allowed_rotations: None, mirror: None, no_hole_nesting: false },
+                PartDto { polygon: bitten, quantity: 1, allowed_rotations: None, mirror: None, no_hole_nesting: false },
             ],
             false,
         );
@@ -3058,8 +3058,8 @@ mod tests {
         let request = RunNestRequest {
             sheets: vec![square_dto(200.0)],
             parts: vec![
-                PartDto { polygon: l_shape(1.0), quantity: 4, allowed_rotations: None, mirror: Some(false) },
-                PartDto { polygon: l_shape(0.8), quantity: 4, allowed_rotations: None, mirror: None },
+                PartDto { polygon: l_shape(1.0), quantity: 4, allowed_rotations: None, mirror: Some(false), no_hole_nesting: false },
+                PartDto { polygon: l_shape(0.8), quantity: 4, allowed_rotations: None, mirror: None, no_hole_nesting: false },
             ],
             config: cfg,
         };
@@ -3092,7 +3092,7 @@ mod tests {
         let request = RunNestRequest {
             sheets: vec![square_dto(200.0)],
             parts: vec![
-                PartDto { polygon: square_dto(20.0), quantity: 2, allowed_rotations: None, mirror: Some(true) },
+                PartDto { polygon: square_dto(20.0), quantity: 2, allowed_rotations: None, mirror: Some(true), no_hole_nesting: false },
                 part(square_dto(15.0), 2),
             ],
             config: cfg,
@@ -3101,6 +3101,52 @@ mod tests {
         let mirrored: Vec<usize> = response.parts_by_id.keys().copied().filter(|id| id & MIRROR_ID_BIT != 0).collect();
         assert!(!mirrored.is_empty(), "the opted-in part should have mirrored variants");
         assert!(mirrored.iter().all(|id| id & !MIRROR_ID_BIT < 2), "only the opted-in part, got {mirrored:?}");
+    }
+
+    /// `no_hole_nesting` end to end, through `expand_parts`'s id numbering -
+    /// the ring is the *second* part defined, so its rule sits at instance
+    /// ids well past its source id, and a lookup keyed by the wrong one
+    /// silently leaves the hole open.
+    #[test]
+    fn a_part_can_keep_its_own_holes_empty() {
+        let ring = {
+            let mut poly = square_dto(30.0);
+            poly.children = vec![PolygonDto::new(
+                vec![PointDto { x: 9.0, y: 9.0 }, PointDto { x: 21.0, y: 9.0 }, PointDto { x: 21.0, y: 21.0 }, PointDto { x: 9.0, y: 21.0 }],
+                "0".into(),
+                None,
+            )];
+            poly
+        };
+        // 60x32: the ring is not dominant (it would close the sheet on its
+        // own), and the strip beside it holds twelve fillers - so the
+        // thirteenth onward can only go in the ring's hole.
+        let filler_ids_in_hole = |no_hole_nesting: bool| -> usize {
+            let request = RunNestRequest {
+                sheets: vec![rect_dto(60.0, 32.0)],
+                parts: vec![
+                    PartDto { polygon: square_dto(8.0), quantity: 14, allowed_rotations: None, mirror: None, no_hole_nesting: false },
+                    PartDto { polygon: ring.clone(), quantity: 1, allowed_rotations: None, mirror: None, no_hole_nesting },
+                ],
+                config: config(3),
+            };
+            let response = run_nest(request).expect("nests");
+            let ring_id = 14;
+            let mut in_hole = 0;
+            for sheet in &response.placements {
+                let Some(ring_at) = sheet.parts.iter().find(|p| p.id == ring_id) else { continue };
+                let (hx, hy) = (ring_at.x + 9.0, ring_at.y + 9.0);
+                in_hole += sheet
+                    .parts
+                    .iter()
+                    .filter(|p| p.id != ring_id && p.x >= hx - 1e-6 && p.y >= hy - 1e-6 && p.x + 8.0 <= hx + 12.0 + 1e-6 && p.y + 8.0 <= hy + 12.0 + 1e-6)
+                    .count();
+            }
+            in_hole
+        };
+
+        assert!(filler_ids_in_hole(false) > 0, "baseline: the hole is free material, something should be nested in it");
+        assert_eq!(filler_ids_in_hole(true), 0, "nothing may be nested inside a part that keeps its holes empty");
     }
 
     /// Grain direction end to end: whatever the search does, the constrained
@@ -3112,7 +3158,7 @@ mod tests {
         let request = RunNestRequest {
             sheets: vec![square_dto(300.0)],
             parts: vec![
-                PartDto { polygon: rect_dto(80.0, 20.0), quantity: 3, allowed_rotations: Some(vec![0.0, 180.0]), mirror: None },
+                PartDto { polygon: rect_dto(80.0, 20.0), quantity: 3, allowed_rotations: Some(vec![0.0, 180.0]), mirror: None, no_hole_nesting: false },
                 part(rect_dto(40.0, 40.0), 2),
             ],
             config: cfg,
@@ -3144,12 +3190,13 @@ mod tests {
             quantity: 1,
             allowed_rotations: Some(vec![540.0, -90.0, 180.0, 180.0, f64::NAN]),
             mirror: None,
+            no_hole_nesting: false,
         }];
         let expanded = expand_parts(parts, false);
         assert_eq!(expanded.part_rules[&0].angles, vec![180.0, 270.0], "540 -> 180 (deduped), -90 -> 270, NaN dropped");
 
         // An explicitly empty list is not "this part may never be placed".
-        let parts = vec![PartDto { polygon: square_dto(10.0), quantity: 1, allowed_rotations: Some(Vec::new()), mirror: None }];
+        let parts = vec![PartDto { polygon: square_dto(10.0), quantity: 1, allowed_rotations: Some(Vec::new()), mirror: None, no_hole_nesting: false }];
         assert!(expand_parts(parts, false).part_rules.is_empty(), "an empty allow-list means unconstrained, not unplaceable");
     }
 

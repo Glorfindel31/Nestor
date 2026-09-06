@@ -41,6 +41,8 @@
   "th_grain_tooltip": "Giới hạn các góc mà chi tiết này được phép đặt. Dùng khi vật liệu có hướng: vân gỗ nhìn thấy, bề mặt xước, hay họa tiết in phải chạy cùng chiều trên mọi chi tiết. TẤT CẢ cho phép dùng mọi góc (xếp tốt nhất).",
   "th_part_mirror": "LẬT",
   "th_part_mirror_tooltip": "Chi tiết cụ thể này có được cắt ở trạng thái lật ngược hay không, ghi đè thiết lập LẬT NGƯỢC chung. Chọn CẤM cho chi tiết phải giữ nguyên một mặt (mặt đẹp, mặt in, chi tiết không đối xứng).",
+  "th_keep_holes": "GIỮ LỖ TRỐNG",
+  "th_keep_holes_tooltip": "Lỗ của chi tiết này có được giữ trống hay không. Khi bật, không xếp gì vào bên trong - dùng khi lỗ là một phần của chi tiết hoàn thiện chứ không phải vật liệu thừa. Khi tắt (mặc định), lỗ đủ lớn để chứa chi tiết nhỏ hơn sẽ được tận dụng.",
   "rot_any": "TẤT CẢ",
   "rot_0_180": "Chỉ 0 / 180",
   "rot_quarter": "Bước 90°",

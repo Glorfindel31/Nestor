@@ -41,6 +41,8 @@
   "th_grain_tooltip": "Limita gli angoli a cui questo pezzo può essere posato. Da usare quando il materiale ha una direzione: una venatura visibile, una finitura satinata, o una stampa che deve correre nello stesso verso su ogni pezzo. TUTTI lascia usare all'annidamento tutti gli angoli che esplora (miglior riempimento).",
   "th_part_mirror": "RIBALT.",
   "th_part_mirror_tooltip": "Se questo specifico pezzo può essere tagliato ribaltato, scavalcando l'impostazione generale RIBALTA I PEZZI. Scegli VIETA per un pezzo che deve tenere una faccia in su (una faccia buona, una faccia stampata, un dettaglio asimmetrico) in un lavoro in cui ribaltare sarebbe altrimenti accettabile.",
+  "th_keep_holes": "FORI VUOTI",
+  "th_keep_holes_tooltip": "Se i fori di questo pezzo restano vuoti. Selezionato, non viene annidato nulla al loro interno - da usare quando un foro fa parte del pezzo finito e non è materiale libero. Deselezionato (predefinito), un foro abbastanza grande da contenere un pezzo più piccolo viene usato come materiale.",
   "rot_any": "TUTTI",
   "rot_0_180": "solo 0 / 180",
   "rot_quarter": "passi di 90°",

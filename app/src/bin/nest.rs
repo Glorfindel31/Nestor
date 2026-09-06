@@ -230,7 +230,7 @@ fn run() -> Result<(), String> {
             // several of them.
             labels.push(if shape_count > 1 { format!("{stem}#{index}") } else { stem.clone() });
             quantities.push(quantity);
-            parts.push(PartDto { polygon, quantity, allowed_rotations: None, mirror: None });
+            parts.push(PartDto { polygon, quantity, allowed_rotations: None, mirror: None, no_hole_nesting: false });
         }
     }
 

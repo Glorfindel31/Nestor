@@ -339,7 +339,7 @@ mod tests {
                 PlacedPart { id: 1, placement: Placement { x: 0.0, y: 100.0 }, rotation: 0.0 },
             ],
         };
-        let rules: PartRules = std::sync::Arc::new(HashMap::from([(1, PartRule { angles: vec![0.0, 180.0], mirror: false })]));
+        let rules: PartRules = std::sync::Arc::new(HashMap::from([(1, PartRule { angles: vec![0.0, 180.0], mirror: false, no_hole_nesting: false })]));
         let cfg = PlacementConfig { rotations: 8, part_rules: rules, ..placement_config() };
 
         let result = repack_sheet(&sheet, &current, &parts_by_id, &HashMap::new(), &ga_config(), &cfg, 20, 0, &[0], &|| false).expect("repacks");

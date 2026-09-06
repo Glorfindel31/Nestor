@@ -41,6 +41,8 @@
   "th_grain_tooltip": "Restrict which angles this piece may be placed at. Use it when the material has a direction: a visible grain, a brushed finish, or a printed pattern that has to run the same way on every piece. ANY lets the nest use every angle it is searching (best packing).",
   "th_part_mirror": "FLIP",
   "th_part_mirror_tooltip": "Whether this specific piece may be cut flipped over, overriding the job-wide FLIP PIECES OVER setting. Use DENY for a piece that must keep one face up (a good side, a printed face, an asymmetric feature) in a job where flipping is otherwise fine.",
+  "th_keep_holes": "KEEP HOLES",
+  "th_keep_holes_tooltip": "Whether this piece's holes stay empty. When ticked, nothing is nested inside them - use it when a hole is a feature of the finished piece rather than free material. Unticked (the default), a hole big enough to hold a smaller piece is used as material.",
   "rot_any": "ANY",
   "rot_0_180": "0 / 180 only",
   "rot_quarter": "90° steps",

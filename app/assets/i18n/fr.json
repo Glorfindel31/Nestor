@@ -41,6 +41,8 @@
   "th_grain_tooltip": "Limite les angles auxquels cette pièce peut être posée. À utiliser quand la matière a un sens : un fil visible, une finition brossée, ou un motif imprimé qui doit courir dans le même sens sur chaque pièce. TOUS laisse l'imbrication utiliser tous les angles qu'elle explore (meilleur remplissage).",
   "th_part_mirror": "RETOURN.",
   "th_part_mirror_tooltip": "Si cette pièce précise peut être découpée retournée, outrepassant le réglage global RETOURNER LES PIÈCES. Choisissez INTERDIT pour une pièce qui doit garder une face vers le haut (une belle face, une face imprimée, un détail asymétrique) dans un travail où le retournement est sinon acceptable.",
+  "th_keep_holes": "TROUS VIDES",
+  "th_keep_holes_tooltip": "Si les trous de cette pièce restent vides. Coché, rien n'est imbriqué à l'intérieur - à utiliser quand un trou fait partie de la pièce finie et n'est pas de la matière libre. Décoché (par défaut), un trou assez grand pour contenir une pièce plus petite sert de matière.",
   "rot_any": "TOUS",
   "rot_0_180": "0 / 180 seulement",
   "rot_quarter": "pas de 90°",
