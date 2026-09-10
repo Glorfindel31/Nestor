@@ -39,6 +39,13 @@ pub struct Prefs {
     /// real nest runs long enough that the operator walks away from the
     /// screen, which is the whole reason to make a noise about it.
     pub sound_on_finish: bool,
+
+    /// Whether SAVE JOB writes each shape's geometry alongside its file
+    /// path. On by default: it costs a few kilobytes and it is what makes a
+    /// moved or renamed drawing - and a job file sent to someone else -
+    /// still open. A drawing still at the path the job records always wins
+    /// over the saved copy, so this only ever adds a fallback.
+    pub project_geometry: bool,
 }
 
 impl Default for Prefs {
@@ -50,6 +57,7 @@ impl Default for Prefs {
             help_dismissed: false,
             live_view: false,
             sound_on_finish: true,
+            project_geometry: true,
         }
     }
 }

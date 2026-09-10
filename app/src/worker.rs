@@ -28,7 +28,16 @@ use crate::dto::{
     RunNestResponse, SheetPlacementDto, ValidatePlacementRequest, ValidatePlacementResponse,
 };
 
-use crate::dto::{AuditReportDto, AuditRequest, RemnantDto, RemnantRequest, ShapeStore};
+use crate::dto::{AuditReportDto, AuditRequest, ProjectFile, ProjectShape, RemnantDto, RemnantRequest, ShapeStore};
+
+/// A saved job, opened: its settings, its shapes with every drawing that
+/// still resolves already re-imported, and one warning per shape that had to
+/// fall back to the copy inside the job file.
+pub struct OpenedProject {
+    pub config: NestConfigDto,
+    pub shapes: Vec<ProjectShape>,
+    pub warnings: Vec<String>,
+}
 
 /// Which exporter a save targets. The three share one request shape
 /// (`ExportRequest`); only PDF needs the extra report metadata.
@@ -68,7 +77,10 @@ pub enum Msg {
     /// `size_guessed` means nothing in the file said how big the drawing is
     /// and 96dpi was assumed - see `geometry::svg_import::size_is_guessed`.
     /// Always `false` for DXF, which carries real-world units by definition.
-    Imported { file: String, shapes: Vec<PolygonDto>, size_guessed: bool },
+    /// `path`/`svg_unit` are what a project file records so a later reload
+    /// can pick up the current version of the drawing - see
+    /// `dto::ShapeSource`.
+    Imported { file: String, path: std::path::PathBuf, svg_unit: Option<String>, shapes: Vec<PolygonDto>, size_guessed: bool },
     ImportFailed { file: String, error: String },
     ImportBatchDone { ok: usize, failed: usize },
 
@@ -113,6 +125,11 @@ pub enum Msg {
     /// Offcuts harvested from the displayed result.
     RemnantsComputed(Box<Result<Vec<RemnantDto>, String>>),
     Exported { format: ExportFormat, result: Result<(), String> },
+
+    /// A saved job, with every drawing it names already re-imported - see
+    /// `OpenedProject` and `commands::resolve_project`.
+    ProjectLoaded(Box<Result<OpenedProject, String>>),
+    ProjectSaved(Result<std::path::PathBuf, String>),
 
     /// Startup: whatever `config.json` and `best_result.json` held.
     Loaded { config: Option<NestConfigDto>, best: Option<BestResultDto>, errors: Vec<String> },
@@ -202,7 +219,7 @@ impl Worker {
                 match result {
                     Ok((shapes, size_guessed)) => {
                         ok += 1;
-                        emit.send(Msg::Imported { file: name, shapes, size_guessed });
+                        emit.send(Msg::Imported { file: name, path, svg_unit: svg_unit.clone(), shapes, size_guessed });
                     }
                     Err(error) => {
                         failed += 1;
@@ -318,6 +335,28 @@ impl Worker {
 
     pub fn audit(&self, request: AuditRequest) {
         self.spawn(move |emit| emit.send(Msg::Audited(Box::new(commands::audit_nest(request)))));
+    }
+
+    /// Reads a project and re-imports every drawing it still resolves, all
+    /// on the one job thread: the re-import is exactly what would freeze the
+    /// window if the UI fed the paths back through the normal import path
+    /// itself, and doing it here keeps the whole open in one message.
+    pub fn open_project(&self, path: std::path::PathBuf) {
+        self.spawn(move |emit| {
+            let result = commands::load_project(&path.to_string_lossy()).map(|project: ProjectFile| {
+                let config = project.config.clone();
+                let (shapes, warnings) = commands::resolve_project(project);
+                OpenedProject { config, shapes, warnings }
+            });
+            emit.send(Msg::ProjectLoaded(Box::new(result)));
+        });
+    }
+
+    pub fn save_project(&self, path: std::path::PathBuf, project: ProjectFile) {
+        self.spawn(move |emit| {
+            let result = commands::save_project(&path.to_string_lossy(), &project).map(|()| path);
+            emit.send(Msg::ProjectSaved(result));
+        });
     }
 
     pub fn load_store(&self) {

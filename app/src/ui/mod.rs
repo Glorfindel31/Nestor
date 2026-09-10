@@ -465,7 +465,7 @@ impl App {
 
     fn handle(&mut self, msg: Msg) {
         match msg {
-            Msg::Imported { file, shapes, size_guessed } => {
+            Msg::Imported { file, path, svg_unit, shapes, size_guessed } => {
                 self.console.log(console::Kind::Plain, format!("imported {} shape(s) from {file}", shapes.len()));
                 if size_guessed {
                     // Loud on purpose: this is the one import that succeeds
@@ -477,8 +477,18 @@ impl App {
                     self.import_status.err(warning);
                 }
                 self.imported_this_batch += shapes.len();
+                // Layer-local ordinal, counted as the file yields shapes -
+                // the key a project file re-links by. See `dto::ShapeSource`.
+                let mut seen: HashMap<String, usize> = HashMap::new();
                 for poly in shapes {
+                    let layer = poly.layer.clone();
+                    let index = seen.entry(layer.clone()).or_default();
+                    let source = crate::dto::ShapeSource { path: path.clone(), layer, index: *index, svg_unit: svg_unit.clone() };
+                    *index += 1;
                     self.push_shape(file.clone(), poly);
+                    if let Some(row) = self.shapes.last_mut() {
+                        row.source = Some(source);
+                    }
                     // A sample job's parts arrive at the quantity that makes
                     // it a job rather than a single lonely part.
                     if let (Some(qty), Some(row)) = (self.preset_qty, self.shapes.last_mut()) {
@@ -720,6 +730,49 @@ impl App {
                     self.recover_prompt = Some(Box::new(b));
                 }
             }
+            Msg::ProjectLoaded(result) => match *result {
+                Ok(project) => {
+                    for warning in &project.warnings {
+                        self.console.error(warning.clone());
+                    }
+                    self.reset();
+                    self.cfg.from_dto(&project.config);
+                    for shape in project.shapes {
+                        // `resolve_project` guarantees this; a row without
+                        // geometry was dropped there, with a warning.
+                        let Some(poly) = shape.polygon else { continue };
+                        self.push_shape(shape.file, poly);
+                        let Some(row) = self.shapes.last_mut() else { continue };
+                        row.role = state::Role::from_dto(shape.role);
+                        row.qty = shape.qty;
+                        row.rot = state::RotRule::from_angles(shape.allowed_rotations.as_deref());
+                        row.mirror = state::MirrorRule::from_option(shape.mirror);
+                        row.no_hole_nesting = shape.no_hole_nesting;
+                        row.source = shape.source;
+                    }
+                    let msg = self.tv("project_opened", &[("n", &self.shapes.len().to_string())]);
+                    self.import_status.ok(msg.clone());
+                    self.console.log(console::Kind::Run, msg);
+                    if !project.warnings.is_empty() {
+                        self.import_status.err(self.tv("project_opened_warned", &[("n", &project.warnings.len().to_string())]));
+                    }
+                }
+                Err(e) => {
+                    self.import_status.err(e.clone());
+                    self.console.error(e);
+                }
+            },
+            Msg::ProjectSaved(result) => match result {
+                Ok(path) => {
+                    let msg = self.tv("project_saved", &[("file", &path.display().to_string())]);
+                    self.import_status.ok(msg.clone());
+                    self.console.log(console::Kind::Run, msg);
+                }
+                Err(e) => {
+                    self.import_status.err(e.clone());
+                    self.console.error(e);
+                }
+            },
             Msg::UpdateAvailable(release) => {
                 self.console.log(console::Kind::Plain, format!("update available: v{}", release.version));
                 self.update = Some(release);

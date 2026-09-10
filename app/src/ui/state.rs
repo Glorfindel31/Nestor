@@ -8,7 +8,7 @@
 //! `ShapeRow`, and egui rebuilds every row from them each frame - so the
 //! table can be rebuilt freely, and that whole class of staleness is gone.
 
-use crate::dto::{NestConfigDto, PlacementTypeDto, PolygonDto, RunScales};
+use crate::dto::{NestConfigDto, PlacementTypeDto, PolygonDto, ProjectRole, RunScales, ShapeSource};
 
 /// One imported (or hand-defined) shape, plus everything the user has
 /// decided about it.
@@ -40,6 +40,10 @@ pub struct ShapeRow {
     /// job. Rows that were imported from a file have no store entry and stay
     /// `None`.
     pub from_store: Option<usize>,
+    /// Which file, layer and layer-local position this row was imported
+    /// from. `None` for a built rectangle or a library pick - those have no
+    /// drawing to go back to. See `dto::ShapeSource`.
+    pub source: Option<ShapeSource>,
 }
 
 impl ShapeRow {
@@ -61,6 +65,7 @@ impl ShapeRow {
             selected: false,
             area,
             from_store: None,
+            source: None,
         }
     }
 }
@@ -74,6 +79,22 @@ pub enum Role {
 
 impl Role {
     pub const ALL: [Role; 3] = [Role::Part, Role::Sheet, Role::Skip];
+
+    pub fn to_dto(self) -> ProjectRole {
+        match self {
+            Role::Part => ProjectRole::Part,
+            Role::Sheet => ProjectRole::Sheet,
+            Role::Skip => ProjectRole::Skip,
+        }
+    }
+
+    pub fn from_dto(role: ProjectRole) -> Self {
+        match role {
+            ProjectRole::Part => Role::Part,
+            ProjectRole::Sheet => Role::Sheet,
+            ProjectRole::Skip => Role::Skip,
+        }
+    }
 
     pub fn key(self) -> &'static str {
         match self {

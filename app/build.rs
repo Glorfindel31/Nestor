@@ -16,6 +16,20 @@
 // `winresource` is a no-op on non-Windows hosts, so the unconditional call is
 // fine.
 fn main() {
+    // Without these the stamped VERSIONINFO goes stale: Cargo caches a build
+    // script's output and re-runs it only when something it was told to watch
+    // changes, and the crate version is not something it watches by default.
+    // A `2.7.0` build shipped an exe reading `FileVersion 2.6.8` before this
+    // line existed - the same class of miss as the release that went out
+    // under the previous version number (see `RELEASING.md` §1).
+    //
+    // Declaring any `rerun-if-*` replaces the "re-run when any file in the
+    // package changed" default, so the icon and this file have to be named
+    // explicitly too.
+    println!("cargo:rerun-if-env-changed=CARGO_PKG_VERSION");
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=icons/icon.ico");
+
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         winresource::WindowsResource::new()
             .set_icon("icons/icon.ico")

@@ -53,6 +53,16 @@ pub fn status_label(ui: &mut egui::Ui, status: &super::state::Status) {
     }
 }
 
+/// `PREFIXhh-mm_YYYY-MM-DD.ext`, local time - what a save dialog opens with.
+///
+/// Shared by exports (`NEST...`) and saved jobs (`JOB...`). A fixed default
+/// meant every save landed on the same name and quietly overwrote the last
+/// one, which is exactly wrong for a workflow that produces several attempts
+/// of the same job in a sitting. The user can still rename in the dialog.
+pub fn timestamped_name(prefix: &str, ext: &str) -> String {
+    format!("{}.{ext}", chrono::Local::now().format(&format!("{prefix}%H-%M_%Y-%m-%d")))
+}
+
 pub fn header(app: &mut App, ctx: &egui::Context) {
     egui::TopBottomPanel::top("header").frame(egui::Frame::new().fill(theme::PANEL()).inner_margin(8.0)).show(ctx, |ui| {
         ui.horizontal(|ui| {
@@ -73,6 +83,19 @@ pub fn header(app: &mut App, ctx: &egui::Context) {
                 }
             });
             ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).color(theme::DIM()));
+
+            // Up here rather than inside 01 IMPORT: a saved job is the whole
+            // session - every panel's state, not the import panel's - and
+            // it is what the user reaches for before and after the work
+            // rather than during it.
+            ui.separator();
+            let enabled = app.importing == 0 && !app.controls_locked();
+            if ui.add_enabled(enabled, egui::Button::new(app.t("btn_open_project"))).on_hover_text(app.t("btn_open_project_tooltip")).clicked() {
+                super::import::open_project(app);
+            }
+            if ui.add_enabled(enabled && !app.shapes.is_empty(), egui::Button::new(app.t("btn_save_project"))).on_hover_text(app.t("btn_save_project_tooltip")).clicked() {
+                super::import::save_project(app);
+            }
             // Only ever present when there really is a newer release, so it
             // costs nothing on an up-to-date install and needs no dismissal.
             if let Some(release) = app.update.clone() {
@@ -166,6 +189,9 @@ fn settings_menu(app: &mut App, ctx: &egui::Context) {
                 }
             }
 
+            ui.separator();
+            let (label, tooltip) = (app.t("project_include_geometry"), app.t("project_include_geometry_tooltip"));
+            ui.checkbox(&mut app.prefs.project_geometry, RichText::new(label).color(theme::TEXT())).on_hover_text(tooltip);
         });
     app.settings_menu_open = open;
 }

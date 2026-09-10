@@ -114,6 +114,7 @@ Watch it improve generation by generation with **LIVE VIEW** on. When it settles
 - Metric units, enforced rather than guessed
 - Optional sheet outlines, configurable sheet spacing, and an option to include never-placed parts
 - A printable job report — part list, sheet list with duplicate layouts collapsed, and remnant info
+- Save the whole job — files, quantities, rotations, settings — and reopen it later against the current version of your drawings
 
 ### Nesting
 - Genetic-algorithm search with several placement strategies competing against each other
@@ -230,6 +231,16 @@ The scale changes. The principle doesn't.
 Nestor is released under the **MIT License** — use it, modify it, study it, build on it, ship it.
 
 Found a bug, improved the algorithm, added a feature, or just have an idea? [Issues](https://github.com/Glorfindel31/Nestor/issues) and pull requests are welcome. This project belongs to everyone who wants to make better use of material.
+
+---
+
+## Thanks
+
+- [@willmurnane](https://github.com/willmurnane) — for the saved-job idea: a
+  laser-cut design gets tweaked several times before anything is actually cut,
+  and rebuilding the same ten-shape setup by hand each time is the tedious
+  part. Nestor saves the job by file path, so reopening it picks up the
+  version of the drawing you have now.
 
 ---
 

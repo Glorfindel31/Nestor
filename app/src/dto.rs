@@ -1140,6 +1140,93 @@ impl ShapeStore {
     }
 }
 
+/// Where a project shape came from, so a reload can pick up the *current*
+/// version of the drawing rather than the copy that was saved.
+///
+/// The key is `(path, layer, index-within-that-layer)`, not a bare ordinal
+/// in the file. The whole point of a project file is that the user keeps
+/// editing the CAD drawing between nests, and an ordinal shifts the moment
+/// they add a part; a layer-local one only shifts when they add a part *to
+/// that layer*, ahead of an existing one. DXF gives the layer directly, and
+/// for SVG `geometry::svg_import` already puts the group/`id` attribute
+/// there - which is exactly the "file name plus optional id" key this was
+/// asked for.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct ShapeSource {
+    pub path: std::path::PathBuf,
+    pub layer: String,
+    /// Position among the shapes this file yields on that same layer.
+    pub index: usize,
+    /// The unit the user picked when this SVG was first imported, if they
+    /// picked one. Carried because reloading an SVG at a different assumed
+    /// scale is silent scrap - the exact failure `geometry::svg_import`'s
+    /// metric-only rule exists to prevent. Always `None` for DXF, which
+    /// carries real-world units by definition.
+    #[serde(default)]
+    pub svg_unit: Option<String>,
+}
+
+/// A shape's role in the job. The on-disk twin of `ui::state::Role`, which
+/// is a UI type and stays one.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRole {
+    Part,
+    Sheet,
+    Skip,
+}
+
+/// One row of a saved job.
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct ProjectShape {
+    /// What the shapes table shows. Only ever displayed, never parsed.
+    pub file: String,
+    /// Absent for shapes that were never in a file - a built rectangle, a
+    /// library pick - which is why `polygon` is not optional for those.
+    #[serde(default)]
+    pub source: Option<ShapeSource>,
+    /// The geometry as it was when the project was saved.
+    ///
+    /// A **fallback, not a mode**: when `source` still resolves on disk, the
+    /// file wins and this is ignored, because picking up the user's latest
+    /// edit is the entire feature. It exists so a moved, renamed or
+    /// not-on-this-machine drawing still opens, and so one `.nestproj` is a
+    /// complete bug report. `None` when the project was saved with geometry
+    /// left out - and never `None` for a shape with no `source`, or the row
+    /// would be unrecoverable.
+    #[serde(default)]
+    pub polygon: Option<PolygonDto>,
+    pub role: ProjectRole,
+    pub qty: usize,
+    /// Angles, not the UI rule's name - same reason `StoredShape` does it:
+    /// an entry written by an older build still loads after a new rule
+    /// variant is added.
+    #[serde(default)]
+    pub allowed_rotations: Option<Vec<f64>>,
+    #[serde(default)]
+    pub mirror: Option<bool>,
+    #[serde(default)]
+    pub no_hole_nesting: bool,
+}
+
+/// A saved job: the settings, and what was in the shapes table.
+///
+/// Deliberately not the *result* - `best_result.json` already handles
+/// recovering a nest. This is the setup that is tedious to rebuild by hand
+/// (ten files, per-part quantities, rotations, kerf), so that re-cutting a
+/// tweaked design is "open, re-nest" instead of twenty clicks.
+///
+/// Additive like `ShapeStore`, and for the same reason: every optional field
+/// carries `#[serde(default)]`, so a file written by an older build keeps
+/// opening.
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct ProjectFile {
+    pub version: u32,
+    pub config: NestConfigDto,
+    #[serde(default)]
+    pub shapes: Vec<ProjectShape>,
+}
+
 /// What `commands::compute_remnants` needs: the result to harvest offcuts
 /// from. Same shape as `AuditRequest` for the same reason - offcuts are
 /// computed from exactly what would be exported.

@@ -959,7 +959,7 @@ fn do_export(app: &mut App, format: ExportFormat) {
         return;
     }
     let Some(snap) = &app.snapshot else { return };
-    let Some(path) = rfd::FileDialog::new().set_file_name(export_file_name(format.ext())).add_filter(format.label(), &[format.ext()]).save_file() else {
+    let Some(path) = rfd::FileDialog::new().set_file_name(shell::timestamped_name("NEST", format.ext())).add_filter(format.label(), &[format.ext()]).save_file() else {
         return;
     };
 
@@ -985,16 +985,6 @@ fn do_export(app: &mut App, format: ExportFormat) {
     app.export_status.ok(app.t("export_status_running"));
     app.console.log(console::Kind::Plain, format!("exporting {}", format.label()));
     app.worker.export(format, path, export, report);
-}
-
-/// Every exported file is named `NESThh-mm_YYYY-MM-DD`, local time.
-///
-/// A fixed default meant every export landed on `nest.dxf` and quietly
-/// overwrote the last one, which is exactly wrong for a workflow that produces
-/// several attempts of the same job in a sitting. The user can still rename in
-/// the dialog; this only decides what it opens with.
-fn export_file_name(ext: &str) -> String {
-    format!("{}.{ext}", chrono::Local::now().format("NEST%H-%M_%Y-%m-%d"))
 }
 
 /// The part list the PDF report prints - source shapes as the user defined
@@ -1042,12 +1032,15 @@ mod tests {
     use super::*;
 
     /// The user asked for exactly this shape, and it is load-bearing: a fixed
-    /// default silently overwrote the previous export.
+    /// default silently overwrote the previous export. Saved jobs share the
+    /// helper and therefore the shape, differing only in the prefix.
     #[test]
-    fn every_export_is_named_for_the_moment_it_was_made() {
-        let name = export_file_name("pdf");
-        let stamp: String = name.chars().map(|c| if c.is_ascii_digit() { '0' } else { c }).collect();
-        assert_eq!(stamp, "NEST00-00_0000-00-00.pdf", "got {name}");
+    fn every_export_and_job_is_named_for_the_moment_it_was_made() {
+        for (prefix, ext, expected) in [("NEST", "pdf", "NEST00-00_0000-00-00.pdf"), ("JOB", "nestproj", "JOB00-00_0000-00-00.nestproj")] {
+            let name = shell::timestamped_name(prefix, ext);
+            let stamp: String = name.chars().map(|c| if c.is_ascii_digit() { '0' } else { c }).collect();
+            assert_eq!(stamp, expected, "got {name}");
+        }
     }
 
     fn poly(w: f64, h: f64) -> PolygonDto {

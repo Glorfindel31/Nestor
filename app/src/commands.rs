@@ -749,11 +749,92 @@ pub fn load_shape_store() -> Result<crate::dto::ShapeStore, String> {
 /// this file *is* their saved work. A crash mid-write must leave the previous
 /// version intact rather than a truncated one.
 pub fn save_shape_store(store: &crate::dto::ShapeStore) -> Result<(), String> {
-    let path = crate::paths::shape_store_file()?;
-    let temp = path.with_extension("json.tmp");
-    let json = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
+    write_json_atomic(&crate::paths::shape_store_file()?, store)
+}
+
+/// Temp file plus rename. Shared by the shape store and project files -
+/// both are the user's own saved work, where a crash mid-write must leave
+/// the previous version intact rather than a truncated one.
+fn write_json_atomic<T: serde::Serialize>(path: &std::path::Path, value: &T) -> Result<(), String> {
+    let temp = path.with_extension("tmp");
+    let json = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     std::fs::write(&temp, json).map_err(|e| format!("couldn't write {}: {e}", temp.display()))?;
-    std::fs::rename(&temp, &path).map_err(|e| format!("couldn't replace {}: {e}", path.display()))
+    std::fs::rename(&temp, path).map_err(|e| format!("couldn't replace {}: {e}", path.display()))
+}
+
+/// Writes a saved job. Atomic, like the shape store.
+pub fn save_project(path: &str, project: &crate::dto::ProjectFile) -> Result<(), String> {
+    write_json_atomic(std::path::Path::new(path), project)
+}
+
+/// Reads a saved job back, without touching any of the drawings it names -
+/// see `resolve_project` for that half.
+pub fn load_project(path: &str) -> Result<crate::dto::ProjectFile, String> {
+    let json = std::fs::read_to_string(path).map_err(|e| format!("couldn't read {path}: {e}"))?;
+    serde_json::from_str(&json).map_err(|e| format!("{path} is not a readable project: {e}"))
+}
+
+/// Turns a saved job into shapes the UI can put straight into its table,
+/// re-importing every drawing that is still where the project says it is.
+///
+/// **Disk wins whenever it resolves.** That is the whole point: the user
+/// tweaked the part in CAD and wants the tweak. The saved geometry is only
+/// reached for when the file is gone, or when the shape it named is no
+/// longer in it - and every one of those is reported, never silently
+/// substituted, because a job that nests the *old* version of a part and
+/// says nothing is scrap.
+///
+/// Every returned shape is guaranteed to have `polygon: Some(_)`; one that
+/// could be resolved neither way is dropped, with a warning naming it.
+/// Returns the shapes and those warnings.
+#[must_use]
+pub fn resolve_project(project: crate::dto::ProjectFile) -> (Vec<crate::dto::ProjectShape>, Vec<String>) {
+    let tolerance = project.config.curve_tolerance;
+    let mut warnings = Vec::new();
+    // One import per file, however many shapes came off it: a ten-part
+    // assembly drawn in one DXF would otherwise re-parse it ten times.
+    let mut imported: HashMap<std::path::PathBuf, Result<Vec<crate::dto::PolygonDto>, String>> = HashMap::new();
+    let mut out = Vec::new();
+
+    for mut shape in project.shapes {
+        let from_file = shape.source.as_ref().and_then(|src| {
+            if !src.path.exists() {
+                warnings.push(format!("{} is not where the project left it - using the saved copy of {}", src.path.display(), shape.file));
+                return None;
+            }
+            let shapes = imported
+                .entry(src.path.clone())
+                .or_insert_with(|| {
+                    let p = src.path.to_string_lossy().to_string();
+                    if src.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+                        import_svg(&p, tolerance, src.svg_unit.as_deref()).map(|(shapes, _)| shapes)
+                    } else {
+                        import_dxf(&p, tolerance)
+                    }
+                })
+                .as_ref();
+            let shapes = match shapes {
+                Ok(shapes) => shapes,
+                Err(e) => {
+                    warnings.push(format!("{} no longer imports ({e}) - using the saved copy of {}", src.path.display(), shape.file));
+                    return None;
+                }
+            };
+            let found = shapes.iter().filter(|p| p.layer == src.layer).nth(src.index).cloned();
+            if found.is_none() {
+                warnings.push(format!("{} no longer has shape {} on layer {} - using the saved copy", src.path.display(), src.index + 1, src.layer));
+            }
+            found
+        });
+
+        shape.polygon = from_file.or(shape.polygon);
+        if shape.polygon.is_none() {
+            warnings.push(format!("dropped {}: the file is unreadable and the project was saved without its geometry", shape.file));
+            continue;
+        }
+        out.push(shape);
+    }
+    (out, warnings)
 }
 
 /// Computes the reusable offcuts of a finished nest.
@@ -1540,6 +1621,153 @@ mod tests {
             cleanup_threshold_percent: None,
             mirror: false,
         }
+    }
+
+    /// A saved job that still finds its drawings must come back with the
+    /// drawings' **current** contents, not the copy it was saved with. That
+    /// is the entire feature: the user tweaked the part in CAD between the
+    /// two nests, and a reload that quietly nests March's version of it
+    /// produces scrap.
+    #[test]
+    fn reopening_a_job_prefers_the_drawing_on_disk_over_its_saved_copy() {
+        let path = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/two.dxf"));
+        let on_disk = import_dxf(&path.to_string_lossy(), 0.3).expect("fixture should parse");
+        let first = on_disk.first().expect("fixture has shapes").clone();
+
+        // A deliberately wrong "saved copy", so preferring it is visible.
+        let project = crate::dto::ProjectFile {
+            version: 1,
+            config: config(1),
+            shapes: vec![crate::dto::ProjectShape {
+                file: "two.dxf".into(),
+                source: Some(crate::dto::ShapeSource { path, layer: first.layer.clone(), index: 0, svg_unit: None }),
+                polygon: Some(square_dto(7.0)),
+                role: crate::dto::ProjectRole::Part,
+                qty: 4,
+                allowed_rotations: Some(vec![0.0, 180.0]),
+                mirror: Some(false),
+                no_hole_nesting: true,
+            }],
+        };
+
+        let (shapes, warnings) = resolve_project(project);
+        assert!(warnings.is_empty(), "a job whose drawing is right where it left it must not warn: {warnings:?}");
+        let shape = shapes.first().expect("the shape must survive");
+        assert_eq!(shape.polygon.as_ref().expect("resolved").points.len(), first.points.len(), "the disk version must win over the saved copy");
+        // Everything the user set by hand has to survive too - that is what
+        // makes reopening cheaper than rebuilding the job.
+        assert_eq!((shape.qty, shape.no_hole_nesting, shape.allowed_rotations.clone()), (4, true, Some(vec![0.0, 180.0])));
+    }
+
+    /// The saved copy is the fallback that makes a moved, renamed or
+    /// not-on-this-machine drawing still open - and it must say so, because
+    /// a job silently nesting an old part is the failure this whole feature
+    /// is supposed to prevent.
+    #[test]
+    fn a_missing_drawing_falls_back_to_the_saved_copy_and_says_so() {
+        let shape = |polygon| crate::dto::ProjectShape {
+            file: "gone.dxf".into(),
+            source: Some(crate::dto::ShapeSource { path: "F:/no/such/gone.dxf".into(), layer: "0".into(), index: 0, svg_unit: None }),
+            polygon,
+            role: crate::dto::ProjectRole::Part,
+            qty: 1,
+            allowed_rotations: None,
+            mirror: None,
+            no_hole_nesting: false,
+        };
+
+        let (shapes, warnings) = resolve_project(crate::dto::ProjectFile { version: 1, config: config(1), shapes: vec![shape(Some(square_dto(9.0)))] });
+        assert_eq!(shapes.len(), 1, "the saved copy must keep the row alive");
+        assert_eq!(shapes[0].polygon.as_ref().expect("resolved").area(), 81.0);
+        assert_eq!(warnings.len(), 1, "and it must be reported, never silently substituted");
+
+        // Saved without geometry, and the drawing is gone: the row cannot be
+        // recovered at all, so it is dropped by name rather than kept empty.
+        let (shapes, warnings) = resolve_project(crate::dto::ProjectFile { version: 1, config: config(1), shapes: vec![shape(None)] });
+        assert!(shapes.is_empty());
+        assert_eq!(warnings.len(), 2, "one for the missing file, one for the dropped row: {warnings:?}");
+    }
+
+    /// The re-link key is `(path, layer, index within that layer)`, so
+    /// adding a shape to one layer must not shift what a row on another
+    /// layer resolves to - which a bare ordinal-in-file would. That is the
+    /// difference between "I added a locating feature" reopening cleanly and
+    /// every quantity in the job landing on the wrong part.
+    ///
+    /// Driven through SVG because `geometry::svg_import` puts a group's `id`
+    /// in the layer field, which makes a two-layer drawing four lines to
+    /// write - and it covers the SVG re-import path at the same time.
+    #[test]
+    fn the_relink_key_survives_a_shape_being_added_to_another_layer() {
+        let dir = std::env::temp_dir().join("rustynesting-relink-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("relink.svg");
+        let write = |extra: &str| {
+            let svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="100mm" viewBox="0 0 100 100"><g id="A">{extra}<rect x="0" y="0" width="10" height="10"/></g><g id="B"><rect x="0" y="0" width="30" height="30"/></g></svg>"#
+            );
+            std::fs::write(&path, svg).expect("write svg");
+        };
+        let project = || crate::dto::ProjectFile {
+            version: 1,
+            config: config(1),
+            shapes: vec![crate::dto::ProjectShape {
+                file: "relink.svg".into(),
+                source: Some(crate::dto::ShapeSource { path: path.clone(), layer: "B".into(), index: 0, svg_unit: None }),
+                polygon: None,
+                role: crate::dto::ProjectRole::Part,
+                qty: 1,
+                allowed_rotations: None,
+                mirror: None,
+                no_hole_nesting: false,
+            }],
+        };
+
+        write("");
+        let (before, warnings) = resolve_project(project());
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let area = before[0].polygon.as_ref().expect("resolved").area();
+        assert!((area - 900.0).abs() < 1e-6, "expected layer B's 30x30 rect, got area {area}");
+
+        // The edit the whole feature exists for: another part appears in the
+        // drawing, ahead of the one this row points at.
+        write(r#"<rect x="0" y="0" width="5" height="5"/>"#);
+        let (after, warnings) = resolve_project(project());
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(after[0].polygon.as_ref().expect("resolved").area(), area, "the row must still resolve to layer B's shape");
+    }
+
+    /// A job file is the user's own saved work, so it has to survive the
+    /// round trip byte-for-byte in meaning - including the fields added
+    /// after v1, which older files simply will not carry.
+    #[test]
+    fn a_job_file_round_trips_through_disk() {
+        let dir = std::env::temp_dir().join("rustynesting-project-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("job.nestproj");
+
+        let project = crate::dto::ProjectFile {
+            version: 1,
+            config: NestConfigDto { spacing: 6.5, rotations: 8, ..config(3) },
+            shapes: vec![crate::dto::ProjectShape {
+                file: "sheet".into(),
+                source: None,
+                polygon: Some(rect_dto(2440.0, 1220.0)),
+                role: crate::dto::ProjectRole::Sheet,
+                qty: 1,
+                allowed_rotations: None,
+                mirror: None,
+                no_hole_nesting: false,
+            }],
+        };
+        save_project(&path.to_string_lossy(), &project).expect("should write");
+        let back = load_project(&path.to_string_lossy()).expect("should read");
+
+        assert_eq!((back.config.spacing, back.config.rotations), (6.5, 8));
+        assert_eq!(back.shapes.len(), 1);
+        assert_eq!(back.shapes[0].role, crate::dto::ProjectRole::Sheet);
+        assert!(back.shapes[0].source.is_none(), "a built rectangle has no drawing to go back to");
+        assert_eq!(back.shapes[0].polygon.as_ref().expect("a sourceless row must always carry its geometry").area(), 2440.0 * 1220.0);
     }
 
     /// The engine's own output, with a real margin and spacing, must audit

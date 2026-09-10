@@ -8,6 +8,9 @@ use crate::dto::{PointDto, PolygonDto};
 
 const FILTER: [&str; 2] = ["dxf", "svg"];
 
+/// The saved-job extension. Plain JSON inside - see `dto::ProjectFile`.
+const PROJECT_EXT: &str = "nestproj";
+
 /// A one-click sample job: fixture parts plus the stock sheet they were
 /// measured on. The files are the repo's own benchmark fixtures - the same
 /// ones `bench.sh` drives - embedded in the binary, so a fresh install has
@@ -149,6 +152,46 @@ fn dispatch(app: &mut App, paths: Vec<std::path::PathBuf>, svg_unit: Option<Stri
     let msg = app.tv("import_importing", &[("n", &paths.len().to_string())]);
     app.import_status.ok(msg);
     app.worker.import(paths, app.cfg.curve_tolerance, svg_unit);
+}
+
+/// Writes the shapes table and the current config out as one job file.
+///
+/// A row with no `source` (a built rectangle, a library pick) keeps its
+/// geometry whatever the checkbox says: there is no drawing to reload it
+/// from, so leaving it out would lose the row outright - most visibly the
+/// stock sheet, which is very often a rectangle nobody has a DXF for.
+pub fn save_project(app: &mut App) {
+    let Some(path) = rfd::FileDialog::new().add_filter("Nestor job", &[PROJECT_EXT]).set_file_name(shell::timestamped_name("JOB", PROJECT_EXT)).save_file() else { return };
+    let project = crate::dto::ProjectFile {
+        version: 1,
+        config: app.cfg.to_dto(),
+        shapes: app
+            .shapes
+            .iter()
+            .map(|row| crate::dto::ProjectShape {
+                file: row.file.clone(),
+                source: row.source.clone(),
+                polygon: (app.prefs.project_geometry || row.source.is_none()).then(|| row.poly.clone()),
+                role: row.role.to_dto(),
+                qty: row.qty,
+                allowed_rotations: row.rot.angles(),
+                mirror: row.mirror.as_option(),
+                no_hole_nesting: row.no_hole_nesting,
+            })
+            .collect(),
+    };
+    app.worker.save_project(path, project);
+}
+
+/// Opens a job file, replacing everything currently on the table.
+///
+/// The re-import happens on the worker thread (`Worker::open_project`), not
+/// here: reading ten DXFs on the event-loop thread is exactly the freeze
+/// this module's `dispatch` avoids.
+pub fn open_project(app: &mut App) {
+    let Some(path) = rfd::FileDialog::new().add_filter("Nestor job", &[PROJECT_EXT]).pick_file() else { return };
+    app.import_status.ok(app.t("project_opening"));
+    app.worker.open_project(path);
 }
 
 /// Metric only, and deliberately so: an SVG's own `width`/`height` may be
