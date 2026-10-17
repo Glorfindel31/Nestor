@@ -288,5 +288,17 @@
   "scale_step_tooltip": "How much this option gains on each successive run of the RUNS loop. The first run always uses the value as set - the growth starts on run 2.",
   "scale_switch_tooltip": "Switch this option's per-run growth on or off. Off keeps it flat across every run; the + amount is remembered either way.",
   "scale_hint": "The four options above grow on each successive run - the + box is by how much, the switch turns it on. Only these four scale; margin, spacing and kerf describe the job, not the search.",
-  "scale_hint_single_run": "RUNS is 1, so nothing above scales yet - there is no second attempt to grow into. Raise RUNS to use these."
+  "scale_hint_single_run": "RUNS is 1, so nothing above scales yet - there is no second attempt to grow into. Raise RUNS to use these.",
+  "tabs_heading": "TABS",
+  "tabs_enable_label": "BRIDGE SMALL PARTS",
+  "tabs_enable_tooltip": "After nesting, join neighbouring small parts with short uncut bridges so they don't move or fly off while cutting. Bridges are united into the part outlines on DXF/SVG export. Click a bridge on a sheet to turn it on or off.",
+  "tabs_threshold_label": "SMALL BELOW (mm)",
+  "tabs_threshold_tooltip": "A part gets bridges when the longest side of its bounding box is under this.",
+  "tabs_width_label": "BRIDGE WIDTH (mm)",
+  "tabs_width_tooltip": "Width of the uncut strip left between two parts.",
+  "tabs_bit_label": "BIT Ø (mm)",
+  "tabs_bit_tooltip": "Router bit diameter. Parts closer together than this get no bridge (the bit cannot pass between them), and two bridges on one part stay at least bridge width + bit apart.",
+  "tabs_per_part_label": "PER PART",
+  "tabs_per_part_tooltip": "The most bridges any one part gets.",
+  "tabs_count": "{n} bridge(s), {off} off"
 }

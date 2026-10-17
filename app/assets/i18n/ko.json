@@ -282,5 +282,17 @@
   "help_step_run": "배치 실행 — 그런 다음 결과를 확인하고 내보냅니다.",
   "help_tip": "자세한 설명은 어느 항목이든 마우스를 올리면 나옵니다.",
   "help_dont_show": "다시 표시하지 않기",
-  "help_close": "확인"
+  "help_close": "확인",
+  "tabs_heading": "탭",
+  "tabs_enable_label": "작은 부품 브리지 연결",
+  "tabs_enable_tooltip": "네스팅 후 가까이 있는 작은 부품들을 짧은 미절단 브리지로 연결해, 절단 중에 부품이 움직이거나 튀어 나가지 않도록 합니다. DXF/SVG 내보내기 시 브리지는 부품 외곽선에 합쳐집니다. 원자재 위의 브리지를 클릭하면 켜거나 끌 수 있습니다.",
+  "tabs_threshold_label": "작은 부품 기준 (mm) 미만",
+  "tabs_threshold_tooltip": "바운딩 박스의 가장 긴 변이 이 값보다 작은 부품에 브리지가 붙습니다.",
+  "tabs_width_label": "브리지 폭 (mm)",
+  "tabs_width_tooltip": "두 부품 사이에 남기는 미절단 띠의 폭입니다.",
+  "tabs_bit_label": "비트 지름 Ø (mm)",
+  "tabs_bit_tooltip": "라우터 비트의 지름입니다. 이보다 더 가까이 있는 부품에는 브리지가 붙지 않으며(비트가 그 사이를 지나갈 수 없음), 한 부품의 브리지 두 개는 최소 브리지 폭 + 비트 지름만큼 떨어져 유지됩니다.",
+  "tabs_per_part_label": "부품당",
+  "tabs_per_part_tooltip": "한 부품이 가질 수 있는 브리지의 최대 개수입니다.",
+  "tabs_count": "브리지 {n}개, {off}개 끔"
 }

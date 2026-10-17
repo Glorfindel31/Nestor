@@ -1,6 +1,7 @@
 //! Pure geometry math: Clipper2 wrapper, NFP-tracing primitives, DXF import.
 //! Zero I/O, zero threading — see RUST-REWRITE-PLAN.md Phase 1.
 
+pub mod arc_fit;
 pub mod circular_nfp;
 pub mod clearance;
 pub mod clipper;
@@ -18,5 +19,6 @@ pub mod simplify;
 pub mod simplify_polygon;
 pub mod svg_export;
 pub mod svg_import;
+pub mod tabs;
 
 pub use point::Point;

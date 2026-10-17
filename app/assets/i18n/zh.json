@@ -282,5 +282,17 @@
   "help_step_run": "运行排版 — 然后查看并导出结果。",
   "help_tip": "把鼠标停在任意标签上可看到更多说明。",
   "help_dont_show": "不再显示",
-  "help_close": "知道了"
+  "help_close": "知道了",
+  "tabs_heading": "连接桥",
+  "tabs_enable_label": "为小零件加连接桥",
+  "tabs_enable_tooltip": "排料后，把相邻的小零件用短小的未切断连接桥连在一起，使其在切割时不会移动或飞出。导出 DXF/SVG 时，连接桥会合并进零件轮廓。点击板材上的连接桥即可开启或关闭。",
+  "tabs_threshold_label": "小于此尺寸视为小件 (mm)",
+  "tabs_threshold_tooltip": "当零件外接矩形的最长边小于此值时，该零件会添加连接桥。",
+  "tabs_width_label": "连接桥宽度 (mm)",
+  "tabs_width_tooltip": "两个零件之间保留的未切断条带的宽度。",
+  "tabs_bit_label": "刀具直径 Ø (mm)",
+  "tabs_bit_tooltip": "铣刀直径。间距小于此值的零件不会添加连接桥（刀具无法通过它们之间），同一零件上的两个连接桥之间至少相隔连接桥宽度 + 刀具直径。",
+  "tabs_per_part_label": "每个零件",
+  "tabs_per_part_tooltip": "单个零件最多可添加的连接桥数量。",
+  "tabs_count": "{n} 个连接桥，{off} 个关闭"
 }

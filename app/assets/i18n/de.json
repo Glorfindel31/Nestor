@@ -282,5 +282,17 @@
   "help_step_run": "SCHACHTELN AUSFÜHREN — dann das Ergebnis prüfen und EXPORTIEREN.",
   "help_tip": "Für mehr Einzelheiten mit der Maus über eine Beschriftung fahren.",
   "help_dont_show": "Nicht mehr anzeigen",
-  "help_close": "VERSTANDEN"
+  "help_close": "VERSTANDEN",
+  "tabs_heading": "STEGE",
+  "tabs_enable_label": "KLEINE TEILE VERSTEGEN",
+  "tabs_enable_tooltip": "Nach dem Verschachteln werden benachbarte kleine Teile durch kurze, nicht durchtrennte Stege verbunden, damit sie beim Schneiden nicht verrutschen oder herausfliegen. Beim DXF-/SVG-Export werden die Stege mit den Teilkonturen vereinigt. Klicke auf einen Steg auf der Tafel, um ihn ein- oder auszuschalten.",
+  "tabs_threshold_label": "KLEIN UNTER (mm)",
+  "tabs_threshold_tooltip": "Ein Teil erhält Stege, wenn die längste Seite seines Begrenzungsrahmens unter diesem Wert liegt.",
+  "tabs_width_label": "STEGBREITE (mm)",
+  "tabs_width_tooltip": "Breite des nicht geschnittenen Streifens zwischen zwei Teilen.",
+  "tabs_bit_label": "FRÄSER Ø (mm)",
+  "tabs_bit_tooltip": "Durchmesser des Fräsers. Teile, die enger beieinander liegen, erhalten keinen Steg (der Fräser passt nicht dazwischen), und zwei Stege an einem Teil bleiben mindestens um Stegbreite + Fräser voneinander entfernt.",
+  "tabs_per_part_label": "PRO TEIL",
+  "tabs_per_part_tooltip": "Die höchstmögliche Anzahl an Stegen pro Teil.",
+  "tabs_count": "{n} Steg(e), {off} aus"
 }

@@ -282,5 +282,17 @@
   "help_step_run": "EJECUTAR ANIDADO — luego revise y EXPORTE el resultado.",
   "help_tip": "Pase el ratón sobre cualquier etiqueta para más detalle.",
   "help_dont_show": "No volver a mostrar",
-  "help_close": "ENTENDIDO"
+  "help_close": "ENTENDIDO",
+  "tabs_heading": "PUENTES",
+  "tabs_enable_label": "UNIR PIEZAS PEQUEÑAS",
+  "tabs_enable_tooltip": "Después de anidar, une las piezas pequeñas vecinas con puentes cortos sin cortar para que no se muevan ni salgan volando durante el corte. Los puentes se integran en los contornos de las piezas al exportar a DXF/SVG. Haz clic en un puente de la chapa para activarlo o desactivarlo.",
+  "tabs_threshold_label": "PEQUEÑAS SI MENOR DE (mm)",
+  "tabs_threshold_tooltip": "Una pieza recibe puentes cuando el lado más largo de su caja envolvente es menor que este valor.",
+  "tabs_width_label": "ANCHO DEL PUENTE (mm)",
+  "tabs_width_tooltip": "Ancho de la tira sin cortar que queda entre dos piezas.",
+  "tabs_bit_label": "Ø DE LA FRESA (mm)",
+  "tabs_bit_tooltip": "Diámetro de la fresa. Las piezas más cercanas que esto no reciben puente (la fresa no puede pasar entre ellas), y dos puentes en una misma pieza quedan separados al menos por ancho de puente + fresa.",
+  "tabs_per_part_label": "POR PIEZA",
+  "tabs_per_part_tooltip": "El mayor número de puentes que recibe una sola pieza.",
+  "tabs_count": "{n} puente(s), {off} apagado(s)"
 }

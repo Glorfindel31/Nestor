@@ -284,6 +284,17 @@ pub struct App {
     export_spacing: f64,
     export_outline: bool,
     export_unplaced: bool,
+    /// Whether bridges are drawn on the result and offered at export.
+    tabs_enabled: bool,
+    /// Bridge sizing and placement, as the user last set it.
+    tab_settings: crate::dto::TabSettingsDto,
+    /// Bridges for the current arrangement, as the worker last planned them.
+    tabs: Vec<crate::dto::TabDto>,
+    /// Bridges the user switched off, keyed by the pair of part ids they join
+    /// so the choice survives a regeneration of the same arrangement.
+    tabs_off: std::collections::HashSet<(usize, usize)>,
+    /// Sequence number of the latest tab request; older answers are dropped.
+    tabs_seq: u64,
     export_status: Status,
     /// Drag in progress on the result canvas: which part, and where it has
     /// been dragged to in model coordinates.
@@ -391,6 +402,11 @@ impl App {
             export_spacing: 20.0,
             export_outline: true,
             export_unplaced: false,
+            tabs_enabled: false,
+            tab_settings: crate::dto::TabSettingsDto { threshold: 50.0, width: 3.0, bit: 6.0, per_part: 2 },
+            tabs: Vec::new(),
+            tabs_off: Default::default(),
+            tabs_seq: 0,
             export_status: Default::default(),
             drag: None,
             sheet_views: HashMap::new(),
@@ -669,6 +685,12 @@ impl App {
                 }
             }
 
+            Msg::Tabs(seq, tabs) => {
+                if seq == self.tabs_seq {
+                    self.tabs = tabs;
+                }
+            }
+
             Msg::Audited(result) => {
                 self.auditing = false;
                 match *result {
@@ -854,6 +876,8 @@ impl App {
     }
 
     fn adopt_response(&mut self, response: crate::dto::RunNestResponse) {
+        // A new run's part ids name different parts, so old choices no longer apply.
+        self.tabs_off.clear();
         self.parts_by_id = response.parts_by_id;
         self.part_rules = response.part_rules;
         self.history = if response.history.is_empty() {
@@ -919,6 +943,7 @@ impl App {
     /// Clears the previous verdict first, so the gap between the edit and the
     /// answer reads as "unknown" rather than as the stale pass.
     fn request_audit(&mut self, reason: &'static str) {
+        self.request_tabs();
         self.audit = None;
         self.audit_reason = reason;
         // Offcuts describe one specific arrangement. Keeping them across a
@@ -939,6 +964,25 @@ impl App {
             parts_by_id: self.parts_by_id.clone(),
             config,
         });
+    }
+
+    /// Bridges describe one arrangement, so they are recomputed on every change
+    /// `request_audit` already hooks, rather than kept as the user's last plan.
+    pub(super) fn request_tabs(&mut self) {
+        self.tabs_seq += 1;
+        self.tabs.clear();
+        if !self.tabs_enabled {
+            return;
+        }
+        let Some(snapshot) = &self.snapshot else { return };
+        self.worker.tabs(
+            self.tabs_seq,
+            crate::dto::TabRequest {
+                placements: snapshot.placements.clone(),
+                parts_by_id: self.parts_by_id.clone(),
+                settings: self.tab_settings,
+            },
+        );
     }
 
     fn apply_repack(&mut self, index: usize, response: crate::dto::RepackSheetResponse) -> bool {

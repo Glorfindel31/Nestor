@@ -945,6 +945,48 @@ pub struct ExportRequest {
     /// this field.
     #[serde(default)]
     pub include_unplaced: bool,
+    /// Enabled bridges to unite into the outlines on export. Empty = no
+    /// tabs, the old behaviour. The PDF report always sends none.
+    #[serde(default)]
+    pub tabs: Vec<TabDto>,
+}
+
+/// Wire form of `geometry::tabs::TabSettings`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct TabSettingsDto {
+    pub threshold: f64,
+    pub width: f64,
+    pub bit: f64,
+    pub per_part: usize,
+}
+
+impl From<TabSettingsDto> for geometry::tabs::TabSettings {
+    fn from(d: TabSettingsDto) -> Self {
+        geometry::tabs::TabSettings { threshold: d.threshold, width: d.width, bit: d.bit, per_part: d.per_part }
+    }
+}
+
+/// One bridge between two placed parts.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct TabDto {
+    /// Index into the result's `placements` (the sheet *card*), not
+    /// `SheetPlacementDto::sheet_index` (which sheet *type* it is).
+    pub sheet: usize,
+    /// Part ids, `a < b` - the pair is the bridge's identity across regeneration.
+    pub a: usize,
+    pub b: usize,
+    /// Strip + rounded junctions, overlapping both parts - what export unites.
+    pub patch: Vec<Vec<PointDto>>,
+    /// `patch` minus both parts - what the canvas draws.
+    pub visible: Vec<Vec<PointDto>>,
+}
+
+/// Input for `commands::plan_tabs`.
+#[derive(Clone, Debug)]
+pub struct TabRequest {
+    pub placements: Vec<SheetPlacementDto>,
+    pub parts_by_id: HashMap<usize, PolygonDto>,
+    pub settings: TabSettingsDto,
 }
 
 /// One row of the PDF report's piece table. Names and quantities live only

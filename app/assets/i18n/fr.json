@@ -288,5 +288,17 @@
   "scale_step_tooltip": "De combien cette option augmente à chaque passe successive de la boucle PASSES. La première passe utilise toujours la valeur telle quelle - la croissance commence à la passe 2.",
   "scale_switch_tooltip": "Active ou désactive la croissance par passe de cette option. Désactivée, elle reste constante sur toutes les passes ; la valeur + est mémorisée dans les deux cas.",
   "scale_hint": "Les quatre options ci-dessus augmentent à chaque passe successive - la case + indique de combien, l'interrupteur l'active. Seules ces quatre évoluent ; marge, espacement et saignée décrivent le travail, pas la recherche.",
-  "scale_hint_single_run": "PASSES vaut 1, donc rien ci-dessus n'évolue encore - il n'y a pas de seconde tentative. Augmentez PASSES pour vous en servir."
+  "scale_hint_single_run": "PASSES vaut 1, donc rien ci-dessus n'évolue encore - il n'y a pas de seconde tentative. Augmentez PASSES pour vous en servir.",
+  "tabs_heading": "PONTS",
+  "tabs_enable_label": "RELIER LES PETITES PIÈCES",
+  "tabs_enable_tooltip": "Après l'imbrication, relie les petites pièces voisines par de courts ponts non coupés pour qu'elles ne bougent pas ni ne s'envolent pendant la découpe. Les ponts sont fusionnés aux contours des pièces à l'export DXF/SVG. Cliquez sur un pont sur une tôle pour l'activer ou le désactiver.",
+  "tabs_threshold_label": "PETITES SI INFÉRIEURES À (mm)",
+  "tabs_threshold_tooltip": "Une pièce reçoit des ponts lorsque le plus grand côté de sa boîte englobante est inférieur à cette valeur.",
+  "tabs_width_label": "LARGEUR DU PONT (mm)",
+  "tabs_width_tooltip": "Largeur de la bande non coupée laissée entre deux pièces.",
+  "tabs_bit_label": "FRAISE Ø (mm)",
+  "tabs_bit_tooltip": "Diamètre de la fraise. Les pièces plus rapprochées que cela ne reçoivent pas de pont (la fraise ne peut pas passer entre elles), et deux ponts sur une même pièce restent espacés d'au moins largeur de pont + fraise.",
+  "tabs_per_part_label": "PAR PIÈCE",
+  "tabs_per_part_tooltip": "Le nombre maximal de ponts pour une même pièce.",
+  "tabs_count": "{n} pont(s), {off} désactivé(s)"
 }

@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use dxf::Drawing;
 use geometry::clearance::{prepare_part, prepare_sheet};
 use geometry::dxf_export::{PlacedShape, SheetLayout};
-use geometry::dxf_import::{rotate_layered_polygon, LayeredPolygon};
+use geometry::dxf_import::{rotate_layered_polygon, shift_layered_polygon, LayeredPolygon};
 use nesting::cache::NfpCache;
 use nesting::consolidation::{recompute_totals, refine_consolidation};
 use nesting::dispatch;
@@ -30,8 +30,8 @@ use nesting::placement::{PlaceResult, PlacementConfig, PlacementType};
 use nesting::repack;
 
 use crate::dto::{
-    expand_parts, BestResultDto, ExpandedParts, PartRuleDto, ReportRequest, ValidatePlacementRequest, ValidatePlacementResponse, ExportRequest, NestConfigDto, NestRunCompleteDto, NestRunStartDto, NestSnapshotDto,
-    PlacedPartDto, PolygonDto, RepackSheetRequest, RepackSheetResponse, RunNestRequest, RunNestResponse, RunScales, SheetPlacementDto,
+    expand_parts, BestResultDto, ExpandedParts, PartRuleDto, ReportRequest, TabDto, TabRequest, ValidatePlacementRequest, ValidatePlacementResponse, ExportRequest, NestConfigDto, NestRunCompleteDto, NestRunStartDto, NestSnapshotDto,
+    PlacedPartDto, PointDto, PolygonDto, RepackSheetRequest, RepackSheetResponse, RunNestRequest, RunNestResponse, RunScales, SheetPlacementDto,
 };
 
 /// Shared per-process nest-run state, managed Tauri state
@@ -321,12 +321,15 @@ fn build_export_layouts(request: ExportRequest) -> Result<Vec<SheetLayout>, Stri
 
     let true_sheets: Vec<LayeredPolygon> = request.sheets.into_iter().map(Into::into).collect();
     let mut parts_by_id: HashMap<usize, LayeredPolygon> = request.parts_by_id.into_iter().map(|(id, dto)| (id, dto.into())).collect();
+    let tabs = request.tabs;
 
     let mut layouts: Vec<SheetLayout> = request
         .placements
         .into_iter()
-        .map(|sp| {
+        .enumerate()
+        .map(|(sheet_idx, sp)| {
             let sheet = true_sheets.get(sp.sheet_index).cloned().ok_or_else(|| format!("placement references sheet_index {} out of range", sp.sheet_index))?;
+            let ids: Vec<usize> = sp.parts.iter().map(|p| p.id).collect();
             let parts = sp
                 .parts
                 .into_iter()
@@ -344,6 +347,8 @@ fn build_export_layouts(request: ExportRequest) -> Result<Vec<SheetLayout>, Stri
                     Ok(PlacedShape { shape, x: p.x, y: p.y, rotation: p.rotation })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
+            let sheet_tabs: Vec<&TabDto> = tabs.iter().filter(|t| t.sheet == sheet_idx).collect();
+            let parts = if sheet_tabs.is_empty() { parts } else { unite_bridged(parts, &ids, &sheet_tabs) };
             Ok(SheetLayout { sheet, parts })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -360,6 +365,85 @@ fn build_export_layouts(request: ExportRequest) -> Result<Vec<SheetLayout>, Stri
     }
 
     Ok(layouts)
+}
+
+/// Merges every group of parts joined by a tab into one outline, so an
+/// exported bridge is a single closed shape rather than two touching ones.
+/// `ids` is the placement's part ids, aligned index-for-index with `parts`;
+/// a tab naming an id not on this sheet is ignored. Untouched parts keep
+/// their place in the output order; a merged group takes the slot of its
+/// first member.
+fn unite_bridged(parts: Vec<PlacedShape>, ids: &[usize], tabs: &[&TabDto]) -> Vec<PlacedShape> {
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+
+    let index_of: HashMap<usize, usize> = ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+    let mut parent: Vec<usize> = (0..parts.len()).collect();
+    for t in tabs {
+        if let (Some(&ia), Some(&ib)) = (index_of.get(&t.a), index_of.get(&t.b)) {
+            let (ra, rb) = (root(&mut parent, ia), root(&mut parent, ib));
+            if ra != rb {
+                parent[rb] = ra;
+            }
+        }
+    }
+
+    let roots: Vec<usize> = (0..parts.len()).map(|i| root(&mut parent, i)).collect();
+    let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, &r) in roots.iter().enumerate() {
+        members.entry(r).or_default().push(i);
+    }
+
+    let positioned: Vec<LayeredPolygon> = parts.iter().map(|p| shift_layered_polygon(&rotate_layered_polygon(&p.shape, p.rotation), p.x, p.y)).collect();
+    let mut out = Vec::with_capacity(parts.len());
+    for (i, part) in parts.into_iter().enumerate() {
+        let group = &members[&roots[i]];
+        if group.len() == 1 {
+            out.push(part);
+            continue;
+        }
+        if group[0] != i {
+            continue;
+        }
+        let shapes: Vec<LayeredPolygon> = group.iter().map(|&m| positioned[m].clone()).collect();
+        let patches: Vec<Vec<geometry::point::Point>> = tabs
+            .iter()
+            .filter(|t| index_of.get(&t.a).is_some_and(|ia| roots[*ia] == roots[i]))
+            .flat_map(|t| t.patch.iter().map(|ring| ring.iter().copied().map(geometry::point::Point::from).collect()))
+            .collect();
+        out.extend(geometry::tabs::unite(shapes, &patches).into_iter().map(|shape| PlacedShape { shape, x: 0.0, y: 0.0, rotation: 0.0 }));
+    }
+    out
+}
+
+/// Works out which part pairs on each sheet should get a tab bridge, before
+/// export. Parts are positioned exactly as `build_export_layouts` places
+/// them (rotate, then shift), so the bridge corners line up with the
+/// exported outlines.
+pub fn plan_tabs(request: TabRequest) -> Vec<TabDto> {
+    let settings: geometry::tabs::TabSettings = request.settings.into();
+    let mut out = Vec::new();
+    for (sheet_idx, placement) in request.placements.iter().enumerate() {
+        let parts: Vec<(usize, Vec<geometry::point::Point>)> = placement
+            .parts
+            .iter()
+            .filter_map(|p| {
+                let shape: LayeredPolygon = request.parts_by_id.get(&p.id)?.clone().into();
+                let placed = shift_layered_polygon(&rotate_layered_polygon(&shape, p.rotation), p.x, p.y);
+                Some((p.id, placed.points))
+            })
+            .collect();
+        for b in geometry::tabs::find_bridges(&parts, &settings) {
+            let rings = |rings: &[Vec<geometry::point::Point>]| rings.iter().map(|r| r.iter().map(PointDto::from).collect()).collect();
+            out.push(TabDto { sheet: sheet_idx, a: b.a, b: b.b, patch: rings(&b.patch), visible: rings(&b.visible) });
+        }
+    }
+    out
 }
 
 /// Writes the given nest result back out to a DXF file at `path` - new
@@ -980,6 +1064,9 @@ pub fn audit_nest(request: crate::dto::AuditRequest) -> Result<crate::dto::Audit
 pub fn export_report(path: &str, request: ReportRequest) -> Result<(), String> {
     let mut export = request.export;
     export.include_unplaced = false;
+    // The report counts parts, and a united tab outline is several parts
+    // in one shape, so tabs stay out of it.
+    export.tabs.clear();
 
     // No audit is run here any more: the report is the reference tool's three
     // tables and nothing else, so there is no verdict section to fill. The
@@ -2571,6 +2658,7 @@ mod tests {
             sheet_spacing: 20.0,
             include_sheet_outline: true,
             include_unplaced: false,
+            tabs: vec![],
         };
         export_dxf(out_path.to_str().unwrap(), export_request).expect("export should succeed");
 
@@ -2597,6 +2685,7 @@ mod tests {
             sheet_spacing: 10.0,
             include_sheet_outline: false,
             include_unplaced: false,
+            tabs: vec![],
         };
         export_dxf(out_path.to_str().unwrap(), export_request).expect("export should succeed");
 
@@ -2621,6 +2710,7 @@ mod tests {
             sheet_spacing: -5.0,
             include_sheet_outline: false,
             include_unplaced: false,
+            tabs: vec![],
         };
         assert!(export_dxf("unused.dxf", export_request).is_err());
     }
@@ -2650,7 +2740,7 @@ mod tests {
         }];
 
         let out_path = std::env::temp_dir().join("rustynesting_export_dxf_id_mapping_test.dxf");
-        let export_request = ExportRequest { sheets, parts_by_id, placements, sheet_spacing: 20.0, include_sheet_outline: false, include_unplaced: false };
+        let export_request = ExportRequest { sheets, parts_by_id, placements, sheet_spacing: 20.0, include_sheet_outline: false, include_unplaced: false, tabs: vec![] };
         export_dxf(out_path.to_str().unwrap(), export_request).expect("export should succeed");
 
         let drawing = Drawing::load_file(&out_path).expect("exported file should be a readable DXF");
@@ -2674,6 +2764,122 @@ mod tests {
         let _ = std::fs::remove_file(&out_path);
     }
 
+    /// Two 10mm parts 8mm apart, joined by a tab across the gap: the export
+    /// must write one united outline spanning 0..28, not two parts.
+    #[test]
+    fn export_unites_parts_joined_by_a_tab() {
+        let request = ExportRequest {
+            sheets: vec![square_dto(100.0)],
+            parts_by_id: HashMap::from([(0, square_dto(10.0)), (1, square_dto(10.0))]),
+            placements: vec![SheetPlacementDto {
+                sheet_index: 0,
+                parts: vec![
+                    PlacedPartDto { id: 0, x: 0.0, y: 0.0, rotation: 0.0, locked: false },
+                    PlacedPartDto { id: 1, x: 18.0, y: 0.0, rotation: 0.0, locked: false },
+                ],
+            }],
+            sheet_spacing: 20.0,
+            include_sheet_outline: false,
+            include_unplaced: false,
+            tabs: vec![TabDto {
+                sheet: 0,
+                a: 0,
+                b: 1,
+                patch: vec![vec![
+                    PointDto { x: 8.5, y: 3.5 },
+                    PointDto { x: 19.5, y: 3.5 },
+                    PointDto { x: 19.5, y: 6.5 },
+                    PointDto { x: 8.5, y: 6.5 },
+                ]],
+                visible: vec![],
+            }],
+        };
+
+        let layouts = build_export_layouts(request).expect("export layouts should build");
+        assert_eq!(layouts[0].parts.len(), 1, "a tab-joined pair must export as one shape");
+        let xs: Vec<f64> = layouts[0].parts[0].shape.points.iter().map(|p| p.x).collect();
+        let width = xs.iter().copied().fold(f64::MIN, f64::max) - xs.iter().copied().fold(f64::MAX, f64::min);
+        assert!((width - 28.0).abs() < 1e-6, "united outline should span 0..28, got width {width}");
+    }
+
+    /// Two 10mm parts 8mm apart (x=0 and x=18) with a 3mm bridge and a 6mm bit:
+    /// `plan_tabs` should bridge them once.
+    #[test]
+    fn plan_tabs_bridges_a_close_pair_once() {
+        let request = TabRequest {
+            placements: vec![SheetPlacementDto {
+                sheet_index: 0,
+                parts: vec![
+                    PlacedPartDto { id: 0, x: 0.0, y: 0.0, rotation: 0.0, locked: false },
+                    PlacedPartDto { id: 1, x: 18.0, y: 0.0, rotation: 0.0, locked: false },
+                ],
+            }],
+            parts_by_id: HashMap::from([(0, square_dto(10.0)), (1, square_dto(10.0))]),
+            settings: crate::dto::TabSettingsDto { threshold: 50.0, width: 3.0, bit: 6.0, per_part: 2 },
+        };
+
+        let tabs = plan_tabs(request);
+        assert_eq!(tabs.len(), 1, "one bridge across the gap, got {tabs:?}");
+        assert_eq!((tabs[0].sheet, tabs[0].a, tabs[0].b), (0, 0, 1));
+    }
+
+    /// The shape from the field report: two upright stadiums (20mm wide,
+    /// semicircle ends) side by side, bridged. The exported outline must keep
+    /// all four semicircles as real arcs and round the four junctions with
+    /// quarter-circle fillets - not a polyline with square corners.
+    #[test]
+    fn a_bridged_export_keeps_real_arcs_and_rounds_the_junctions() {
+        use crate::dto::RealVertexDto;
+        // Straight sides x=0 and x=20 from y=10 to y=50, semicircles of
+        // radius 10 at both ends, CCW, as DXF import would hand it over.
+        let real = vec![
+            RealVertexDto { point: PointDto { x: 20.0, y: 10.0 }, bulge: 0.0 },
+            RealVertexDto { point: PointDto { x: 20.0, y: 50.0 }, bulge: 1.0 },
+            RealVertexDto { point: PointDto { x: 0.0, y: 50.0 }, bulge: 0.0 },
+            RealVertexDto { point: PointDto { x: 0.0, y: 10.0 }, bulge: 1.0 },
+        ];
+        let arc = |cx: f64, cy: f64, from: f64| (0..=32).map(move |k| {
+            let t = from + std::f64::consts::PI * k as f64 / 32.0;
+            PointDto { x: cx + 10.0 * t.cos(), y: cy + 10.0 * t.sin() }
+        });
+        let mut points: Vec<PointDto> = arc(10.0, 50.0, 0.0).collect();
+        points.extend(arc(10.0, 10.0, std::f64::consts::PI));
+        let mut stadium = PolygonDto::new(points, "CUT".into(), None);
+        stadium.real_boundary = Some(real);
+
+        let placements = vec![SheetPlacementDto {
+            sheet_index: 0,
+            parts: vec![
+                PlacedPartDto { id: 0, x: 0.0, y: 0.0, rotation: 0.0, locked: false },
+                PlacedPartDto { id: 1, x: 28.0, y: 0.0, rotation: 0.0, locked: false },
+            ],
+        }];
+        let parts_by_id = HashMap::from([(0, stadium.clone()), (1, stadium)]);
+        let tabs = plan_tabs(TabRequest {
+            placements: placements.clone(),
+            parts_by_id: parts_by_id.clone(),
+            settings: crate::dto::TabSettingsDto { threshold: 100.0, width: 3.0, bit: 6.0, per_part: 1 },
+        });
+        assert_eq!(tabs.len(), 1, "one bridge across the straight sides, got {tabs:?}");
+
+        let out_path = std::env::temp_dir().join("rustynesting_tab_arcs_test.dxf");
+        let request = ExportRequest { sheets: vec![square_dto(200.0)], parts_by_id, placements, sheet_spacing: 20.0, include_sheet_outline: false, include_unplaced: false, tabs };
+        export_dxf(out_path.to_str().unwrap(), request).expect("export should succeed");
+        let drawing = Drawing::load_file(&out_path).expect("exported file should be a readable DXF");
+        let _ = std::fs::remove_file(&out_path);
+
+        let polylines: Vec<&dxf::entities::LwPolyline> =
+            drawing.entities().filter_map(|e| if let dxf::entities::EntityType::LwPolyline(p) = &e.specific { Some(p) } else { None }).collect();
+        assert_eq!(polylines.len(), 1, "the bridged pair must export as one outline");
+        let bulges: Vec<f64> = polylines[0].vertices.iter().map(|v| v.bulge.abs()).filter(|b| *b > 1e-9).collect();
+        let semicircles = bulges.iter().filter(|b| (**b - 1.0).abs() < 1e-3).count();
+        // A fillet between a straight side and the perpendicular strip is a
+        // quarter circle: tan(90deg / 4).
+        let fillets = bulges.iter().filter(|b| (**b - (std::f64::consts::PI / 8.0).tan()).abs() < 1e-2).count();
+        assert_eq!(semicircles, 4, "all four semicircle ends survive as arcs, bulges {bulges:?}");
+        assert_eq!(fillets, 4, "every junction is rounded, bulges {bulges:?}");
+    }
+
     /// Regression test: a part's `texts` (carried through `PolygonDto` since
     /// import) must still be there after going through `export_dxf`'s own
     /// `PolygonDto -> LayeredPolygon` conversion and placement transform -
@@ -2689,7 +2895,7 @@ mod tests {
         let placements = vec![SheetPlacementDto { sheet_index: 0, parts: vec![PlacedPartDto { id: 0, x: 20.0, y: 0.0, rotation: 0.0, locked: false }] }];
 
         let out_path = std::env::temp_dir().join("rustynesting_export_dxf_text_dto_test.dxf");
-        let export_request = ExportRequest { sheets, parts_by_id, placements, sheet_spacing: 20.0, include_sheet_outline: false, include_unplaced: false };
+        let export_request = ExportRequest { sheets, parts_by_id, placements, sheet_spacing: 20.0, include_sheet_outline: false, include_unplaced: false, tabs: vec![] };
         export_dxf(out_path.to_str().unwrap(), export_request).expect("export should succeed");
 
         let drawing = Drawing::load_file(&out_path).expect("exported file should be a readable DXF");
@@ -2724,6 +2930,7 @@ mod tests {
             sheet_spacing: 20.0,
             include_sheet_outline: false,
             include_unplaced: false,
+            tabs: vec![],
         };
         export_dxf(out_path.to_str().unwrap(), export_request).expect("export should succeed");
 
@@ -2750,6 +2957,7 @@ mod tests {
             sheet_spacing: 20.0,
             include_sheet_outline: false,
             include_unplaced: true,
+            tabs: vec![],
         };
         export_dxf(out_path.to_str().unwrap(), export_request).expect("export should succeed");
 
@@ -2775,6 +2983,7 @@ mod tests {
             sheet_spacing: 20.0,
             include_sheet_outline: true,
             include_unplaced: false,
+            tabs: vec![],
         };
         export_svg(out_path.to_str().unwrap(), export_request).expect("export should succeed");
 
@@ -3623,6 +3832,7 @@ mod tests {
                 sheet_spacing: 10.0,
                 include_sheet_outline: true,
                 include_unplaced: true, // must be forced off by the command
+                tabs: vec![],
             },
             config: config(1),
             parts: vec![ReportPartDto { name: "bracket".into(), quantity: 2, nested: 2, polygon: square_dto(10.0) }],
@@ -3655,6 +3865,7 @@ mod tests {
                 sheet_spacing: 0.0,
                 include_sheet_outline: true,
                 include_unplaced: false,
+                tabs: vec![],
             },
             config: config(1),
             parts: Vec::new(),

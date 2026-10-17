@@ -61,9 +61,49 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         sheets(app, ui);
 
         super::library::offcut_controls(app, ui);
+        if !app.showing_live() {
+            tab_controls(app, ui);
+        }
         ui.add_space(8.0);
         export_controls(app, ui);
     });
+}
+
+/// Bridge settings. Hidden while a layout is still being built, since there
+/// is no finished arrangement to bridge yet.
+fn tab_controls(app: &mut App, ui: &mut egui::Ui) {
+    ui.separator();
+    ui.label(RichText::new(app.t("tabs_heading")).color(theme::DIM()));
+    // Resolved before the `&mut` borrows below, as in `export_controls`.
+    let (enable_label, enable_tip) = (app.t("tabs_enable_label"), app.t("tabs_enable_tooltip"));
+    let (threshold_label, threshold_tip) = (app.t("tabs_threshold_label"), app.t("tabs_threshold_tooltip"));
+    let (width_label, width_tip) = (app.t("tabs_width_label"), app.t("tabs_width_tooltip"));
+    let (bit_label, bit_tip) = (app.t("tabs_bit_label"), app.t("tabs_bit_tooltip"));
+    let (per_label, per_tip) = (app.t("tabs_per_part_label"), app.t("tabs_per_part_tooltip"));
+    let before = (app.tabs_enabled, app.tab_settings);
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut app.tabs_enabled, enable_label).on_hover_text(enable_tip);
+        if app.tabs_enabled {
+            ui.label(RichText::new(threshold_label).color(theme::DIM())).on_hover_text(threshold_tip);
+            ui.add(shell::number(&mut app.tab_settings.threshold, 1.0, 0.0..=10_000.0));
+            ui.label(RichText::new(width_label).color(theme::DIM())).on_hover_text(width_tip);
+            ui.add(shell::number(&mut app.tab_settings.width, 0.1, 0.1..=1000.0));
+            ui.label(RichText::new(bit_label).color(theme::DIM())).on_hover_text(bit_tip);
+            ui.add(shell::number(&mut app.tab_settings.bit, 0.1, 0.1..=1000.0));
+            ui.label(RichText::new(per_label).color(theme::DIM())).on_hover_text(per_tip);
+            ui.add(shell::number(&mut app.tab_settings.per_part, 1.0, 1..=16));
+        }
+    });
+    if (app.tabs_enabled, app.tab_settings) != before {
+        app.request_tabs();
+    }
+    if app.tabs_enabled {
+        let total = app.tabs.len();
+        let off = app.tabs.iter().filter(|t| app.tabs_off.contains(&(t.a, t.b))).count();
+        let (n, off) = (total.to_string(), off.to_string());
+        let text = super::i18n::tv(app.prefs.lang, "tabs_count", &[("n", n.as_str()), ("off", off.as_str())]);
+        ui.label(RichText::new(text).color(theme::DIM()).small());
+    }
 }
 
 fn history_selector(app: &mut App, ui: &mut egui::Ui) {
@@ -483,6 +523,11 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
             }
         }
 
+        // Shows which parts the bridge threshold selected. A drag colour still wins.
+        if color.is_none() && app.tabs_enabled && b.w().max(b.h()) < app.tab_settings.threshold {
+            color = Some(theme::ACCENT());
+        }
+
         let map = |p: PointDto| {
             let r = canvas::rotated_translated(std::slice::from_ref(&p), part.rotation + odrot, part.x + odx, part.y + ody);
             view.model_to_screen(r[0])
@@ -515,6 +560,43 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
         }
     }
 
+    // Bridges go after the parts so they draw over the parts they join, and
+    // their click target is added last so it wins over the part beneath.
+    let mut tab_clicked = None;
+    if app.tabs_enabled {
+        for tab in app.tabs.iter().filter(|t| t.sheet == index) {
+            // Concave and possibly several rings, so outlines only - a filled
+            // convex polygon would paint the gaps the bridge does not cover.
+            let on = !app.tabs_off.contains(&(tab.a, tab.b));
+            let (width, colour) = if on { (2.0_f32, theme::ACCENT()) } else { (1.0_f32, theme::DIM()) };
+            let rings: Vec<Vec<egui::Pos2>> = tab
+                .visible
+                .iter()
+                .filter(|r| r.len() >= 3)
+                .map(|r| r.iter().map(|p| view.model_to_screen(*p)).collect())
+                .collect();
+            let all: Vec<egui::Pos2> = rings.iter().flatten().copied().collect();
+            for pts in rings {
+                painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(width, colour)));
+            }
+            if editable && !all.is_empty() {
+                // A 3mm bridge on a 3000mm sheet is under a pixel; the floor
+                // keeps it clickable.
+                let bb = egui::Rect::from_points(&all);
+                let hit = egui::Rect::from_center_size(bb.center(), bb.size().max(egui::vec2(10.0, 10.0)));
+                let response = ui.interact(hit, egui::Id::new(("tab", index, tab.a, tab.b)), egui::Sense::click());
+                if response.clicked() {
+                    tab_clicked = Some((tab.a, tab.b));
+                }
+            }
+        }
+    }
+
+    if let Some(pair) = tab_clicked {
+        if !app.tabs_off.remove(&pair) {
+            app.tabs_off.insert(pair);
+        }
+    }
     if let Some(id) = click_to_toggle {
         toggle_pin(app, id);
     }
@@ -963,6 +1045,12 @@ fn do_export(app: &mut App, format: ExportFormat) {
         return;
     };
 
+    // Bridges only join the DXF/SVG outlines; the PDF report has none to join.
+    let tabs = if app.tabs_enabled && format != ExportFormat::Pdf {
+        app.tabs.iter().filter(|t| !app.tabs_off.contains(&(t.a, t.b))).cloned().collect()
+    } else {
+        Vec::new()
+    };
     let export = ExportRequest {
         sheets: app.result_sheets.clone(),
         // The authoritative map from the run itself, not a re-derived one -
@@ -974,6 +1062,7 @@ fn do_export(app: &mut App, format: ExportFormat) {
         sheet_spacing: app.export_spacing,
         include_sheet_outline: app.export_outline,
         include_unplaced: app.export_unplaced,
+        tabs,
     };
     let report = (format == ExportFormat::Pdf).then(|| ReportRequest {
         export: export.clone(),

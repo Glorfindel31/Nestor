@@ -282,5 +282,17 @@
   "help_step_run": "ESEGUI ANNIDAMENTO — poi esamina ed ESPORTA il risultato.",
   "help_tip": "Passa il mouse su una qualsiasi etichetta per maggiori dettagli.",
   "help_dont_show": "Non mostrare più",
-  "help_close": "HO CAPITO"
+  "help_close": "HO CAPITO",
+  "tabs_heading": "PONTI",
+  "tabs_enable_label": "COLLEGA I PEZZI PICCOLI",
+  "tabs_enable_tooltip": "Dopo la nidificazione, collega i pezzi piccoli vicini con brevi ponti non tagliati, così non si spostano né volano via durante il taglio. I ponti vengono uniti ai contorni dei pezzi in fase di esportazione DXF/SVG. Fai clic su un ponte sulla lamiera per attivarlo o disattivarlo.",
+  "tabs_threshold_label": "PICCOLI SE SOTTO (mm)",
+  "tabs_threshold_tooltip": "Un pezzo riceve i ponti quando il lato più lungo del suo rettangolo di ingombro è inferiore a questo valore.",
+  "tabs_width_label": "LARGHEZZA PONTE (mm)",
+  "tabs_width_tooltip": "Larghezza della striscia non tagliata lasciata tra due pezzi.",
+  "tabs_bit_label": "Ø PUNTA (mm)",
+  "tabs_bit_tooltip": "Diametro della punta della fresa. I pezzi più vicini di questo valore non ricevono ponti (la punta non può passare tra di essi), e due ponti sullo stesso pezzo restano distanti almeno larghezza ponte + punta.",
+  "tabs_per_part_label": "PER PEZZO",
+  "tabs_per_part_tooltip": "Il numero massimo di ponti che un singolo pezzo riceve.",
+  "tabs_count": "{n} ponte/i, {off} disattivato/i"
 }

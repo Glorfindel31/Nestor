@@ -282,5 +282,17 @@
   "help_step_run": "CHẠY XẾP HÌNH — rồi xem và XUẤT kết quả.",
   "help_tip": "Di chuột vào bất kỳ nhãn nào để xem thêm chi tiết.",
   "help_dont_show": "Không hiển thị lại",
-  "help_close": "ĐÃ HIỂU"
+  "help_close": "ĐÃ HIỂU",
+  "tabs_heading": "CẦU NỐI",
+  "tabs_enable_label": "NỐI CHI TIẾT NHỎ",
+  "tabs_enable_tooltip": "Sau khi xếp, nối các chi tiết nhỏ nằm gần nhau bằng những cầu nối ngắn không cắt đứt, để chúng không xê dịch hay bay ra khi cắt. Khi xuất DXF/SVG, các cầu nối được gộp vào đường viền chi tiết. Nhấp vào một cầu nối trên tấm để bật hoặc tắt.",
+  "tabs_threshold_label": "NHỎ HƠN (mm)",
+  "tabs_threshold_tooltip": "Chi tiết nào có cạnh dài nhất của hình chữ nhật bao quanh nhỏ hơn mức này sẽ được gắn cầu nối.",
+  "tabs_width_label": "CHIỀU RỘNG CẦU (mm)",
+  "tabs_width_tooltip": "Chiều rộng dải chưa cắt còn lại giữa hai chi tiết.",
+  "tabs_bit_label": "MŨI CẮT Ø (mm)",
+  "tabs_bit_tooltip": "Đường kính mũi router. Hai chi tiết nằm gần nhau hơn mức này sẽ không có cầu nối (mũi cắt không lọt qua được giữa chúng), và hai cầu nối trên cùng một chi tiết luôn cách nhau ít nhất bằng chiều rộng cầu + mũi cắt.",
+  "tabs_per_part_label": "MỖI CHI TIẾT",
+  "tabs_per_part_tooltip": "Số cầu nối tối đa mà một chi tiết được gắn.",
+  "tabs_count": "{n} cầu nối, {off} tắt"
 }

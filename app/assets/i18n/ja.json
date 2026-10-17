@@ -282,5 +282,17 @@
   "help_step_run": "ネスティング実行 — その後、結果を確認して書き出します。",
   "help_tip": "詳しい説明は、どのラベルでもマウスを合わせると表示されます。",
   "help_dont_show": "次回から表示しない",
-  "help_close": "了解"
+  "help_close": "了解",
+  "tabs_heading": "タブ",
+  "tabs_enable_label": "小部品にブリッジを付ける",
+  "tabs_enable_tooltip": "ネスト後、近接する小部品同士を切り離さない短いブリッジで繋ぎ、切断中に動いたり飛び出したりしないようにします。DXF/SVG 書き出し時、ブリッジは部品の外形に結合されます。母材上のブリッジをクリックするとオン／オフを切り替えられます。",
+  "tabs_threshold_label": "この寸法未満を小部品 (mm)",
+  "tabs_threshold_tooltip": "バウンディングボックスの最長辺がこの値未満の部品にブリッジを付けます。",
+  "tabs_width_label": "ブリッジ幅 (mm)",
+  "tabs_width_tooltip": "2つの部品の間に残す、切断されない帯の幅です。",
+  "tabs_bit_label": "ビット径 Ø (mm)",
+  "tabs_bit_tooltip": "ルーターのビット径です。これより近接した部品にはブリッジを付けません（ビットが間を通れないため）。また、同一部品上の2つのブリッジは、少なくともブリッジ幅＋ビット径以上離れます。",
+  "tabs_per_part_label": "部品ごと",
+  "tabs_per_part_tooltip": "1つの部品に付けるブリッジの最大数です。",
+  "tabs_count": "ブリッジ {n} 個、{off} 個オフ"
 }

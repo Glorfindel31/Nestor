@@ -28,7 +28,7 @@ use crate::dto::{
     RunNestResponse, SheetPlacementDto, ValidatePlacementRequest, ValidatePlacementResponse,
 };
 
-use crate::dto::{AuditReportDto, AuditRequest, ProjectFile, ProjectShape, RemnantDto, RemnantRequest, ShapeStore};
+use crate::dto::{AuditReportDto, AuditRequest, ProjectFile, ProjectShape, RemnantDto, RemnantRequest, ShapeStore, TabDto, TabRequest};
 
 /// A saved job, opened: its settings, its shapes with every drawing that
 /// still resolves already re-imported, and one warning per shape that had to
@@ -116,6 +116,8 @@ pub enum Msg {
     /// The whole-result manufacturability check. Runs after every nest,
     /// drag and repack, so the badge can never describe a stale arrangement.
     Audited(Box<Result<AuditReportDto, String>>),
+    /// Bridges for the result with this request sequence number; stale ones are dropped.
+    Tabs(u64, Vec<TabDto>),
 
     /// The saved parts library and remnant shelf, as read from disk.
     StoreLoaded(Box<Result<ShapeStore, String>>),
@@ -335,6 +337,10 @@ impl Worker {
 
     pub fn audit(&self, request: AuditRequest) {
         self.spawn(move |emit| emit.send(Msg::Audited(Box::new(commands::audit_nest(request)))));
+    }
+
+    pub fn tabs(&self, seq: u64, request: TabRequest) {
+        self.spawn(move |emit| emit.send(Msg::Tabs(seq, commands::plan_tabs(request))));
     }
 
     /// Reads a project and re-imports every drawing it still resolves, all

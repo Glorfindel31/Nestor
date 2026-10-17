@@ -271,6 +271,7 @@ fn run() -> Result<(), String> {
             sheet_spacing: 10.0,
             include_sheet_outline: true,
             include_unplaced: opts.include_unplaced,
+            tabs: vec![],
         };
         match std::path::Path::new(out).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
             Some("svg") => commands::export_svg(out, request)?,
