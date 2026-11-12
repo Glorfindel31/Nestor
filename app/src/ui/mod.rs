@@ -293,6 +293,9 @@ pub struct App {
     /// Bridges the user switched off, keyed by the pair of part ids they join
     /// so the choice survives a regeneration of the same arrangement.
     tabs_off: std::collections::HashSet<(usize, usize)>,
+    /// Part ids the user asked bridges for via BRIDGE THESE, whatever their
+    /// size. Cleared by a new nest.
+    tabs_extra: Vec<usize>,
     /// Sequence number of the latest tab request; older answers are dropped.
     tabs_seq: u64,
     export_status: Status,
@@ -406,6 +409,7 @@ impl App {
             tab_settings: crate::dto::TabSettingsDto { threshold: 50.0, width: 3.0, bit: 6.0, per_part: 2 },
             tabs: Vec::new(),
             tabs_off: Default::default(),
+            tabs_extra: Vec::new(),
             tabs_seq: 0,
             export_status: Default::default(),
             drag: None,
@@ -879,6 +883,7 @@ impl App {
     fn adopt_response(&mut self, response: crate::dto::RunNestResponse) {
         // A new run's part ids name different parts, so old choices no longer apply.
         self.tabs_off.clear();
+        self.tabs_extra.clear();
         self.parts_by_id = response.parts_by_id;
         self.part_rules = response.part_rules;
         self.history = if response.history.is_empty() {
@@ -944,7 +949,7 @@ impl App {
     ///
     /// Clears the previous verdict first, so the gap between the edit and the
     /// answer reads as "unknown" rather than as the stale pass.
-    fn request_audit(&mut self, reason: &'static str) {
+    pub(super) fn request_audit(&mut self, reason: &'static str) {
         self.request_tabs();
         self.audit = None;
         self.audit_reason = reason;
@@ -965,7 +970,21 @@ impl App {
             placements: snapshot.placements.clone(),
             parts_by_id: self.parts_by_id.clone(),
             config,
-        });
+        }, self.prefs.rollers());
+    }
+
+    /// Part ids the roller check flagged on the current audit. Empty when the
+    /// check is off, so nothing downstream needs its own on/off test.
+    pub(super) fn roller_flagged(&self) -> std::collections::HashSet<usize> {
+        if !self.prefs.rollers_on {
+            return Default::default();
+        }
+        self.audit
+            .iter()
+            .flat_map(|r| r.issues.iter())
+            .filter(|i| i.kind == "roller")
+            .flat_map(|i| i.part_ids.iter().copied())
+            .collect()
     }
 
     /// Bridges describe one arrangement, so they are recomputed on every change
@@ -983,6 +1002,7 @@ impl App {
                 placements: snapshot.placements.clone(),
                 parts_by_id: self.parts_by_id.clone(),
                 settings: crate::dto::TabSettingsDto { threshold: self.cfg.small_size, ..self.tab_settings },
+                extra: self.tabs_extra.clone(),
             },
         );
     }

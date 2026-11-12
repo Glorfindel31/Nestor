@@ -438,7 +438,7 @@ pub fn plan_tabs(request: TabRequest) -> Vec<TabDto> {
                 Some((p.id, placed.points))
             })
             .collect();
-        for b in geometry::tabs::find_bridges(&parts, &settings) {
+        for b in geometry::tabs::find_bridges_with(&parts, &settings, &request.extra) {
             let rings = |rings: &[Vec<geometry::point::Point>]| rings.iter().map(|r| r.iter().map(PointDto::from).collect()).collect();
             out.push(TabDto { sheet: sheet_idx, a: b.a, b: b.b, patch: rings(&b.patch), visible: rings(&b.visible) });
         }
@@ -1056,6 +1056,37 @@ pub fn audit_nest(request: crate::dto::AuditRequest) -> Result<crate::dto::Audit
     Ok((&audit(&sheets)).into())
 }
 
+/// The hold-down roller check: every placed part too short, along the roller
+/// axis, to span both rollers - advisory, one issue per part. Measured on the
+/// true outline at its placed rotation, not the padded one: it is the cut
+/// piece that has to sit under the rollers.
+#[must_use]
+pub fn roller_issues(placements: &[SheetPlacementDto], parts_by_id: &HashMap<usize, PolygonDto>, rollers: crate::dto::RollerDto) -> Vec<crate::dto::AuditIssueDto> {
+    let mut out = Vec::new();
+    for (sheet_index, placement) in placements.iter().enumerate() {
+        for part in &placement.parts {
+            let Some(dto) = parts_by_id.get(&part.id) else { continue };
+            let shape: LayeredPolygon = dto.clone().into();
+            let Some(b) = geometry::polygon::get_polygon_bounds(&rotate_layered_polygon(&shape, part.rotation).points) else { continue };
+            let extent = if rollers.along_x { b.width } else { b.height };
+            if extent < rollers.gap {
+                out.push(crate::dto::AuditIssueDto { kind: "roller".into(), fatal: false, sheet_index, part_ids: vec![part.id] });
+            }
+        }
+    }
+    out
+}
+
+/// `audit_nest`, plus the roller check when the machine has rollers set up.
+/// `None` is exactly `audit_nest`: the check does not exist when it is off.
+pub fn audit_with_rollers(request: crate::dto::AuditRequest, rollers: Option<crate::dto::RollerDto>) -> Result<crate::dto::AuditReportDto, String> {
+    let extra = rollers.map(|r| roller_issues(&request.placements, &request.parts_by_id, r)).unwrap_or_default();
+    let mut report = audit_nest(request)?;
+    report.warning_count += extra.len();
+    report.issues.extend(extra);
+    Ok(report)
+}
+
 /// Writes the PDF job report: the Part-List / Sheet-List / Remnant Info
 /// summary, then one to-scale page per distinct sheet layout. Reuses
 /// `build_export_layouts` verbatim, so the report draws exactly what a
@@ -1084,6 +1115,7 @@ pub fn export_report(path: &str, request: ReportRequest) -> Result<(), String> {
             .unwrap_or_else(|| std::path::Path::new(path).file_stem().map_or_else(|| "nestresult".into(), |s| s.to_string_lossy().into_owned())),
         generated: chrono::Local::now().format("%b %d, %Y %I:%M %p").to_string(),
         spacing: config.spacing,
+        warnings: request.warnings.clone(),
         parts: request
             .parts
             .iter()
@@ -1940,6 +1972,32 @@ mod tests {
 
         let report = audit_nest(crate::dto::AuditRequest { sheets, placements: with.placements.clone(), parts_by_id: with.parts_by_id.clone(), config: cfg }).expect("audit should run");
         assert_eq!(report.fatal_count, 0, "{:?}", report.issues);
+    }
+
+    /// A part shorter than the roller gap along the roller axis is flagged,
+    /// one that spans it is not, the axis decides which side counts, and with
+    /// no rollers the audit is exactly what it was.
+    #[test]
+    fn the_roller_check_flags_parts_that_cannot_span_both_rollers() {
+        let sheets = vec![rect_dto(1000.0, 1000.0)];
+        let parts_by_id: HashMap<usize, PolygonDto> = HashMap::from([(0, rect_dto(300.0, 40.0)), (1, rect_dto(40.0, 40.0))]);
+        let placements = vec![SheetPlacementDto {
+            sheet_index: 0,
+            parts: vec![PlacedPartDto { id: 0, x: 0.0, y: 0.0, rotation: 0.0, locked: false }, PlacedPartDto { id: 1, x: 500.0, y: 500.0, rotation: 0.0, locked: false }],
+        }];
+        let request = || crate::dto::AuditRequest { sheets: sheets.clone(), placements: placements.clone(), parts_by_id: parts_by_id.clone(), config: config(1) };
+        let flagged = |rollers| {
+            let report = audit_with_rollers(request(), Some(rollers)).expect("audit runs");
+            report.issues.iter().filter(|i| i.kind == "roller").flat_map(|i| i.part_ids.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(flagged(crate::dto::RollerDto { gap: 200.0, along_x: true }), vec![1], "300 long along X spans a 200 gap, 40 does not");
+        assert_eq!(flagged(crate::dto::RollerDto { gap: 200.0, along_x: false }), vec![0, 1], "along Y both are 40 high");
+        let plain = audit_nest(request()).expect("audit runs");
+        let off = audit_with_rollers(request(), None).expect("audit runs");
+        assert_eq!((off.warning_count, off.issues.len()), (plain.warning_count, plain.issues.len()), "off is exactly the old audit");
+        let on = audit_with_rollers(request(), Some(crate::dto::RollerDto { gap: 200.0, along_x: true })).expect("audit runs");
+        assert!(on.passed, "a roller warning is advisory, never fatal");
+        assert_eq!(on.warning_count, plain.warning_count + 1);
     }
 
     /// A job of nothing but fillers has nothing to open a sheet with.
@@ -2905,6 +2963,7 @@ mod tests {
             }],
             parts_by_id: HashMap::from([(0, square_dto(10.0)), (1, square_dto(10.0))]),
             settings: crate::dto::TabSettingsDto { threshold: 50.0, width: 3.0, bit: 6.0, per_part: 2 },
+            extra: Vec::new(),
         };
 
         let tabs = plan_tabs(request);
@@ -2948,6 +3007,7 @@ mod tests {
             placements: placements.clone(),
             parts_by_id: parts_by_id.clone(),
             settings: crate::dto::TabSettingsDto { threshold: 100.0, width: 3.0, bit: 6.0, per_part: 1 },
+            extra: Vec::new(),
         });
         assert_eq!(tabs.len(), 1, "one bridge across the straight sides, got {tabs:?}");
 
@@ -3927,6 +3987,7 @@ mod tests {
             config: config(1),
             parts: vec![ReportPartDto { name: "bracket".into(), quantity: 2, nested: 2, polygon: square_dto(10.0) }],
             title: Some("Job 42".into()),
+            warnings: Vec::new(),
         };
         export_report(path.to_str().unwrap(), request).expect("writes a report");
 
@@ -3960,6 +4021,7 @@ mod tests {
             config: config(1),
             parts: Vec::new(),
             title: None,
+            warnings: Vec::new(),
         };
         // Same "placement references unknown part id" guard build_export_layouts
         // already enforces for DXF/SVG - the report reuses it verbatim.

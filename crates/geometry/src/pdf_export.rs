@@ -104,6 +104,8 @@ pub struct ReportMeta {
     /// from every piece around it.
     pub spacing: f64,
     pub parts: Vec<ReportPart>,
+    /// Advisory lines printed in their own "Warnings" section after Remnant Info, only when non-empty (the hold-down roller check). Empty = the report is unchanged.
+    pub warnings: Vec<String>,
 }
 
 pub fn export_report(layouts: &[SheetLayout], meta: &ReportMeta) -> Vec<u8> {
@@ -473,6 +475,25 @@ fn summary_pages(
                 text_centre(&mut out, &value, cx, row_y, 10.0, false);
             }
             row_y -= ROW_PITCH;
+        }
+        y = row_y;
+    }
+
+    // --- Warnings ---
+    if !meta.warnings.is_empty() {
+        y = fit(&mut pages, &mut out, y, 40.0 + ROW_PITCH);
+        y -= 15.97;
+        text_centre(&mut out, "Warnings", (REMNANT_L + REMNANT_R) / 2.0, y, 10.0, true);
+        y -= 2.81;
+        hline(&mut out, REMNANT_L, REMNANT_R, y);
+        y -= 14.47;
+        for line in &meta.warnings {
+            if y < CONTENT_BOTTOM {
+                pages.push(std::mem::take(&mut out));
+                y = NEXT_PAGE_TOP - 14.47;
+            }
+            text_at(&mut out, line, REMNANT_L, y, 10.0, false);
+            y -= ROW_PITCH;
         }
     }
 
@@ -1065,7 +1086,17 @@ mod tests {
             generated: "2026-01-01 09:00".into(),
             spacing: 2.0,
             parts: vec![ReportPart { name: "widget".into(), quantity: 4, nested: 3, shape: square(10.0) }],
+            warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn warnings_get_their_own_section_only_when_there_are_some() {
+        let with = ReportMeta { warnings: vec!["Sheet 1: part 3 is shorter than the roller gap".into()], ..meta() };
+        let text = String::from_utf8(export_report(&[layout(2)], &with)).expect("ASCII only");
+        assert!(text.contains("Warnings") && text.contains("part 3 is shorter than the roller gap"));
+        let text = String::from_utf8(export_report(&[layout(2)], &meta())).expect("ASCII only");
+        assert!(!text.contains("Warnings") && !text.contains("roller"));
     }
 
     #[test]

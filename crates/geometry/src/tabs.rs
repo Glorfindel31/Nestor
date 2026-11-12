@@ -42,6 +42,12 @@ pub struct Bridge {
 
 /// `parts`: (id, outer contour already rotated and positioned on the sheet), one sheet.
 pub fn find_bridges(parts: &[(usize, Vec<Point>)], settings: &TabSettings) -> Vec<Bridge> {
+    find_bridges_with(parts, settings, &[])
+}
+
+/// `find_bridges`, with `extra` part ids treated as small whatever their size -
+/// how a part the hold-down roller check flagged gets bridges asked for it.
+pub fn find_bridges_with(parts: &[(usize, Vec<Point>)], settings: &TabSettings, extra: &[usize]) -> Vec<Bridge> {
     // ponytail: "adjacent" = within 2 bit diameters, a heuristic; tune if bridges are missed or span too far
     let gap_limit = 2.0 * settings.bit;
 
@@ -49,7 +55,7 @@ pub fn find_bridges(parts: &[(usize, Vec<Point>)], settings: &TabSettings) -> Ve
         .iter()
         .filter_map(|(id, pts)| {
             let b = get_polygon_bounds(pts)?;
-            (b.width.max(b.height) < settings.threshold).then_some((*id, pts.as_slice(), b))
+            (b.width.max(b.height) < settings.threshold || extra.contains(id)).then_some((*id, pts.as_slice(), b))
         })
         .collect();
 
@@ -416,6 +422,16 @@ mod tests {
     fn big_part_is_not_bridged() {
         let parts = vec![(0, square(0.0, 0.0, 100.0)), (1, square(108.0, 0.0, 20.0))];
         assert!(find_bridges(&parts, &settings(2)).is_empty());
+    }
+
+    /// What BRIDGE THESE relies on: a part named in `extra` is bridged even
+    /// though it is over the size threshold.
+    #[test]
+    fn an_extra_part_is_bridged_whatever_its_size() {
+        let parts = vec![(0, square(0.0, 0.0, 100.0)), (1, square(108.0, 0.0, 20.0))];
+        let bridges = find_bridges_with(&parts, &settings(2), &[0]);
+        assert_eq!(bridges.len(), 1);
+        assert_eq!((bridges[0].a, bridges[0].b), (0, 1));
     }
 
     #[test]

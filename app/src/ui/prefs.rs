@@ -46,6 +46,21 @@ pub struct Prefs {
     /// still open. A drawing still at the path the job records always wins
     /// over the saved copy, so this only ever adds a fallback.
     pub project_geometry: bool,
+
+    /// Warn about pieces too short to sit under both hold-down rollers.
+    ///
+    /// Off by default, and when off nothing about it shows anywhere: no
+    /// audit issue, no canvas highlight, no bridge button, no report
+    /// section. It is a property of the machine, so it lives here rather
+    /// than in the job's `config.json`.
+    pub rollers_on: bool,
+
+    /// Distance between the two rollers, in mm. A piece must be at least
+    /// this long along the roller axis to be pressed by both.
+    pub roller_gap: f64,
+
+    /// Whether the rollers run along X (true) or along Y (false) of the sheet.
+    pub roller_along_x: bool,
 }
 
 impl Default for Prefs {
@@ -58,7 +73,18 @@ impl Default for Prefs {
             live_view: false,
             sound_on_finish: true,
             project_geometry: true,
+            rollers_on: false,
+            roller_gap: 200.0,
+            roller_along_x: true,
         }
+    }
+}
+
+impl Prefs {
+    /// The roller check's settings when it is on, `None` when it is off - so
+    /// callers pass the result straight through and an off check costs nothing.
+    pub fn rollers(&self) -> Option<crate::dto::RollerDto> {
+        self.rollers_on.then_some(crate::dto::RollerDto { gap: self.roller_gap, along_x: self.roller_along_x })
     }
 }
 

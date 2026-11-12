@@ -306,6 +306,7 @@ fn run() -> Result<bool, String> {
                     config: opts.config.clone(),
                     parts: report_parts(&opts, &response, &labels, &quantities),
                     title: None,
+                    warnings: Vec::new(),
                 },
             )?,
             other => return Err(format!("--out: don't know how to write '{}'", other.unwrap_or("a file with no extension"))),

@@ -335,8 +335,8 @@ impl Worker {
         self.spawn(move |emit| emit.send(Msg::Validated(Box::new(commands::validate_placement(request)))));
     }
 
-    pub fn audit(&self, request: AuditRequest) {
-        self.spawn(move |emit| emit.send(Msg::Audited(Box::new(commands::audit_nest(request)))));
+    pub fn audit(&self, request: AuditRequest, rollers: Option<crate::dto::RollerDto>) {
+        self.spawn(move |emit| emit.send(Msg::Audited(Box::new(commands::audit_with_rollers(request, rollers)))));
     }
 
     pub fn tabs(&self, seq: u64, request: TabRequest) {

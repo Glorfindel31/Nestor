@@ -97,6 +97,17 @@ fn tab_controls(app: &mut App, ui: &mut egui::Ui) {
     if (app.tabs_enabled, app.tab_settings, app.cfg.small_size) != before {
         app.request_tabs();
     }
+    let flagged = app.roller_flagged();
+    if !flagged.is_empty() {
+        let (bridge_label, bridge_tip) = (app.t("rollers_bridge_these"), app.t("rollers_bridge_these_tooltip"));
+        if ui.button(bridge_label).on_hover_text(bridge_tip).clicked() {
+            let mut ids: Vec<usize> = flagged.into_iter().collect();
+            ids.sort_unstable();
+            app.tabs_extra = ids;
+            app.tabs_enabled = true;
+            app.request_tabs();
+        }
+    }
     if app.tabs_enabled {
         let total = app.tabs.len();
         let off = app.tabs.iter().filter(|t| app.tabs_off.contains(&(t.a, t.b))).count();
@@ -289,6 +300,7 @@ fn audit_kind_key(kind: &str) -> &str {
         "outside_sheet" => "audit_kind_outside_sheet",
         "below_spacing" => "audit_kind_below_spacing",
         "outside_margin" => "audit_kind_outside_margin",
+        "roller" => "audit_kind_roller",
         other => other,
     }
 }
@@ -503,6 +515,7 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
     let mut drag_delta = egui::Vec2::ZERO;
     let mut drag_released = false;
 
+    let roller_flagged = app.roller_flagged();
     for part in &placement.parts {
         let Some(poly) = app.parts_by_id.get(&part.id) else { continue };
         // The offset a drag in progress is applying to this part, so it
@@ -521,6 +534,13 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
             if d.sheet == index && d.part_id == part.id {
                 color = Some(if d.clear { theme::OK() } else { theme::ERROR() });
             }
+        }
+
+        // Pieces the hold-down rollers cannot press. Empty unless the check is
+        // on. The advisory colour, as on the audit badge - ERROR means fatal
+        // here, and this never is.
+        if color.is_none() && roller_flagged.contains(&part.id) {
+            color = Some(theme::ACCENT());
         }
 
         // Shows which parts the bridge threshold selected. A drag colour still wins.
@@ -1069,11 +1089,28 @@ fn do_export(app: &mut App, format: ExportFormat) {
         config: app.result_config.clone().unwrap_or_else(|| app.cfg.to_dto()),
         parts: report_part_list(app),
         title: None,
+        warnings: roller_warnings(app),
     });
 
     app.export_status.ok(app.t("export_status_running"));
     app.console.log(console::Kind::Plain, format!("exporting {}", format.label()));
     app.worker.export(format, path, export, report);
+}
+
+/// One report line per roller-flagged piece. Empty when the check is off.
+fn roller_warnings(app: &App) -> Vec<String> {
+    if !app.prefs.rollers_on {
+        return Vec::new();
+    }
+    let Some(audit) = &app.audit else { return Vec::new() };
+    audit
+        .issues
+        .iter()
+        .filter(|i| i.kind == "roller")
+        .flat_map(|i| i.part_ids.iter().map(move |id| (i.sheet_index, *id)))
+        // English like the rest of the report, whose PDF text is ASCII-only.
+        .map(|(sheet, id)| super::i18n::tv(super::i18n::Lang::En, "rollers_report_line", &[("sheet", &(sheet + 1).to_string()), ("part", &id.to_string())]))
+        .collect()
 }
 
 /// The part list the PDF report prints - source shapes as the user defined

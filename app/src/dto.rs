@@ -1023,6 +1023,19 @@ pub struct TabRequest {
     pub placements: Vec<SheetPlacementDto>,
     pub parts_by_id: HashMap<usize, PolygonDto>,
     pub settings: TabSettingsDto,
+    /// Part ids to bridge whatever their size - the parts the hold-down
+    /// roller check flagged, once the user asks for bridges on them.
+    pub extra: Vec<usize>,
+}
+
+/// The machine's hold-down rollers: two rollers `gap` mm apart that press the
+/// material while it is cut. A part is held only if it spans both, i.e. its
+/// extent along the roller axis is at least `gap`. `along_x`: the gap is
+/// measured along the sheet's X axis (as drawn); otherwise along Y.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct RollerDto {
+    pub gap: f64,
+    pub along_x: bool,
 }
 
 /// One row of the PDF report's piece table. Names and quantities live only
@@ -1059,6 +1072,10 @@ pub struct ReportRequest {
     /// Shown as the report's heading.
     #[serde(default)]
     pub title: Option<String>,
+    /// Advisory lines printed in their own section, only when there are any -
+    /// the hold-down roller warnings. Empty means the report is unchanged.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Payload for the `"nest-run-start"` event - fired once right before each

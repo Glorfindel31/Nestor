@@ -192,6 +192,31 @@ fn settings_menu(app: &mut App, ctx: &egui::Context) {
             ui.separator();
             let (label, tooltip) = (app.t("project_include_geometry"), app.t("project_include_geometry_tooltip"));
             ui.checkbox(&mut app.prefs.project_geometry, RichText::new(label).color(theme::TEXT())).on_hover_text(tooltip);
+
+            ui.separator();
+            let (label, tooltip) = (app.t("rollers_label"), app.t("rollers_tooltip"));
+            let before = app.prefs.rollers_on;
+            ui.checkbox(&mut app.prefs.rollers_on, RichText::new(label).color(theme::TEXT())).on_hover_text(tooltip);
+            if app.prefs.rollers_on {
+                let (gap_label, gap_tip) = (app.t("roller_gap_label"), app.t("roller_gap_tooltip"));
+                let (x_label, y_label) = (app.t("roller_axis_x"), app.t("roller_axis_y"));
+                let gap_before = app.prefs.roller_gap;
+                let axis_before = app.prefs.roller_along_x;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(gap_label).color(theme::DIM())).on_hover_text(gap_tip);
+                    ui.add(number(&mut app.prefs.roller_gap, 1.0, 1.0..=10_000.0));
+                });
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut app.prefs.roller_along_x, true, x_label);
+                    ui.selectable_value(&mut app.prefs.roller_along_x, false, y_label);
+                });
+                if (app.prefs.roller_gap, app.prefs.roller_along_x) != (gap_before, axis_before) {
+                    app.request_audit("roller settings");
+                }
+            }
+            if app.prefs.rollers_on != before {
+                app.request_audit("roller settings");
+            }
         });
     app.settings_menu_open = open;
 }
