@@ -15,8 +15,6 @@ use super::state::bounds_of;
 use super::{canvas, theme, App};
 use crate::dto::{PointDto, PolygonDto, SheetPlacementDto};
 
-/// The square a sheet is fitted into before zoom.
-const SHEET_BUDGET: f32 = 360.0;
 
 /// One user action, collected while drawing and applied after it.
 enum Action {
@@ -126,19 +124,19 @@ fn body(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
-    // SHEETS.
+    // SHEETS, one per row, each as big as the window allows: the whole point
+    // of a separate window is room, and a fixed small box made zoom the only
+    // way to see a part - Ctrl+scroll still zooms past this.
     ui.separator();
+    let budget = egui::vec2(ui.available_width() - 24.0, (ui.available_height() - 40.0).max(300.0));
     let views = &mut app.editor.views;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            for (i, (pl, sheet)) in placements.iter().zip(sheets.iter()).enumerate() {
-                let Some(sheet) = sheet else { continue };
-                ui.vertical(|ui| {
-                    sheet_canvas(ui, views, parts_by_id, i, pl, sheet, held, busy, &mut action);
-                    ui.label(format!("{} {}", sheet_word, i + 1));
-                });
-            }
-        });
+        for (i, (pl, sheet)) in placements.iter().zip(sheets.iter()).enumerate() {
+            let Some(sheet) = sheet else { continue };
+            ui.label(format!("{} {}", sheet_word, i + 1));
+            sheet_canvas(ui, views, parts_by_id, i, pl, sheet, held, busy, budget, &mut action);
+            ui.add_space(12.0);
+        }
     });
 
     match action {
@@ -162,11 +160,12 @@ fn sheet_canvas(
     sheet: &PolygonDto,
     held: Option<Held>,
     busy: bool,
+    budget: egui::Vec2,
     action: &mut Option<Action>,
 ) {
     let sheet_bounds = bounds_of(&sheet.points);
     let (w, h) = (sheet_bounds.w() as f32, sheet_bounds.h() as f32);
-    let scale = if w > 0.0 && h > 0.0 { (SHEET_BUDGET / w).min(SHEET_BUDGET / h) } else { 1.0 };
+    let scale = if w > 0.0 && h > 0.0 { (budget.x / w).min(budget.y / h) } else { 1.0 };
     let size = egui::vec2(w * scale, h * scale).max(egui::vec2(40.0, 40.0));
 
     // Allocated before the parts, so a part added later sits on top of the
