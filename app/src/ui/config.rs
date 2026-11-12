@@ -75,6 +75,26 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
             shell::number_row(ui, t("small_size_label"), t("small_size_tooltip"), &mut app.cfg.small_size, 1.0, 1.0..=10_000.0);
         }
 
+        // Hold-down rollers. Here beside the other small-part setting, where
+        // the job is set up, though the values are the machine's and stay in
+        // prefs (saved across jobs). Any change re-checks the shown result.
+        ui.add_space(6.0);
+        let rollers_before = (app.prefs.rollers_on, app.prefs.roller_gap, app.prefs.roller_along_x);
+        ui.horizontal(|ui| {
+            shell::help_bubble(ui.checkbox(&mut app.prefs.rollers_on, t("rollers_label")), t("rollers_label"), t("rollers_tooltip"));
+        });
+        if app.prefs.rollers_on {
+            shell::number_row(ui, t("roller_gap_label"), t("roller_gap_tooltip"), &mut app.prefs.roller_gap, 1.0, 1.0..=10_000.0);
+            ui.horizontal(|ui| {
+                ui.add_space(shell::LABEL_W);
+                ui.selectable_value(&mut app.prefs.roller_along_x, true, t("roller_axis_x"));
+                ui.selectable_value(&mut app.prefs.roller_along_x, false, t("roller_axis_y"));
+            });
+        }
+        if (app.prefs.rollers_on, app.prefs.roller_gap, app.prefs.roller_along_x) != rollers_before {
+            app.request_audit("roller settings");
+        }
+
         ui.add_space(8.0);
         if ui.button(t(if app.advanced_open { "btn_advanced_expanded" } else { "btn_advanced_collapsed" })).clicked() {
             app.advanced_open = !app.advanced_open;
