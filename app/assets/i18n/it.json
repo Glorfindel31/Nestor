@@ -53,6 +53,8 @@
   "th_part_mirror_tooltip": "Se questo specifico pezzo può essere tagliato ribaltato, scavalcando l'impostazione generale RIBALTA I PEZZI. Scegli VIETA per un pezzo che deve tenere una faccia in su (una faccia buona, una faccia stampata, un dettaglio asimmetrico) in un lavoro in cui ribaltare sarebbe altrimenti accettabile.",
   "th_keep_holes": "FORI VUOTI",
   "th_keep_holes_tooltip": "Se i fori di questo pezzo restano vuoti. Selezionato, non viene annidato nulla al loro interno - da usare quando un foro fa parte del pezzo finito e non è materiale libero. Deselezionato (predefinito), un foro abbastanza grande da contenere un pezzo più piccolo viene usato come materiale.",
+  "th_fill": "RIEMPI",
+  "th_fill_tooltip": "Quante ne entrano: la quantità viene ignorata, e dopo aver piazzato tutti gli altri pezzi, questo pezzo riempie lo spazio rimasto sui fogli già aperti (mai sull'ultimo, che conserva il ritaglio). Non apre mai un foglio proprio.",
   "rot_any": "TUTTI",
   "rot_0_180": "solo 0 / 180",
   "rot_quarter": "passi di 90°",

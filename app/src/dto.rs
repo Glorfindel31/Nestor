@@ -208,6 +208,11 @@ pub struct PartDto {
     /// where a hole big enough to hold a neighbour is used as free material.
     #[serde(default)]
     pub no_hole_nesting: bool,
+    /// "As many as fit": `quantity` is ignored, the nest runs without this
+    /// part, and the space left on the sheets it opened is then filled with
+    /// copies of it - see `nesting::fill`. Never opens a sheet of its own.
+    #[serde(default)]
+    pub filler: bool,
 }
 
 fn one() -> usize {
@@ -248,6 +253,9 @@ fn one() -> usize {
 /// would otherwise be four positional values.
 pub struct ExpandedParts {
     pub adam: Vec<usize>,
+    /// One template id per filler part: registered in `parts_by_id`,
+    /// `shape_ids` and the rules like any part, but never a gene.
+    pub fillers: Vec<usize>,
     pub parts_by_id: HashMap<usize, LayeredPolygon>,
     pub shape_ids: HashMap<usize, usize>,
     pub part_rules: nesting::placement::PartRules,
@@ -283,6 +291,7 @@ pub fn expand_parts(parts: Vec<PartDto>, mirror: bool) -> ExpandedParts {
     let mut shape_ids = HashMap::new();
     let mut rules: HashMap<usize, nesting::placement::PartRule> = HashMap::new();
     let mut adam = Vec::new();
+    let mut fillers = Vec::new();
     let mut next_id = 0usize;
 
     for (source_id, part) in parts.into_iter().enumerate() {
@@ -295,6 +304,18 @@ pub fn expand_parts(parts: Vec<PartDto>, mirror: bool) -> ExpandedParts {
             .then_some(nesting::placement::PartRule { angles, mirror: may_mirror, no_hole_nesting: part.no_hole_nesting });
 
         let polygon: LayeredPolygon = part.polygon.into();
+        // A filler takes exactly one id - its template - so the id blocks
+        // every report rebuilds from the quantities stay one wide for it.
+        if part.filler {
+            parts_by_id.insert(next_id, polygon);
+            shape_ids.insert(next_id, source_id);
+            if let Some(rule) = rule {
+                rules.insert(next_id, rule);
+            }
+            fillers.push(next_id);
+            next_id += 1;
+            continue;
+        }
         let Some(last) = part.quantity.checked_sub(1) else { continue };
         // Clone for every copy but the last, where a move does instead -
         // `quantity` copies never need more than `quantity - 1` clones.
@@ -352,7 +373,7 @@ pub fn expand_parts(parts: Vec<PartDto>, mirror: bool) -> ExpandedParts {
     adam_with_area.sort_by(|&(_, area_a), &(_, area_b)| area_b.total_cmp(&area_a));
     let adam: Vec<usize> = adam_with_area.into_iter().map(|(id, _)| id).collect();
 
-    ExpandedParts { adam, parts_by_id, shape_ids, part_rules: std::sync::Arc::new(rules) }
+    ExpandedParts { adam, fillers, parts_by_id, shape_ids, part_rules: std::sync::Arc::new(rules) }
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1264,6 +1285,8 @@ pub struct ProjectShape {
     pub mirror: Option<bool>,
     #[serde(default)]
     pub no_hole_nesting: bool,
+    #[serde(default)]
+    pub filler: bool,
 }
 
 /// A saved job: the settings, and what was in the shapes table.

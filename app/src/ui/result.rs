@@ -1088,12 +1088,15 @@ fn do_export(app: &mut App, format: ExportFormat) {
 /// `MIRROR_ID_BIT`, which is masked off first or every flipped piece would land
 /// past the end of the table.
 fn report_part_list(app: &App) -> Vec<ReportPartDto> {
+    // Same `qty > 0` rule as `App::build_request`, or the id blocks drift. A
+    // filler row's block is one wide whatever its qty, and its copies carry
+    // their own ids - `template_of` maps them back to that block.
     let rows: Vec<&super::state::ShapeRow> = app.shapes.iter().filter(|s| s.role == super::state::Role::Part && s.qty > 0).collect();
 
     let mut block_end = Vec::with_capacity(rows.len());
     let mut running = 0usize;
     for row in &rows {
-        running += row.qty;
+        running += if row.filler { 1 } else { row.qty };
         block_end.push(running);
     }
 
@@ -1101,7 +1104,7 @@ fn report_part_list(app: &App) -> Vec<ReportPartDto> {
     if let Some(snap) = &app.snapshot {
         for placement in &snap.placements {
             for part in &placement.parts {
-                let id = part.id & !nesting::dispatch::MIRROR_ID_BIT;
+                let id = nesting::fill::template_of(part.id & !nesting::dispatch::MIRROR_ID_BIT);
                 let at = block_end.partition_point(|&end| end <= id);
                 if let Some(count) = nested.get_mut(at) {
                     *count += 1;
@@ -1112,7 +1115,7 @@ fn report_part_list(app: &App) -> Vec<ReportPartDto> {
 
     rows.iter()
         .enumerate()
-        .map(|(i, s)| ReportPartDto { name: format!("{}-{}", s.file, i + 1), quantity: s.qty, nested: nested[i], polygon: s.poly.clone() })
+        .map(|(i, s)| ReportPartDto { name: format!("{}-{}", s.file, i + 1), quantity: if s.filler { nested[i] } else { s.qty }, nested: nested[i], polygon: s.poly.clone() })
         .collect()
 }
 

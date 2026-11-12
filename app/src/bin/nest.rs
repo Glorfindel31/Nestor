@@ -51,6 +51,8 @@ OPTIONS:
     --svg-unit UNIT    mm|cm|m|px - what one SVG user unit means
     --out FILE         write the result; format from the extension (.dxf/.svg/.pdf)
     --unplaced         include never-placed parts in the export
+    --fill FILE        a filler: as many as fit on the sheets the other parts
+                       open, never the last one (repeatable)
     --json             print the summary as JSON instead of text
     -h, --help         this
 ";
@@ -72,6 +74,8 @@ struct Options {
     /// Each file with the `--qty` in force when it was named, if any, so one
     /// run can mix quantities (a job of 250 brackets and 50 lids).
     files: Vec<(String, Option<usize>)>,
+    /// `--fill` files: every shape in them is a filler part.
+    fill_files: Vec<String>,
     sheet: (f64, f64),
     sheets: usize,
     qty: usize,
@@ -90,6 +94,7 @@ impl Default for Options {
         // as a harness for what users actually get.
         Self {
             files: Vec::new(),
+            fill_files: Vec::new(),
             sheet: (2440.0, 1220.0),
             sheets: 100,
             qty: 1,
@@ -169,6 +174,7 @@ fn parse_args() -> Result<Option<Options>, String> {
             "--svg-unit" => opts.svg_unit = Some(value("--svg-unit")?),
             "--out" => opts.out = Some(value("--out")?),
             "--unplaced" => opts.include_unplaced = true,
+            "--fill" => opts.fill_files.push(value("--fill")?),
             "--json" => opts.json = true,
             other if other.starts_with('-') => return Err(format!("unknown option '{other}'\n\n{USAGE}")),
             file => opts.files.push((file.to_string(), qty_seen.then_some(opts.qty))),
@@ -216,8 +222,10 @@ fn run() -> Result<bool, String> {
     // mapping without the engine having to give its `shape_ids` back.
     let mut labels: Vec<String> = Vec::new();
     let mut quantities: Vec<usize> = Vec::new();
-    for (file, quantity) in &opts.files {
-        let quantity = quantity.unwrap_or(opts.qty);
+    // A filler file is read like any other, flagged, and counted as one id
+    // wide - `expand_parts` gives a filler exactly one (its template).
+    let inputs = opts.files.iter().map(|(f, q)| (f, q.unwrap_or(opts.qty), false)).chain(opts.fill_files.iter().map(|f| (f, 1, true)));
+    for (file, quantity, filler) in inputs {
         let is_svg = std::path::Path::new(file).extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
         let shapes = if is_svg {
             let (shapes, size_guessed) = commands::import_svg(file, opts.config.curve_tolerance, opts.svg_unit.as_deref())?;
@@ -242,7 +250,7 @@ fn run() -> Result<bool, String> {
             // several of them.
             labels.push(if shape_count > 1 { format!("{stem}#{index}") } else { stem.clone() });
             quantities.push(quantity);
-            parts.push(PartDto { polygon, quantity, allowed_rotations: None, mirror: None, no_hole_nesting: false });
+            parts.push(PartDto { polygon, quantity, allowed_rotations: None, mirror: None, no_hole_nesting: false, filler });
         }
     }
 
@@ -329,7 +337,7 @@ fn report_parts(opts: &Options, response: &rustynesting::dto::RunNestResponse, l
     let mut nested = vec![0usize; quantities.len()];
     for placement in &response.placements {
         for part in &placement.parts {
-            if let Some(&s) = source.get(part.id & !nesting::dispatch::MIRROR_ID_BIT) {
+            if let Some(&s) = source.get(nesting::fill::template_of(part.id & !nesting::dispatch::MIRROR_ID_BIT)) {
                 nested[s] += 1;
             }
         }
@@ -404,7 +412,7 @@ fn per_sheet_mix(response: &rustynesting::dto::RunNestResponse, quantities: &[us
         .map(|placement| {
             let mut counts = vec![0usize; quantities.len()];
             for part in &placement.parts {
-                if let Some(&s) = source.get(part.id & !nesting::dispatch::MIRROR_ID_BIT) {
+                if let Some(&s) = source.get(nesting::fill::template_of(part.id & !nesting::dispatch::MIRROR_ID_BIT)) {
                     counts[s] += 1;
                 }
             }

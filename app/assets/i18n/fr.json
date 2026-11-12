@@ -53,6 +53,8 @@
   "th_part_mirror_tooltip": "Si cette pièce précise peut être découpée retournée, outrepassant le réglage global RETOURNER LES PIÈCES. Choisissez INTERDIT pour une pièce qui doit garder une face vers le haut (une belle face, une face imprimée, un détail asymétrique) dans un travail où le retournement est sinon acceptable.",
   "th_keep_holes": "TROUS VIDES",
   "th_keep_holes_tooltip": "Si les trous de cette pièce restent vides. Coché, rien n'est imbriqué à l'intérieur - à utiliser quand un trou fait partie de la pièce finie et n'est pas de la matière libre. Décoché (par défaut), un trou assez grand pour contenir une pièce plus petite sert de matière.",
+  "th_fill": "REMPLIR",
+  "th_fill_tooltip": "Autant que possible : la quantité est ignorée, et une fois toutes les autres pièces placées, cette pièce remplit l'espace restant sur les feuilles déjà ouvertes (jamais la dernière, qui garde sa chute). Elle n'ouvre jamais de feuille à elle seule.",
   "rot_any": "TOUS",
   "rot_0_180": "0 / 180 seulement",
   "rot_quarter": "pas de 90°",

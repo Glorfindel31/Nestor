@@ -53,6 +53,8 @@
   "th_part_mirror_tooltip": "Whether this specific piece may be cut flipped over, overriding the job-wide FLIP PIECES OVER setting. Use DENY for a piece that must keep one face up (a good side, a printed face, an asymmetric feature) in a job where flipping is otherwise fine.",
   "th_keep_holes": "KEEP HOLES",
   "th_keep_holes_tooltip": "Whether this piece's holes stay empty. When ticked, nothing is nested inside them - use it when a hole is a feature of the finished piece rather than free material. Unticked (the default), a hole big enough to hold a smaller piece is used as material.",
+  "th_fill": "FILL",
+  "th_fill_tooltip": "As many as fit: the quantity is ignored, and after every other piece is placed this piece fills the space left on the sheets already opened (never the last one, which keeps its offcut). It never opens a sheet of its own.",
   "rot_any": "ANY",
   "rot_0_180": "0 / 180 only",
   "rot_quarter": "90° steps",

@@ -663,6 +663,8 @@ struct PreparedNestInputs {
     parts_by_id_dto: HashMap<usize, PolygonDto>,
     shape_ids: HashMap<usize, usize>,
     adam: Vec<usize>,
+    /// Filler templates - see `dto::ExpandedParts::fillers`.
+    fillers: Vec<usize>,
     placement_config: nesting::placement::PlacementConfig,
     /// Per-part orientation constraints, also assigned onto
     /// `placement_config` above - carried separately too because the GA
@@ -1136,9 +1138,10 @@ fn prepare_nest_inputs(request: RunNestRequest) -> Result<PreparedNestInputs, St
         })
         .collect::<Result<_, &str>>()?;
 
-    let ExpandedParts { adam, parts_by_id: true_parts_by_id, shape_ids, part_rules } = expand_parts(request.parts, request.config.mirror);
+    let ExpandedParts { adam, fillers, parts_by_id: true_parts_by_id, shape_ids, part_rules } = expand_parts(request.parts, request.config.mirror);
     if adam.is_empty() {
-        return Err("every part had quantity 0".into());
+        // A filler only ever fills sheets something else opened.
+        return Err(if fillers.is_empty() { "every part had quantity 0" } else { "filler parts need at least one part with a quantity to open a sheet" }.into());
     }
     // This is the authoritative id -> shape mapping `RunNestResponse::
     // parts_by_id` carries out, so a later `export_dxf_command` call never
@@ -1159,7 +1162,7 @@ fn prepare_nest_inputs(request: RunNestRequest) -> Result<PreparedNestInputs, St
     let mut placement_config = request.config.placement_config();
     placement_config.part_rules = part_rules.clone();
 
-    Ok(PreparedNestInputs { sheets, parts_by_id, parts_by_id_dto, shape_ids, adam, placement_config, part_rules })
+    Ok(PreparedNestInputs { sheets, parts_by_id, parts_by_id_dto, shape_ids, adam, fillers, placement_config, part_rules })
 }
 
 /// Shared by `run_nest_with_progress` and `run_nest_live_preview` - both
@@ -1291,7 +1294,7 @@ pub fn run_nest_with_progress(
     let cleanup_threshold = request.config.cleanup_threshold_percent;
     let scales = request.config.scales;
 
-    let PreparedNestInputs { sheets, parts_by_id, parts_by_id_dto, shape_ids, adam, placement_config, part_rules } = prepare_nest_inputs(request)?;
+    let PreparedNestInputs { sheets, mut parts_by_id, mut parts_by_id_dto, shape_ids, adam, fillers, placement_config, part_rules } = prepare_nest_inputs(request)?;
     // Handed over before any placement starts - see `on_parts_ready` above.
     on_parts_ready(&parts_by_id_dto);
     // Same map on both configs: a rotation *gene* and the *placement* it
@@ -1521,7 +1524,7 @@ pub fn run_nest_with_progress(
         }
     }
 
-    let placement_config = final_placement_config;
+    let mut placement_config = final_placement_config;
     let history = overall_history;
     let cancelled = overall_cancelled;
     // `overall_best` is only ever `None` if no individual was ever placed in
@@ -1647,6 +1650,37 @@ pub fn run_nest_with_progress(
         best.utilisation = totals.utilisation;
     }
 
+    // Fillers ("as many as fit") top up every sheet but the last, which keeps
+    // its offcut. A copy is registered under its own id everywhere the result
+    // is read, and the never-placed templates are dropped from the reported
+    // map so export does not write them out as unplaced parts.
+    if !fillers.is_empty() && !should_cancel() {
+        if let Some((_, open)) = best.placements.split_last_mut() {
+            let added = nesting::fill::fill_sheets(&sheets, open, &fillers, &parts_by_id, &shape_ids, &placement_config, &cache, &should_cancel);
+            let mut rules = (*placement_config.part_rules).clone();
+            for (copy, template) in added {
+                if let Some(padded) = parts_by_id.get(&template).cloned() {
+                    parts_by_id.insert(copy, padded);
+                }
+                if let Some(true_shape) = parts_by_id_dto.get(&template).cloned() {
+                    parts_by_id_dto.insert(copy, true_shape);
+                }
+                if let Some(rule) = rules.get(&template).cloned() {
+                    rules.insert(copy, rule);
+                }
+            }
+            placement_config.part_rules = std::sync::Arc::new(rules);
+        }
+        for template in &fillers {
+            parts_by_id_dto.remove(template);
+            parts_by_id_dto.remove(&(template ^ nesting::dispatch::MIRROR_ID_BIT));
+        }
+        let totals = recompute_totals(&best.placements, &parts_by_id, &sheets);
+        best.area = totals.total_placed_area;
+        best.total_area = totals.total_usable_sheet_area;
+        best.utilisation = totals.utilisation;
+    }
+
     // The last sheet is the part-full one, and what it leaves goes back on the
     // offcut shelf - so close its parts up into a corner when that leaves a
     // bigger usable rectangle. Same parts, same sheet: totals cannot change.
@@ -1693,7 +1727,7 @@ mod tests {
     /// Every test part is unconstrained unless it says otherwise - see
     /// `PartDto::allowed_rotations`/`mirror`.
     fn part(polygon: PolygonDto, quantity: usize) -> PartDto {
-        PartDto { polygon, quantity, allowed_rotations: None, mirror: None, no_hole_nesting: false }
+        PartDto { polygon, quantity, allowed_rotations: None, mirror: None, no_hole_nesting: false, filler: false }
     }
 
     fn rect_dto(w: f64, h: f64) -> PolygonDto {
@@ -1747,6 +1781,7 @@ mod tests {
                 allowed_rotations: Some(vec![0.0, 180.0]),
                 mirror: Some(false),
                 no_hole_nesting: true,
+                filler: false,
             }],
         };
 
@@ -1774,6 +1809,7 @@ mod tests {
             allowed_rotations: None,
             mirror: None,
             no_hole_nesting: false,
+            filler: false,
         };
 
         let (shapes, warnings) = resolve_project(crate::dto::ProjectFile { version: 1, config: config(1), shapes: vec![shape(Some(square_dto(9.0)))] });
@@ -1820,6 +1856,7 @@ mod tests {
                 allowed_rotations: None,
                 mirror: None,
                 no_hole_nesting: false,
+                filler: false,
             }],
         };
 
@@ -1858,6 +1895,7 @@ mod tests {
                 allowed_rotations: None,
                 mirror: None,
                 no_hole_nesting: false,
+                filler: false,
             }],
         };
         save_project(&path.to_string_lossy(), &project).expect("should write");
@@ -1874,6 +1912,44 @@ mod tests {
     /// completely clean - no warnings either. A nest the engine itself
     /// produced and considers valid cannot be something the audit complains
     /// about, or the audit is measuring itself rather than the nest.
+    /// Fillers top up the sheets the required parts opened - never the last
+    /// one, never a new one - and every copy is a real, audited, exportable
+    /// part while the never-placed template is not reported at all.
+    #[test]
+    fn filler_parts_fill_every_open_sheet_but_the_last_and_never_open_one() {
+        // One 59.5-wide part per 100x101 sheet leaves a 40.5x101 strip, room
+        // for four 20x50 fillers.
+        let sheets = vec![rect_dto(100.0, 101.0); 5];
+        let required = || part(rect_dto(59.5, 101.0), 3);
+        let filler = PartDto { filler: true, ..part(rect_dto(20.0, 50.0), 0) };
+        let cfg = config(2);
+        let without = run_nest(RunNestRequest { sheets: sheets.clone(), parts: vec![required()], config: cfg.clone() }).expect("should nest");
+        let with = run_nest(RunNestRequest { sheets: sheets.clone(), parts: vec![required(), filler], config: cfg.clone() }).expect("should nest");
+
+        assert_eq!(with.placements.len(), without.placements.len(), "a filler never opens a sheet");
+        assert_eq!(with.placements.len(), 3);
+        let copies = |sheet: &SheetPlacementDto| sheet.parts.iter().filter(|p| p.id & nesting::fill::FILLER_ID_BIT != 0).count();
+        assert_eq!(copies(&with.placements[0]), 4);
+        assert_eq!(copies(&with.placements[1]), 4);
+        assert_eq!(copies(&with.placements[2]), 0, "the last sheet keeps its offcut");
+        assert!(with.utilisation > without.utilisation);
+        assert_eq!(with.unplaced_count, 0);
+        let template = 3; // ids 0..3 are the required copies
+        assert!(!with.parts_by_id.contains_key(&template), "the template is not a part to export");
+        assert!(with.placements.iter().flat_map(|s| &s.parts).all(|p| with.parts_by_id.contains_key(&p.id)), "every placed copy resolves");
+
+        let report = audit_nest(crate::dto::AuditRequest { sheets, placements: with.placements.clone(), parts_by_id: with.parts_by_id.clone(), config: cfg }).expect("audit should run");
+        assert_eq!(report.fatal_count, 0, "{:?}", report.issues);
+    }
+
+    /// A job of nothing but fillers has nothing to open a sheet with.
+    #[test]
+    fn a_job_of_only_fillers_is_refused_with_a_reason() {
+        let filler = PartDto { filler: true, ..part(rect_dto(20.0, 50.0), 0) };
+        let err = run_nest(RunNestRequest { sheets: vec![rect_dto(100.0, 100.0)], parts: vec![filler], config: config(1) }).expect_err("nothing to open a sheet");
+        assert!(err.contains("filler"), "{err}");
+    }
+
     #[test]
     fn a_real_nest_with_margin_and_spacing_produces_no_warnings_at_all() {
         let sheets = vec![square_dto(400.0)];
@@ -3365,8 +3441,8 @@ mod tests {
 
         let expanded = expand_parts(
             vec![
-                PartDto { polygon: plain, quantity: 1, allowed_rotations: None, mirror: None, no_hole_nesting: false },
-                PartDto { polygon: bitten, quantity: 1, allowed_rotations: None, mirror: None, no_hole_nesting: false },
+                PartDto { polygon: plain, quantity: 1, allowed_rotations: None, mirror: None, no_hole_nesting: false, filler: false },
+                PartDto { polygon: bitten, quantity: 1, allowed_rotations: None, mirror: None, no_hole_nesting: false, filler: false },
             ],
             false,
         );
@@ -3508,8 +3584,8 @@ mod tests {
         let request = RunNestRequest {
             sheets: vec![square_dto(200.0)],
             parts: vec![
-                PartDto { polygon: l_shape(1.0), quantity: 4, allowed_rotations: None, mirror: Some(false), no_hole_nesting: false },
-                PartDto { polygon: l_shape(0.8), quantity: 4, allowed_rotations: None, mirror: None, no_hole_nesting: false },
+                PartDto { polygon: l_shape(1.0), quantity: 4, allowed_rotations: None, mirror: Some(false), no_hole_nesting: false, filler: false },
+                PartDto { polygon: l_shape(0.8), quantity: 4, allowed_rotations: None, mirror: None, no_hole_nesting: false, filler: false },
             ],
             config: cfg,
         };
@@ -3542,7 +3618,7 @@ mod tests {
         let request = RunNestRequest {
             sheets: vec![square_dto(200.0)],
             parts: vec![
-                PartDto { polygon: square_dto(20.0), quantity: 2, allowed_rotations: None, mirror: Some(true), no_hole_nesting: false },
+                PartDto { polygon: square_dto(20.0), quantity: 2, allowed_rotations: None, mirror: Some(true), no_hole_nesting: false, filler: false },
                 part(square_dto(15.0), 2),
             ],
             config: cfg,
@@ -3575,8 +3651,8 @@ mod tests {
             let request = RunNestRequest {
                 sheets: vec![rect_dto(60.0, 32.0)],
                 parts: vec![
-                    PartDto { polygon: square_dto(8.0), quantity: 14, allowed_rotations: None, mirror: None, no_hole_nesting: false },
-                    PartDto { polygon: ring.clone(), quantity: 1, allowed_rotations: None, mirror: None, no_hole_nesting },
+                    PartDto { polygon: square_dto(8.0), quantity: 14, allowed_rotations: None, mirror: None, no_hole_nesting: false, filler: false },
+                    PartDto { polygon: ring.clone(), quantity: 1, allowed_rotations: None, mirror: None, no_hole_nesting, filler: false },
                 ],
                 config: config(3),
             };
@@ -3608,7 +3684,7 @@ mod tests {
         let request = RunNestRequest {
             sheets: vec![square_dto(300.0)],
             parts: vec![
-                PartDto { polygon: rect_dto(80.0, 20.0), quantity: 3, allowed_rotations: Some(vec![0.0, 180.0]), mirror: None, no_hole_nesting: false },
+                PartDto { polygon: rect_dto(80.0, 20.0), quantity: 3, allowed_rotations: Some(vec![0.0, 180.0]), mirror: None, no_hole_nesting: false, filler: false },
                 part(rect_dto(40.0, 40.0), 2),
             ],
             config: cfg,
@@ -3641,12 +3717,13 @@ mod tests {
             allowed_rotations: Some(vec![540.0, -90.0, 180.0, 180.0, f64::NAN]),
             mirror: None,
             no_hole_nesting: false,
+            filler: false,
         }];
         let expanded = expand_parts(parts, false);
         assert_eq!(expanded.part_rules[&0].angles, vec![180.0, 270.0], "540 -> 180 (deduped), -90 -> 270, NaN dropped");
 
         // An explicitly empty list is not "this part may never be placed".
-        let parts = vec![PartDto { polygon: square_dto(10.0), quantity: 1, allowed_rotations: Some(Vec::new()), mirror: None, no_hole_nesting: false }];
+        let parts = vec![PartDto { polygon: square_dto(10.0), quantity: 1, allowed_rotations: Some(Vec::new()), mirror: None, no_hole_nesting: false, filler: false }];
         assert!(expand_parts(parts, false).part_rules.is_empty(), "an empty allow-list means unconstrained, not unplaceable");
     }
 

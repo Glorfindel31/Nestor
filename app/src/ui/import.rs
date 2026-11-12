@@ -177,6 +177,7 @@ pub fn save_project(app: &mut App) {
                 allowed_rotations: row.rot.angles(),
                 mirror: row.mirror.as_option(),
                 no_hole_nesting: row.no_hole_nesting,
+                filler: row.filler,
             })
             .collect(),
     };

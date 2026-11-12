@@ -27,6 +27,8 @@ pub struct ShapeRow {
     /// Don't nest anything inside this part's holes - see
     /// `dto::PartDto::no_hole_nesting`.
     pub no_hole_nesting: bool,
+    /// "As many as fit" - see dto::PartDto::filler. qty is ignored while set.
+    pub filler: bool,
     pub selected: bool,
     /// Cached shoelace area. Recomputed never - the geometry is immutable
     /// once imported, and the DOMINANT indicator re-reads this on every
@@ -62,6 +64,7 @@ impl ShapeRow {
             rot: RotRule::Any,
             mirror: MirrorRule::Job,
             no_hole_nesting: false,
+            filler: false,
             selected: false,
             area,
             from_store: None,

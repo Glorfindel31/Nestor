@@ -53,6 +53,8 @@
   "th_part_mirror_tooltip": "Chi tiết cụ thể này có được cắt ở trạng thái lật ngược hay không, ghi đè thiết lập LẬT NGƯỢC chung. Chọn CẤM cho chi tiết phải giữ nguyên một mặt (mặt đẹp, mặt in, chi tiết không đối xứng).",
   "th_keep_holes": "GIỮ LỖ TRỐNG",
   "th_keep_holes_tooltip": "Lỗ của chi tiết này có được giữ trống hay không. Khi bật, không xếp gì vào bên trong - dùng khi lỗ là một phần của chi tiết hoàn thiện chứ không phải vật liệu thừa. Khi tắt (mặc định), lỗ đủ lớn để chứa chi tiết nhỏ hơn sẽ được tận dụng.",
+  "th_fill": "LẤP ĐẦY",
+  "th_fill_tooltip": "Càng nhiều càng tốt: số lượng bị bỏ qua, và sau khi mọi chi tiết khác đã được xếp, chi tiết này lấp khoảng trống còn lại trên các tấm đã mở (không bao giờ trên tấm cuối, giữ phần thừa của nó). Nó không bao giờ mở tấm riêng.",
   "rot_any": "TẤT CẢ",
   "rot_0_180": "Chỉ 0 / 180",
   "rot_quarter": "Bước 90°",

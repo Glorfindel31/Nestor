@@ -53,6 +53,8 @@
   "th_part_mirror_tooltip": "Si esta pieza concreta puede cortarse volteada, ignorando el ajuste general VOLTEAR PIEZAS. Elija PROHIBIR para una pieza que deba mantener una cara hacia arriba (una cara buena, una cara impresa, un detalle asimétrico) en un trabajo donde voltear sea por lo demás aceptable.",
   "th_keep_holes": "HUECOS VACÍOS",
   "th_keep_holes_tooltip": "Si los huecos de esta pieza quedan vacíos. Marcado, no se anida nada dentro - úselo cuando un hueco forma parte de la pieza acabada y no es material libre. Sin marcar (por defecto), un hueco lo bastante grande para alojar una pieza menor se aprovecha como material.",
+  "th_fill": "RELLENAR",
+  "th_fill_tooltip": "Todas las que quepan: la cantidad se ignora, y tras colocar el resto de piezas, esta pieza rellena el espacio libre en las hojas ya abiertas (nunca en la última, que conserva su recorte). Nunca abre una hoja propia.",
   "rot_any": "TODOS",
   "rot_0_180": "solo 0 / 180",
   "rot_quarter": "pasos de 90°",

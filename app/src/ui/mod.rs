@@ -770,6 +770,7 @@ impl App {
                         row.rot = state::RotRule::from_angles(shape.allowed_rotations.as_deref());
                         row.mirror = state::MirrorRule::from_option(shape.mirror);
                         row.no_hole_nesting = shape.no_hole_nesting;
+                        row.filler = shape.filler;
                         row.source = shape.source;
                     }
                     let msg = self.tv("project_opened", &[("n", &self.shapes.len().to_string())]);
@@ -1065,6 +1066,7 @@ impl App {
                     allowed_rotations: row.rot.angles(),
                     mirror: row.mirror.as_option(),
                     no_hole_nesting: row.no_hole_nesting,
+                    filler: row.filler,
                 }),
                 state::Role::Skip => {}
             }

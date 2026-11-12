@@ -228,7 +228,7 @@ fn table(app: &mut App, ui: &mut egui::Ui) {
         // align against. It also makes the header row that tall, which is a
         // little airy - a fair trade for the alignment, and the alternative
         // (relying on egui's previous-frame row sizing) was not verified.
-        egui::Grid::new("shapes").striped(true).num_columns(11).spacing([8.0, 4.0]).min_row_height(THUMBNAIL).show(ui, |ui| {
+        egui::Grid::new("shapes").striped(true).num_columns(12).spacing([8.0, 4.0]).min_row_height(THUMBNAIL).show(ui, |ui| {
             let mut select_all = app.select_all;
             if cell(ui, |ui| ui.checkbox(&mut select_all, "").on_hover_text(super::i18n::t(lang, "select_all_tooltip"))).changed() {
                 app.select_all = select_all;
@@ -241,6 +241,7 @@ fn table(app: &mut App, ui: &mut egui::Ui) {
             cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, "th_grain")).color(theme::DIM()).small()).on_hover_text(super::i18n::t(lang, "th_grain_tooltip")));
             cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, "th_part_mirror")).color(theme::DIM()).small()).on_hover_text(super::i18n::t(lang, "th_part_mirror_tooltip")));
             cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, "th_keep_holes")).color(theme::DIM()).small()).on_hover_text(super::i18n::t(lang, "th_keep_holes_tooltip")));
+            cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, "th_fill")).color(theme::DIM()).small()).on_hover_text(super::i18n::t(lang, "th_fill_tooltip")));
             cell(ui, |ui| ui.label(RichText::new(super::i18n::t(lang, "th_dominant")).color(theme::DIM()).small()).on_hover_text(super::i18n::t(lang, "th_dominant_tooltip")));
             ui.end_row();
 
@@ -278,7 +279,7 @@ fn table(app: &mut App, ui: &mut egui::Ui) {
                         shell::choice(ui, &format!("role{}", row.ui_id), &mut row.role, &Role::ALL, |r| super::i18n::t(lang, r.key()).to_string());
                     })
                 });
-                let qty = cell(ui, |ui| ui.add_enabled_ui(!locked, |ui| ui.add(shell::number(&mut row.qty, 0.2, 0..=100_000))).inner);
+                let qty = cell(ui, |ui| ui.add_enabled_ui(!locked && !row.filler, |ui| ui.add(shell::number(&mut row.qty, 0.2, 0..=100_000))).inner);
                 // Tab out of a quantity lands on the next quantity, not on
                 // the role dropdown three widgets later. `qty_ids.len()` is
                 // this row's own index until the push below.
@@ -311,6 +312,11 @@ fn table(app: &mut App, ui: &mut egui::Ui) {
                 cell(ui, |ui| {
                     ui.add_enabled_ui(!locked && row.role == Role::Part, |ui| {
                         ui.checkbox(&mut row.no_hole_nesting, "").on_hover_text(super::i18n::t(lang, "th_keep_holes_tooltip"));
+                    })
+                });
+                cell(ui, |ui| {
+                    ui.add_enabled_ui(!locked && row.role == Role::Part, |ui| {
+                        ui.checkbox(&mut row.filler, "").on_hover_text(super::i18n::t(lang, "th_fill_tooltip"));
                     })
                 });
 
