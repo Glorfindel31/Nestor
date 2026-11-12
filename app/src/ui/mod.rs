@@ -24,6 +24,8 @@
 mod canvas;
 mod config;
 mod console;
+mod editor;
+mod editor_view;
 mod effects;
 
 mod history_chart;
@@ -302,6 +304,8 @@ pub struct App {
     /// Drag in progress on the result canvas: which part, and where it has
     /// been dragged to in model coordinates.
     drag: Option<result::Drag>,
+    /// The NEST EDITOR window - see `editor`.
+    editor: editor::EditorState,
     /// Zoom/pan per result sheet card. Absent means "fitted", which is what
     /// every sheet starts as - a sheet only earns an entry once someone
     /// actually moves its view.
@@ -413,6 +417,7 @@ impl App {
             tabs_seq: 0,
             export_status: Default::default(),
             drag: None,
+            editor: Default::default(),
             sheet_views: HashMap::new(),
             repacking: None,
             settings_menu_open: false,
@@ -607,6 +612,9 @@ impl App {
                 match *result {
                     Ok(response) => {
                         let cancelled = response.cancelled;
+                        // A finished nest opens the editor; a cancelled one is
+                        // not a result anyone asked to edit.
+                        self.editor = editor::EditorState { open: !cancelled, ..Default::default() };
                         self.console.log(
                             console::Kind::Best,
                             format!(
@@ -660,7 +668,15 @@ impl App {
                     (Ok(_), None) => {}
                 }
             }
-            Msg::Validated(result) => self.finish_drag(*result),
+            // The editor window and RESULT's drag both ask `validate`; the
+            // editor's own pending edit claims the answer when there is one.
+            Msg::Validated(result) => {
+                if self.editor.pending.is_some() {
+                    self.editor_validated(*result);
+                } else {
+                    self.finish_drag(*result);
+                }
+            }
             Msg::StoreLoaded(result) | Msg::StoreSaved(result) => match *result {
                 Ok(store) => {
                     self.console.log(console::Kind::Plain, format!("library: {} saved shape(s)", store.shapes.len()));
@@ -1222,6 +1238,9 @@ impl eframe::App for App {
 
         effects::foreground(ctx);
         shell::dialogs(self, ctx);
+        if self.editor.open {
+            editor_view::show(self, ctx);
+        }
 
     }
 }

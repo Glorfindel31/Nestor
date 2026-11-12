@@ -57,6 +57,12 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
             unplaced(app, ui);
             ui.add_space(8.0);
             ui.label(RichText::new(app.t("drag_hint")).color(theme::DIM()).small());
+            // Reopens the NEST EDITOR window, which a finished nest opens on
+            // its own; closing it is not losing it.
+            let (label, tip) = (app.t("editor_open"), app.t("editor_open_tooltip"));
+            if ui.add_enabled(!app.editor.open, egui::Button::new(label)).on_hover_text(tip).clicked() {
+                app.editor.open = true;
+            }
         }
         sheets(app, ui);
 
@@ -676,12 +682,6 @@ fn keyboard_edit(app: &mut App, ui: &egui::Ui, index: usize, hovered_part: Optio
         Some(s) if s > 0.0 => s,
         _ => 1.0,
     };
-    // The nest's own rotation grid - a hand-turned part landing off it would
-    // sit at an angle the engine would never have chosen for itself.
-    let turn_step = match app.result_config.as_ref().map(|c| c.rotations) {
-        Some(r) if r >= 2 => 360.0 / f64::from(r),
-        _ => 90.0,
-    };
 
     let (mut dx, mut dy, mut drot) = (0.0, 0.0, 0.0);
     ui.input(|i| {
@@ -699,7 +699,7 @@ fn keyboard_edit(app: &mut App, ui: &egui::Ui, index: usize, hovered_part: Optio
             }
         }
         if i.key_pressed(egui::Key::R) {
-            drot += if i.modifiers.shift { -turn_step } else { turn_step };
+            drot = if i.modifiers.shift { -1.0 } else { 1.0 };
         }
     });
     if dx == 0.0 && dy == 0.0 && drot == 0.0 {
@@ -715,6 +715,11 @@ fn keyboard_edit(app: &mut App, ui: &egui::Ui, index: usize, hovered_part: Optio
         return;
     }
     if drot != 0.0 {
+        // To the part's next *allowed* angle - its grain rule if it has one,
+        // else the nest's own grid. Turning by a fixed grid step used to put a
+        // 0/180-only part at 90.
+        let current = app.snapshot.as_ref().and_then(|s| s.placements.get(index)).and_then(|pl| pl.parts.iter().find(|p| p.id == part_id)).map_or(0.0, |p| p.rotation) + drag.drot;
+        let drot = app.editor_turn_angle(part_id, current, drot as i32) - current;
         let (cdx, cdy) = turn(app, index, &drag, drot);
         drag.dx += cdx;
         drag.dy += cdy;
@@ -783,7 +788,7 @@ const MAX_ZOOM: f32 = 40.0;
 /// too) rather than plain scroll, because the whole RESULT panel is inside a
 /// scroll area and stealing the wheel from it would make a long result
 /// impossible to scroll past.
-fn pan_zoom(views: &mut HashMap<usize, SheetView>, ui: &egui::Ui, index: usize, rect: egui::Rect, background: &egui::Response) -> SheetView {
+pub(super) fn pan_zoom(views: &mut HashMap<usize, SheetView>, ui: &egui::Ui, index: usize, rect: egui::Rect, background: &egui::Response) -> SheetView {
     let mut vs = views.get(&index).copied().unwrap_or_default();
     // `contains_pointer`, not `hovered`: a part sitting on top of the canvas
     // takes the hover, and the pointer is over a part almost all of the time
