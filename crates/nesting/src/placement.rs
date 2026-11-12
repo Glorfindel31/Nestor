@@ -244,6 +244,12 @@ pub struct PlacementConfig {
     /// greedy pass - see `crate::banded`. Costs one extra bounding-box pass
     /// per sheet, which is cheap next to the NFP work already done.
     pub banded_pass: bool,
+    /// Keep small parts off the sheet edge: `Some(size)` means a part whose
+    /// unrotated bounding box has its longest side under `size` (mm) is placed
+    /// on the sheet shrunk by `size`, and only falls back to the real sheet
+    /// when the shrunk one has no room. A part cut free near the edge is the
+    /// one that lifts or is thrown off the bed. `None` is today's behaviour.
+    pub small_centre: Option<f64>,
 }
 
 /// Per-part constraints on how a part may be oriented. Absent (no entry in
@@ -1654,6 +1660,61 @@ pub fn placement_is_valid(sheet: &LayeredPolygon, part: &LayeredPolygon, at: Pla
 /// are simply worse, not wrong: the caller compares them against the greedy
 /// pass and keeps whichever won, and on a non-rectangular sheet that will be
 /// the greedy one.
+/// Cache identity bit for a sheet's `small_centre` inset, so its inner NFPs
+/// never collide with the real sheet's.
+const SMALL_SHEET_BIT: usize = 1 << 40;
+
+/// Whether `small_centre` applies to a shape, judged on its **unrotated**
+/// outline so the answer is the same at every angle - the per-angle NFP
+/// accumulators are keyed by shape and rotation, and must never see one shape
+/// placed against two different sheets. (`geometry::tabs` judges the placed
+/// outline instead; the two agree except for a part turned off-axis.)
+fn is_small_shape(config: &PlacementConfig, unrotated: &LayeredPolygon) -> bool {
+    config.small_centre.is_some_and(|size| get_polygon_bounds(&unrotated.points).is_some_and(|b| b.width.max(b.height) < size))
+}
+
+/// The sheet a small part is placed on under `small_centre`: the real one
+/// shrunk by `gap`, holes kept, with its own cache identity. `None` when the
+/// sheet is too small to shrink.
+fn small_part_sheet(sheet: &LayeredPolygon, sheet_index: usize, gap: f64) -> Option<(LayeredPolygon, SourceId)> {
+    let area = polygon_area(&sheet.points).abs();
+    // Clipper's sign convention follows the winding, which a sheet does not
+    // promise - so take whichever direction actually shrank it.
+    let inset = [geometry::clipper::offset(&sheet.points, -gap), geometry::clipper::offset(&sheet.points, gap)]
+        .into_iter()
+        .filter_map(|regions| regions.into_iter().max_by(|a, b| polygon_area(a).abs().total_cmp(&polygon_area(b).abs())))
+        .find(|p| p.len() >= 3 && polygon_area(p).abs() < area)?;
+    Some((LayeredPolygon { points: inset, ..sheet.clone() }, sheet_source(sheet_index | SMALL_SHEET_BIT)))
+}
+
+/// One part onto one occupied sheet, for the passes that run after the nest
+/// (`consolidation`, `repack`). The same inner-NFP-then-`try_place_part_on_sheet`
+/// step they always took, plus `small_centre`: a small part tries the shrunk
+/// sheet first. With the rule off it is exactly the old two calls.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn place_on_sheet(
+    part: &LayeredPolygon,
+    source_id: usize,
+    rotation: f64,
+    sheet: &LayeredPolygon,
+    sheet_index: usize,
+    placed: &[PlacedObstacle],
+    config: &PlacementConfig,
+    cache: &NfpCache,
+) -> Option<PlaceOnSheetResult> {
+    let inset = config
+        .small_centre
+        .filter(|_| is_small_shape(config, &rotate_layered_polygon(part, -rotation)))
+        .and_then(|gap| small_part_sheet(sheet, sheet_index, gap));
+    inset.iter().map(|(s, src)| (s, *src)).chain(std::iter::once((sheet, sheet_source(sheet_index)))).find_map(|(s, src)| {
+        let nfp = cached_inner_nfp(cache, s, src, part, source_id, rotation, config.curve_tolerance)?;
+        if nfp.is_empty() {
+            return None;
+        }
+        try_place_part_on_sheet(part, source_id, rotation, &nfp, s, placed, config, cache, &|_| {}).placed()
+    })
+}
+
 fn sheet_usable_bounds(sheet: &LayeredPolygon) -> Bounds {
     get_polygon_bounds(&sheet.points).unwrap_or(Bounds { x: 0.0, y: 0.0, width: 0.0, height: 0.0 })
 }
@@ -1726,6 +1787,9 @@ pub fn place_parts(
     on_part_placed: &(impl Fn(usize, &PlacedPart) + Sync),
     on_candidates: &(impl Fn(usize, usize, &[CandidateTrace]) + Sync),
 ) -> Option<PlaceResult> {
+    // Shapes `small_centre` applies to, decided once on the unrotated outline -
+    // see `is_small_shape`. Empty with the rule off.
+    let small_sources: HashSet<usize> = parts.iter().filter(|p| is_small_shape(config, &p.polygon)).map(|p| p.source_id).collect();
     let mut parts: Vec<NestPart> = parts
         .into_iter()
         .map(|p| NestPart {
@@ -1789,6 +1853,16 @@ pub fn place_parts(
             } else {
                 Vec::new()
             };
+        // `small_centre`'s shrunk sheet, built only when some shape needs it.
+        let small_sheet = if small_sources.is_empty() { None } else { config.small_centre.and_then(|gap| small_part_sheet(sheet, sheet_idx, gap)) };
+        // The sheets a part is tried on, in order: a small one gets the shrunk
+        // sheet first and the real one only if that fails.
+        let sheets_for = |source_id: usize| -> Vec<(&LayeredPolygon, SourceId)> {
+            match &small_sheet {
+                Some((inset, inset_src)) if small_sources.contains(&source_id) => vec![(inset, *inset_src), (sheet, sheet_src)],
+                _ => vec![(sheet, sheet_src)],
+            }
+        };
         // One accumulator per sheet *per rotation slot*: `placed` below is
         // append-only for this sheet's whole scan and starts empty for the
         // next one, which is exactly `NfpAccumulator`'s contract.
@@ -1879,7 +1953,7 @@ pub fn place_parts(
                 // whose delta is always 0 - i.e. they start exactly where the
                 // part already is.
                 let mut trial_rotation;
-                let mut trial_polygon = parts[i].polygon.clone();
+                let mut trial_polygon;
                 // (contact_area, position, rotation, polygon) of the best
                 // rotation/position seen so far - contact_area first so a
                 // genuinely tighter rotation always wins; among near-ties
@@ -1912,6 +1986,11 @@ pub fn place_parts(
                 let mut best: Option<(f64, Placement, f64, LayeredPolygon)> = None;
                 let mut candidate_traces: Vec<CandidateTrace> = Vec::new();
                 let mut best_trace_idx: Option<usize> = None;
+                for (sheet, sheet_src) in sheets_for(parts[i].source_id) {
+                if best.is_some() || cancelled_early {
+                    break;
+                }
+                trial_polygon = parts[i].polygon.clone();
                 for (angle, delta) in rotation_steps(config, parts[i].id, parts[i].rotation) {
                     if delta != 0.0 {
                         trial_polygon = rotate_layered_polygon(&trial_polygon, delta);
@@ -1962,6 +2041,7 @@ pub fn place_parts(
                             }
                         }
                     }
+                }
                 }
 
                 if let Some(idx) = best_trace_idx {
@@ -2021,18 +2101,24 @@ pub fn place_parts(
                 // fits" is as good as any other here (unlike the 2nd+ part
                 // case below, where which rotation wins is the whole point).
                 let mut sheet_nfp: Option<Vec<Vec<Point>>> = None;
-                for (angle, delta) in rotation_steps(config, parts[i].id, parts[i].rotation) {
-                    if delta != 0.0 {
-                        parts[i] = NestPart {
-                            id: parts[i].id,
-                            source_id: parts[i].source_id,
-                            polygon: rotate_layered_polygon(&parts[i].polygon, delta),
-                            rotation: angle,
-                        };
-                    }
-                    sheet_nfp = cached_inner_nfp(cache, sheet, sheet_src, &parts[i].polygon, parts[i].source_id, parts[i].rotation, config.curve_tolerance);
-                    if sheet_nfp.as_ref().is_some_and(|n| !n.is_empty()) {
-                        break;
+                // The sheet the NFP below was found on - the shrunk one for a
+                // small part under `small_centre`, unless it did not fit there.
+                let mut first_sheet = sheet;
+                'sheets: for (try_sheet, try_src) in sheets_for(parts[i].source_id) {
+                    for (angle, delta) in rotation_steps(config, parts[i].id, parts[i].rotation) {
+                        if delta != 0.0 {
+                            parts[i] = NestPart {
+                                id: parts[i].id,
+                                source_id: parts[i].source_id,
+                                polygon: rotate_layered_polygon(&parts[i].polygon, delta),
+                                rotation: angle,
+                            };
+                        }
+                        sheet_nfp = cached_inner_nfp(cache, try_sheet, try_src, &parts[i].polygon, parts[i].source_id, parts[i].rotation, config.curve_tolerance);
+                        if sheet_nfp.as_ref().is_some_and(|n| !n.is_empty()) {
+                            first_sheet = try_sheet;
+                            break 'sheets;
+                        }
                     }
                 }
 
@@ -2060,7 +2146,7 @@ pub fn place_parts(
                             y: pt.y - part.points[0].y,
                         };
                         let shifted = shift_layered_polygon(part, candidate.x, candidate.y);
-                        if has_material_outside_sheet(&shifted, sheet) {
+                        if has_material_outside_sheet(&shifted, first_sheet) {
                             continue;
                         }
                         let better = match position {
@@ -2194,12 +2280,22 @@ pub fn place_parts(
                     slot
                 })
                 .collect();
-            let outcomes: Vec<Option<(PlaceOnSheetResult, f64, LayeredPolygon)>> = trials
+            // `fresh`: score against a throwaway accumulator instead of the
+            // sheet's own. The fallback of a small part from the shrunk sheet
+            // to the real one needs that - its key already lives in the slot
+            // accumulator built against the shrunk sheet, and an accumulator
+            // must never mix two sheets.
+            let evaluate = |sheet: &LayeredPolygon, sheet_src: SourceId, fresh: bool| -> Vec<Option<(PlaceOnSheetResult, f64, LayeredPolygon)>> {
+                trials
                 .par_iter()
                 .zip(slots.par_iter())
                 .map(|((angle, polygon), &slot)| {
-                    let mut accumulator = nfp_accumulators[slot].lock().expect("one angle per task, lock never contested");
-                    let accumulator = &mut *accumulator;
+                    let mut throwaway = NfpAccumulator::default();
+                    let mut guard = if fresh { None } else { Some(nfp_accumulators[slot].lock().expect("one angle per task, lock never contested")) };
+                    let accumulator: &mut NfpAccumulator = match &mut guard {
+                        Some(guard) => guard,
+                        None => &mut throwaway,
+                    };
                     let sheet_nfp = cached_inner_nfp(cache, sheet, sheet_src, polygon, parts[i].source_id, *angle, config.curve_tolerance)?;
                     if sheet_nfp.is_empty() {
                         return None;
@@ -2219,7 +2315,15 @@ pub fn place_parts(
                     );
                     outcome.placed().map(|result| (result, *angle, polygon.clone()))
                 })
-                .collect();
+                .collect()
+            };
+            let mut outcomes: Vec<Option<(PlaceOnSheetResult, f64, LayeredPolygon)>> = Vec::new();
+            for (n, (try_sheet, try_src)) in sheets_for(parts[i].source_id).into_iter().enumerate() {
+                outcomes = evaluate(try_sheet, try_src, n > 0);
+                if outcomes.iter().any(Option::is_some) {
+                    break;
+                }
+            }
 
             // Reduced in slot order, not in completion order, so the
             // first-wins tie-break below is exactly what the serial loop gave.
@@ -2340,17 +2444,36 @@ pub fn place_parts(
             // layout *of that shape* keeps the band packer's contribution and
             // lets the fill below supply the rest.
             let usable = sheet_usable_bounds(sheet);
-            let anchor_source_id = parts_before_sheet.first().map(|p| p.source_id);
-            let places_anchor = |b: &crate::banded::BandedSheet| {
-                anchor_source_id.is_none_or(|anchor| b.consumed.iter().filter_map(|&i| parts_before_sheet.get(i)).any(|p| p.source_id == anchor))
+            // Small parts under `small_centre` stay out of the bands, which
+            // are box arithmetic laid out from the sheet edge and cannot keep
+            // anything off it. The fill below places them, through the scorer,
+            // on the shrunk sheet. `band_index` maps a band-list index back to
+            // `parts`.
+            let band_index: Vec<usize> = (0..parts_before_sheet.len()).filter(|&k| !small_sources.contains(&parts_before_sheet[k].source_id)).collect();
+            let filtered: Vec<NestPart>;
+            let band_parts: &[NestPart] = if small_sources.is_empty() {
+                &parts_before_sheet
+            } else {
+                filtered = band_index.iter().map(|&k| parts_before_sheet[k].clone()).collect();
+                &filtered
             };
-            let banded = crate::profile::BANDED_PACK.time(|| crate::banded::pack_sheet(usable, &parts_before_sheet, config.curve_tolerance, None, &config.part_rules).and_then(|free| {
+            let anchor_source_id = band_parts.first().map(|p| p.source_id);
+            let places_anchor = |b: &crate::banded::BandedSheet| {
+                anchor_source_id.is_none_or(|anchor| b.consumed.iter().filter_map(|&i| band_parts.get(i)).any(|p| p.source_id == anchor))
+            };
+            let banded = crate::profile::BANDED_PACK.time(|| crate::banded::pack_sheet(usable, band_parts, config.curve_tolerance, None, &config.part_rules).and_then(|free| {
                 if places_anchor(&free) {
                     Some(free)
                 } else {
-                    crate::banded::pack_sheet(usable, &parts_before_sheet, config.curve_tolerance, anchor_source_id, &config.part_rules)
+                    crate::banded::pack_sheet(usable, band_parts, config.curve_tolerance, anchor_source_id, &config.part_rules)
                 }
             }));
+            let banded = banded.map(|mut b| {
+                if !small_sources.is_empty() {
+                    b.consumed = b.consumed.iter().map(|&k| band_index[k]).collect();
+                }
+                b
+            });
             if let Some(banded) = banded {
                 // Scored on the *same* measure the greedy pass reports -
                 // `polygon_material_area`, holes subtracted - not on the band
@@ -2463,8 +2586,16 @@ pub fn place_parts(
                         break;
                     }
                     let (part_id, part_source_id, part_rotation) = (parts[i].id, parts[i].source_id, parts[i].rotation);
-                    let mut trial_polygon = parts[i].polygon.clone();
                     let mut best: Option<(f64, PlaceOnSheetResult, f64, LayeredPolygon)> = None;
+                    // A small part's fallback onto the real sheet gets its own
+                    // accumulator, for the reason `evaluate` gives above.
+                    let mut fallback_accumulator = NfpAccumulator::default();
+                    for (n, (sheet, sheet_src)) in sheets_for(part_source_id).into_iter().enumerate() {
+                    if best.is_some() {
+                        break;
+                    }
+                    let accumulator: &mut NfpAccumulator = if n == 0 { &mut topup_accumulator } else { &mut fallback_accumulator };
+                    let mut trial_polygon = parts[i].polygon.clone();
                     for (angle, delta) in rotation_steps(config, part_id, part_rotation) {
                         if delta != 0.0 {
                             trial_polygon = rotate_layered_polygon(&trial_polygon, delta);
@@ -2486,7 +2617,7 @@ pub fn place_parts(
                             cache,
                             &|_: &[CandidateTrace]| {},
                             &neighborhood,
-                            &mut topup_accumulator,
+                            accumulator,
                         );
                         if let Some(result) = outcome.placed() {
                             let better = match &best {
@@ -2497,6 +2628,7 @@ pub fn place_parts(
                                 best = Some((result.minarea, result, angle, trial_polygon.clone()));
                             }
                         }
+                    }
                     }
                     if let Some((_, result, rotation, polygon)) = best {
                         topped_up_area += polygon_material_area(&polygon);
@@ -2615,6 +2747,7 @@ mod tests {
             curve_tolerance: 0.3,
             part_rules: Default::default(),
             banded_pass: true,
+            small_centre: None,
         }
     }
 
@@ -3452,5 +3585,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `small_centre` keeps small parts off the edge, on every placement type
+    /// and with the band packer on: every part of an all-small job must sit at
+    /// least `size` inside the sheet. With the rule off the same job hugs the
+    /// edge, which is what makes the first half mean anything.
+    #[test]
+    fn small_centre_keeps_small_parts_off_the_sheet_edge() {
+        let sheet = square(0.0, 0.0, 300.0);
+        let parts = || (0..12).map(|id| NestPart { id, source_id: 0, polygon: square(0.0, 0.0, 20.0), rotation: 0.0 }).collect::<Vec<_>>();
+        let min_edge_gap = |result: &PlaceResult| {
+            result.placements[0]
+                .parts
+                .iter()
+                .map(|p| [p.placement.x, p.placement.y, 300.0 - (p.placement.x + 20.0), 300.0 - (p.placement.y + 20.0)].into_iter().fold(f64::MAX, f64::min))
+                .fold(f64::MAX, f64::min)
+        };
+        // Four angles as well as one: the TightFit family's first part takes
+        // its own rotation search, which one angle skips.
+        for (placement_type, rotations) in [PlacementType::Gravity, PlacementType::TightFit, PlacementType::GravityCorrective, PlacementType::Box].into_iter().flat_map(|t| [(t, 1), (t, 4)]) {
+            let off = PlacementConfig { rotations, ..config(placement_type) };
+            let on = PlacementConfig { small_centre: Some(50.0), ..off.clone() };
+            let before = place_parts(std::slice::from_ref(&sheet), parts(), &off, &NfpCache::new(), &|| false, &|_, _| {}, &|_, _, _| {}).unwrap();
+            let after = place_parts(std::slice::from_ref(&sheet), parts(), &on, &NfpCache::new(), &|| false, &|_, _| {}, &|_, _, _| {}).unwrap();
+            assert_eq!(after.unplaced_count, 0, "{placement_type:?}: the rule must never cost a part");
+            assert_eq!(after.placements.len(), 1, "{placement_type:?}");
+            assert!(min_edge_gap(&before) < 1.0, "{placement_type:?}: off, the job hugs the edge ({})", min_edge_gap(&before));
+            assert!(min_edge_gap(&after) >= 50.0 - 1e-6, "{placement_type:?}: on, every small part is 50mm in ({})", min_edge_gap(&after));
+        }
+    }
+
+    /// When the shrunk sheet has no room for a small part it falls back to the
+    /// real one - the rule moves parts, it never strands them.
+    #[test]
+    fn small_centre_falls_back_to_the_edge_when_the_middle_is_too_small() {
+        let sheet = square(0.0, 0.0, 100.0);
+        let parts = (0..4).map(|id| NestPart { id, source_id: 0, polygon: square(0.0, 0.0, 30.0), rotation: 0.0 }).collect::<Vec<_>>();
+        let on = PlacementConfig { small_centre: Some(40.0), ..config(PlacementType::Gravity) };
+        let result = place_parts(&[sheet], parts, &on, &NfpCache::new(), &|| false, &|_, _| {}, &|_, _, _| {}).unwrap();
+        assert_eq!(result.unplaced_count, 0);
+        assert_eq!(result.placements.len(), 1, "all four still share the one sheet");
     }
 }

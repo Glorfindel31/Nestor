@@ -80,12 +80,12 @@ fn tab_controls(app: &mut App, ui: &mut egui::Ui) {
     let (width_label, width_tip) = (app.t("tabs_width_label"), app.t("tabs_width_tooltip"));
     let (bit_label, bit_tip) = (app.t("tabs_bit_label"), app.t("tabs_bit_tooltip"));
     let (per_label, per_tip) = (app.t("tabs_per_part_label"), app.t("tabs_per_part_tooltip"));
-    let before = (app.tabs_enabled, app.tab_settings);
+    let before = (app.tabs_enabled, app.tab_settings, app.cfg.small_size);
     ui.horizontal(|ui| {
         ui.checkbox(&mut app.tabs_enabled, enable_label).on_hover_text(enable_tip);
         if app.tabs_enabled {
             ui.label(RichText::new(threshold_label).color(theme::DIM())).on_hover_text(threshold_tip);
-            ui.add(shell::number(&mut app.tab_settings.threshold, 1.0, 0.0..=10_000.0));
+            ui.add(shell::number(&mut app.cfg.small_size, 1.0, 0.0..=10_000.0));
             ui.label(RichText::new(width_label).color(theme::DIM())).on_hover_text(width_tip);
             ui.add(shell::number(&mut app.tab_settings.width, 0.1, 0.1..=1000.0));
             ui.label(RichText::new(bit_label).color(theme::DIM())).on_hover_text(bit_tip);
@@ -94,7 +94,7 @@ fn tab_controls(app: &mut App, ui: &mut egui::Ui) {
             ui.add(shell::number(&mut app.tab_settings.per_part, 1.0, 1..=16));
         }
     });
-    if (app.tabs_enabled, app.tab_settings) != before {
+    if (app.tabs_enabled, app.tab_settings, app.cfg.small_size) != before {
         app.request_tabs();
     }
     if app.tabs_enabled {
@@ -524,7 +524,7 @@ fn draw_sheet(app: &mut App, ui: &mut egui::Ui, index: usize, band: Color32) {
         }
 
         // Shows which parts the bridge threshold selected. A drag colour still wins.
-        if color.is_none() && app.tabs_enabled && b.w().max(b.h()) < app.tab_settings.threshold {
+        if color.is_none() && app.tabs_enabled && b.w().max(b.h()) < app.cfg.small_size {
             color = Some(theme::ACCENT());
         }
 

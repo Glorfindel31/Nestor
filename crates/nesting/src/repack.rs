@@ -29,7 +29,7 @@ use crate::cache::NfpCache;
 use crate::dispatch;
 use crate::ga::{GaConfig, GeneticAlgorithm};
 use crate::placement::{
-    cached_inner_nfp, place_parts, rotation_steps, sheet_source, try_place_part_on_sheet, NestPart, PlaceResult, PlacedObstacle, PlacedPart, PlacementConfig,
+    place_on_sheet, place_parts, rotation_steps, NestPart, PlaceResult, PlacedObstacle, PlacedPart, PlacementConfig,
     SheetPlacement,
 };
 
@@ -163,7 +163,6 @@ fn repack_around_locked(
     should_cancel: &(impl Fn() -> bool + Sync),
 ) -> Option<SheetPlacement> {
     let source_id_of = |id: usize| shape_ids.get(&id).copied().unwrap_or(id);
-    let sheet_src = sheet_source(current.sheet_index);
 
     let mut obstacles: Vec<PlacedObstacle> = Vec::new();
     let mut out: Vec<PlacedPart> = Vec::new();
@@ -200,15 +199,7 @@ fn repack_around_locked(
         let mut best: Option<(f64, PlacedPart)> = None;
         for (angle, _) in rotation_steps(placement_config, part.id, part.rotation) {
             let rotated = rotate_layered_polygon(base, angle);
-            let Some(sheet_nfp) = cached_inner_nfp(cache, sheet, sheet_src, &rotated, source_id_of(part.id), angle, placement_config.curve_tolerance) else {
-                continue;
-            };
-            if sheet_nfp.is_empty() {
-                continue;
-            }
-            let Some(result) =
-                try_place_part_on_sheet(&rotated, source_id_of(part.id), angle, &sheet_nfp, sheet, &obstacles, placement_config, cache, &|_| {}).placed()
-            else {
+            let Some(result) = place_on_sheet(&rotated, source_id_of(part.id), angle, sheet, current.sheet_index, &obstacles, placement_config, cache) else {
                 continue;
             };
             if best.as_ref().is_none_or(|(score, _)| result.minarea < *score) {
@@ -299,6 +290,7 @@ mod tests {
             curve_tolerance: 0.3,
             part_rules: Default::default(),
             banded_pass: true,
+            small_centre: None,
         }
     }
 

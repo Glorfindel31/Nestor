@@ -450,6 +450,16 @@ pub struct NestConfigDto {
     /// just get a luckier starting population."
     #[serde(default)]
     pub seed: u64,
+    /// Keep parts smaller than `small_size` off the sheet edge, so a small
+    /// piece cut free is held by the material around it. Off by default =
+    /// the old behaviour.
+    #[serde(default)]
+    pub small_centre: bool,
+    /// The one shared "small part" size (mm): a part whose longest
+    /// bounding-box side is below it. Used by `small_centre` and by the
+    /// bridge tabs.
+    #[serde(default = "default_small_size")]
+    pub small_size: f64,
     /// How many increasingly thorough attempts to run automatically - each
     /// one tries one more rotation angle than the last (`rotations` above is
     /// this escalation's *starting* value, not a fixed setting - see
@@ -586,6 +596,10 @@ fn default_runs() -> usize {
     1
 }
 
+fn default_small_size() -> f64 {
+    50.0
+}
+
 fn default_dominant_part_area_threshold() -> f64 {
     nesting::placement::DEFAULT_DOMINANT_PART_AREA_THRESHOLD
 }
@@ -635,6 +649,7 @@ impl NestConfigDto {
             // `sheet_spread` honours - so a suspect result can be bisected
             // against the greedy path without a rebuild.
             banded_pass: !std::env::var("NEST_NO_BANDED").is_ok_and(|v| v != "0"),
+            small_centre: self.small_centre.then_some(self.small_size),
         }
     }
 

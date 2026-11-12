@@ -38,6 +38,7 @@ OPTIONS:
     --margin MM        clearance to the sheet edge (default 0)
     --spacing MM       clearance between parts (default 0)
     --kerf MM          cut width; adds to both of the above (default 0)
+    --small-centre MM  keep parts smaller than MM off the sheet edge (default off)
     --rotations N      angles tried per part (default 4)
     --generations N    GA generations (default 2)
     --population N     GA population (default 4)
@@ -115,6 +116,8 @@ impl Default for Options {
                 kerf: 0.0,
                 max_threads: 0,
                 seed: 0,
+                small_centre: false,
+                small_size: 50.0,
                 runs: 1,
                 cleanup_threshold_percent: None,
                 mirror: false,
@@ -151,6 +154,10 @@ fn parse_args() -> Result<Option<Options>, String> {
             "--margin" => opts.config.margin = number(&value("--margin")?, "--margin")?,
             "--spacing" => opts.config.spacing = number(&value("--spacing")?, "--spacing")?,
             "--kerf" => opts.config.kerf = number(&value("--kerf")?, "--kerf")?,
+            "--small-centre" => {
+                opts.config.small_centre = true;
+                opts.config.small_size = number(&value("--small-centre")?, "--small-centre")?;
+            }
             "--rotations" => opts.config.rotations = number(&value("--rotations")?, "--rotations")?,
             "--generations" => opts.config.generations = number(&value("--generations")?, "--generations")?,
             "--population" => opts.config.population_size = number(&value("--population")?, "--population")?,

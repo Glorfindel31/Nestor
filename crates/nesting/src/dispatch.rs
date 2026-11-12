@@ -307,6 +307,7 @@ mod tests {
             curve_tolerance: 0.3,
             part_rules: Default::default(),
             banded_pass: true,
+            small_centre: None,
         }
     }
 

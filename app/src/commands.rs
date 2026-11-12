@@ -1715,6 +1715,8 @@ mod tests {
             spacing: 0.0,
             max_threads: 0,
             seed: 0,
+            small_centre: false,
+            small_size: 50.0,
             runs: 1,
             cleanup_threshold_percent: None,
             mirror: false,

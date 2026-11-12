@@ -425,6 +425,7 @@ fn a_banded_sheet_reports_placements_that_do_not_overlap() {
         curve_tolerance: CURVE_TOLERANCE,
         part_rules: Default::default(),
         banded_pass: true,
+        small_centre: None,
     };
     let cache = nesting::cache::NfpCache::default();
     let result = nesting::placement::place_parts(&sheets, parts.clone(), &config, &cache, &|| false, &|_, _| {}, &|_, _, _| {}).expect("should place");
@@ -503,6 +504,7 @@ fn the_first_sheet_places_the_shape_at_the_front_of_the_queue() {
         curve_tolerance: CURVE_TOLERANCE,
         part_rules: Default::default(),
         banded_pass: true,
+        small_centre: None,
     };
     let cache = nesting::cache::NfpCache::default();
     let result = nesting::placement::place_parts(&sheets, parts.clone(), &config, &cache, &|| false, &|_, _| {}, &|_, _, _| {}).expect("should place");

@@ -40,7 +40,7 @@ use geometry::dxf_import::{polygon_material_area, rotate_layered_polygon, Layere
 use geometry::polygon::polygon_area;
 
 use crate::cache::NfpCache;
-use crate::placement::{cached_inner_nfp, sheet_source, try_place_part_on_sheet, PlacedObstacle, PlacedPart, PlacementConfig, SheetPlacement};
+use crate::placement::{place_on_sheet, PlacedObstacle, PlacedPart, PlacementConfig, SheetPlacement};
 
 // Was 15 - too narrow a slice of a real ~100-sheet job's candidate sheets
 // (confirmed: converged well before the wall-clock deadline on the real
@@ -248,17 +248,11 @@ pub fn refine_consolidation(
                         continue;
                     };
 
-                    let Some(sheet_nfp) =
-                        cached_inner_nfp(cache, target_sheet, sheet_source(target_sheet_index), part_geom, source_id_of(candidate.id), candidate.rotation, config.curve_tolerance)
-                    else {
-                        continue;
-                    };
-                    if sheet_nfp.is_empty() {
-                        continue;
-                    }
-
-                    let Some(result) = try_place_part_on_sheet(part_geom, source_id_of(candidate.id), candidate.rotation, &sheet_nfp, target_sheet, &target_obstacles, config, cache, &|_| {})
-                        .placed()
+                    // `place_on_sheet` is the inner-NFP-then-place pair this used to
+                    // spell out, plus `small_centre` - a relocated small part must
+                    // not land on the edge the nest itself kept it off.
+                    let Some(result) =
+                        place_on_sheet(part_geom, source_id_of(candidate.id), candidate.rotation, target_sheet, target_sheet_index, &target_obstacles, config, cache)
                     else {
                         continue;
                     };
@@ -349,6 +343,7 @@ mod tests {
             curve_tolerance: 0.3,
             part_rules: Default::default(),
             banded_pass: true,
+            small_centre: None,
         }
     }
 

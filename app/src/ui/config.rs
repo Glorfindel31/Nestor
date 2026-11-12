@@ -67,6 +67,13 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         if app.cfg.mirror {
             ui.label(RichText::new(t("mirror_hint")).color(theme::ERROR()).small());
         }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            shell::help_bubble(ui.checkbox(&mut app.cfg.small_centre, t("small_centre_label")), t("small_centre_label"), t("small_centre_tooltip"));
+        });
+        if app.cfg.small_centre {
+            shell::number_row(ui, t("small_size_label"), t("small_size_tooltip"), &mut app.cfg.small_size, 1.0, 1.0..=10_000.0);
+        }
 
         ui.add_space(8.0);
         if ui.button(t(if app.advanced_open { "btn_advanced_expanded" } else { "btn_advanced_collapsed" })).clicked() {

@@ -262,6 +262,10 @@ pub struct ConfigForm {
     pub dominant_threshold: f64,
     pub max_threads: usize,
     pub seed: u64,
+    /// Keep parts smaller than `small_size` off the sheet edge.
+    pub small_centre: bool,
+    /// The shared "small part" size (mm), also used by the bridge tabs.
+    pub small_size: f64,
     /// Lives in the IMPORT panel but is part of the nest config, exactly as
     /// in the web UI - it governs how finely arcs are tessellated on import
     /// *and* is sent along with the run.
@@ -322,6 +326,8 @@ impl Default for ConfigForm {
             dominant_threshold: 0.9,
             max_threads: 0,
             seed: 0,
+            small_centre: false,
+            small_size: 50.0,
             curve_tolerance: 0.3,
             scales: RunScales::default(),
         }
@@ -381,6 +387,8 @@ impl ConfigForm {
             kerf: self.kerf,
             max_threads: self.max_threads,
             seed: self.seed,
+            small_centre: self.small_centre,
+            small_size: self.small_size,
             runs: self.runs,
             cleanup_threshold_percent: self.cleanup_threshold.trim().parse().ok(),
             mirror: self.mirror,
@@ -401,6 +409,8 @@ impl ConfigForm {
         self.kerf = d.kerf;
         self.max_threads = d.max_threads;
         self.seed = d.seed;
+        self.small_centre = d.small_centre;
+        self.small_size = d.small_size;
         self.runs = d.runs;
         self.cleanup_threshold = d.cleanup_threshold_percent.map(|v| v.to_string()).unwrap_or_default();
         self.scales = d.scales;

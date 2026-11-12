@@ -133,7 +133,7 @@ fn main() {
     let sheet = LayeredPolygon::new(sheet_points, "SHEET".into(), None);
     let sheets = vec![sheet]; // exactly one sheet - this is a single-sheet packing-density benchmark, not a multi-sheet job
 
-    let placement_config = PlacementConfig { placement_type, rotations, dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD, curve_tolerance: CURVE_TOLERANCE, part_rules: Default::default(), banded_pass: true };
+    let placement_config = PlacementConfig { placement_type, rotations, dominant_part_area_threshold: DEFAULT_DOMINANT_PART_AREA_THRESHOLD, curve_tolerance: CURVE_TOLERANCE, part_rules: Default::default(), banded_pass: true , small_centre: None};
     let ga_config = GaConfig { population_size, mutation_rate, rotations, mirror: false, part_rules: Default::default() };
     let mut ga = GeneticAlgorithm::new(adam, ga_config, Vec::new(), 0);
 

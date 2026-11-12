@@ -981,7 +981,7 @@ impl App {
             crate::dto::TabRequest {
                 placements: snapshot.placements.clone(),
                 parts_by_id: self.parts_by_id.clone(),
-                settings: self.tab_settings,
+                settings: crate::dto::TabSettingsDto { threshold: self.cfg.small_size, ..self.tab_settings },
             },
         );
     }
