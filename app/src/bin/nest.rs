@@ -27,6 +27,7 @@ USAGE:
     nest [OPTIONS] <file.dxf|file.svg>...
 
     Every shape in every file is a part. The stock sheet is given by --sheet.
+    Exit status: 0 ok, 1 error, 2 the result failed its audit.
 
 OPTIONS:
     --sheet WxH        stock size in mm (default 2440x1220)
@@ -55,7 +56,10 @@ OPTIONS:
 
 fn main() -> std::process::ExitCode {
     match run() {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        // A FAILED audit is not a cuttable result, so a harness must not read
+        // it as success. 2, not 1, so it can be told apart from an error.
+        Ok(true) => std::process::ExitCode::from(2),
+        Ok(false) => std::process::ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("nest: {message}");
             std::process::ExitCode::FAILURE
@@ -194,8 +198,9 @@ fn rect(w: f64, h: f64) -> PolygonDto {
     PolygonDto::new(vec![PointDto { x: 0.0, y: 0.0 }, PointDto { x: w, y: 0.0 }, PointDto { x: w, y: h }, PointDto { x: 0.0, y: h }], "sheet".to_string(), None)
 }
 
-fn run() -> Result<(), String> {
-    let Some(opts) = parse_args()? else { return Ok(()) };
+/// `Ok(true)` when the audit failed.
+fn run() -> Result<bool, String> {
+    let Some(opts) = parse_args()? else { return Ok(false) };
 
     let mut parts: Vec<PartDto> = Vec::new();
     // Which source each part id came from, so a sheet can be reported by
@@ -306,7 +311,7 @@ phase                     seconds        calls");
             eprintln!("{name:<24} {hits:>21}");
         }
     }
-    Ok(())
+    Ok(audit.fatal_count > 0)
 }
 
 /// The report's part list: one row per source shape, with how many copies of
@@ -392,7 +397,7 @@ fn per_sheet_mix(response: &rustynesting::dto::RunNestResponse, quantities: &[us
         .map(|placement| {
             let mut counts = vec![0usize; quantities.len()];
             for part in &placement.parts {
-                if let Some(&s) = source.get(part.id) {
+                if let Some(&s) = source.get(part.id & !nesting::dispatch::MIRROR_ID_BIT) {
                     counts[s] += 1;
                 }
             }
@@ -422,7 +427,7 @@ fn report(opts: &Options, response: &rustynesting::dto::RunNestResponse, audit: 
             .map(|counts| format!("[{}]", counts.iter().map(usize::to_string).collect::<Vec<_>>().join(",")))
             .collect::<Vec<_>>()
             .join(",");
-        let label_list = labels.iter().map(|l| format!("\"{l}\"")).collect::<Vec<_>>().join(",");
+        let label_list = labels.iter().map(|l| format!("\"{}\"", l.replace('\\', "\\\\").replace('"', "\\\""))).collect::<Vec<_>>().join(",");
         println!(
             "{{\"sheets\":{},\"placed\":{placed},\"unplaced\":{},\"utilisation\":{:.4},\"best_sheet\":{best:.4},\"mean_sheet\":{mean:.4},\"fitness\":{:.4},\"audit\":\"{}\",\"seconds\":{:.3},\"per_sheet\":[{per}],\"per_sheet_parts\":[{per_parts}],\"labels\":[{label_list}],\"per_sheet_mix\":[{mix}]}}",
             response.placements.len(),

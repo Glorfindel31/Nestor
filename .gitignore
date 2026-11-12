@@ -27,3 +27,6 @@ CLAUDE.md
 /.github/hooks/
 /.github/skills/
 /PRODUCT.md
+
+# written by bench.sh - the last clean board, what the next run is compared to
+/bench-last.txt
