@@ -1724,19 +1724,34 @@ pub fn run_nest_with_progress(
         }
     }
 
+    let placements = to_placements_dto(best.placements);
+    let mut history: Vec<NestSnapshotDto> = history
+        .into_iter()
+        .map(|(generation, r)| NestSnapshotDto {
+            generation,
+            placements: to_placements_dto(r.placements),
+            fitness: r.fitness,
+            utilisation: r.utilisation,
+            unplaced_count: r.unplaced_count,
+            unplaced_ids: r.unplaced_ids,
+        })
+        .collect();
+    // **The window shows `history`, not `placements`** - it opens on the last
+    // entry, which the GA recorded *before* the passes above (consolidation,
+    // cleanup repack, fillers, the last-sheet offcut) changed the winner. So
+    // every one of them was invisible in the window while the CLI, which reads
+    // `placements`, saw it - fillers "not working" was this. The last entry is
+    // the winner, so it carries the finished result.
+    if let Some(last) = history.last_mut() {
+        last.placements = placements.clone();
+        last.utilisation = best.utilisation;
+        last.unplaced_count = best.unplaced_count;
+        last.unplaced_ids = best.unplaced_ids.clone();
+    }
+
     Ok(RunNestResponse {
-        history: history
-            .into_iter()
-            .map(|(generation, r)| NestSnapshotDto {
-                generation,
-                placements: to_placements_dto(r.placements),
-                fitness: r.fitness,
-                utilisation: r.utilisation,
-                unplaced_count: r.unplaced_count,
-                unplaced_ids: r.unplaced_ids,
-            })
-            .collect(),
-        placements: to_placements_dto(best.placements),
+        history,
+        placements,
         fitness: best.fitness,
         utilisation: best.utilisation,
         unplaced_count: best.unplaced_count,
@@ -1964,6 +1979,8 @@ mod tests {
         assert_eq!(copies(&with.placements[0]), 4);
         assert_eq!(copies(&with.placements[1]), 4);
         assert_eq!(copies(&with.placements[2]), 0, "the last sheet keeps its offcut");
+        let shown = &with.history.last().expect("a finished run has history").placements;
+        assert_eq!(shown.iter().map(copies).sum::<usize>(), 8, "the window opens on history's last entry, so the fillers must be in it");
         assert!(with.utilisation > without.utilisation);
         assert_eq!(with.unplaced_count, 0);
         let template = 3; // ids 0..3 are the required copies
@@ -2208,6 +2225,10 @@ mod tests {
         assert!(!response.history.is_empty(), "at least the first placed individual should count as an improvement");
         let last = response.history.last().unwrap();
         assert_eq!(last.fitness, response.fitness, "history's last entry should be the same result reported at the top level");
+        // The window opens on this entry, so it must be the finished layout -
+        // post-passes included - not just the GA's score for it.
+        let ids = |p: &[SheetPlacementDto]| p.iter().map(|s| s.parts.iter().map(|q| (q.id, q.x.to_bits(), q.y.to_bits())).collect::<Vec<_>>()).collect::<Vec<_>>();
+        assert_eq!(ids(&last.placements), ids(&response.placements), "history's last entry should be the finished layout");
         assert_eq!(last.unplaced_count, response.unplaced_count);
         assert_eq!(last.placements.len(), response.placements.len());
         // generations should be non-decreasing across history (each entry
