@@ -87,6 +87,7 @@
   "offcut_scan_tooltip": "Ermittelt, welches brauchbare Material auf jeder Tafel dieses Ergebnisses übrig bleibt. Es wird nichts gespeichert, bis Sie BEHALTEN drücken.",
   "offcut_scanning": "wird geprüft...",
   "offcut_found": "{n} Reststück(e), {area} m2 brauchbares Material",
+  "offcut_last": "letzte Tafel: {w} x {h} mm nutzbar",
   "offcut_keep": "BEHALTEN",
   "offcut_keep_tooltip": "Speichert diese Reststücke in der Bibliothek, damit ein späterer Auftrag darauf schachteln kann, statt eine neue Tafel anzubrechen.",
   "offcut_name": "Reststück von Tafel {sheet} ({w}x{h})",

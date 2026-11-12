@@ -87,6 +87,7 @@
   "offcut_scan_tooltip": "Calcola quale materiale utilizzabile resta su ogni lamiera di questo risultato. Non viene salvato nulla finché non premi CONSERVA.",
   "offcut_scanning": "analisi...",
   "offcut_found": "{n} sfrido/i, {area} m2 di materiale utilizzabile",
+  "offcut_last": "ultima lastra: {w} x {h} mm utilizzabili",
   "offcut_keep": "CONSERVA",
   "offcut_keep_tooltip": "Salva questi sfridi in libreria così un lavoro successivo potrà annidarci sopra invece di aprire una lamiera nuova.",
   "offcut_name": "Sfrido della lamiera {sheet} ({w}x{h})",

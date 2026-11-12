@@ -87,6 +87,7 @@
   "offcut_scan_tooltip": "이 결과의 각 원자재에 쓸 만한 재료가 얼마나 남았는지 계산합니다. '보관'을 누르기 전까지는 아무것도 저장되지 않습니다.",
   "offcut_scanning": "검사 중...",
   "offcut_found": "잔재 {n}개, 사용 가능한 재료 {area} m2",
+  "offcut_last": "마지막 시트: 사용 가능 {w} x {h} mm",
   "offcut_keep": "보관",
   "offcut_keep_tooltip": "이 잔재들을 라이브러리에 저장해, 나중 작업이 새 원자재를 개봉하지 않고 그 위에 배치할 수 있게 합니다.",
   "offcut_name": "원자재 {sheet}의 잔재 ({w}x{h})",

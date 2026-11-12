@@ -184,6 +184,21 @@ pub fn offcut_controls(app: &mut App, ui: &mut egui::Ui) {
                 .color(theme::DIM())
                 .small(),
             );
+            // The last sheet is the one `compact_for_offcut` closed up, and its
+            // biggest offcut is the piece worth naming.
+            let last_sheet = app.snapshot.as_ref().and_then(|s| s.placements.last()).map(|p| p.sheet_index);
+            if let Some(best) = app
+                .remnants
+                .iter()
+                .filter(|r| Some(r.sheet_index) == last_sheet)
+                .max_by(|a, b| (a.usable_width * a.usable_height).total_cmp(&(b.usable_width * b.usable_height)))
+            {
+                ui.label(
+                    RichText::new(super::i18n::tv(lang, "offcut_last", &[("w", &format!("{:.0}", best.usable_width)), ("h", &format!("{:.0}", best.usable_height))]))
+                        .color(theme::DIM())
+                        .small(),
+                );
+            }
             if ui.button(app.t("offcut_keep")).on_hover_text(app.t("offcut_keep_tooltip")).clicked() {
                 keep_all(app);
             }
@@ -191,7 +206,9 @@ pub fn offcut_controls(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
-fn scan(app: &mut App) {
+/// Also run automatically when a nest lands, so the last sheet's offcut is on
+/// screen without a click - the user still decides whether to KEEP it.
+pub(super) fn scan(app: &mut App) {
     let Some(snapshot) = &app.snapshot else { return };
     let Some(config) = app.result_config.clone() else { return };
     app.harvesting = true;

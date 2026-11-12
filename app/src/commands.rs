@@ -1647,6 +1647,17 @@ pub fn run_nest_with_progress(
         best.utilisation = totals.utilisation;
     }
 
+    // The last sheet is the part-full one, and what it leaves goes back on the
+    // offcut shelf - so close its parts up into a corner when that leaves a
+    // bigger usable rectangle. Same parts, same sheet: totals cannot change.
+    if !should_cancel() {
+        if let Some(last) = best.placements.last_mut() {
+            if let Some(compacted) = repack::compact_for_offcut(&sheets[last.sheet_index], last, &parts_by_id, &shape_ids, &placement_config, &cache, &should_cancel) {
+                *last = compacted;
+            }
+        }
+    }
+
     Ok(RunNestResponse {
         history: history
             .into_iter()

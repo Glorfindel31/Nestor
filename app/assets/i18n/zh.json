@@ -87,6 +87,7 @@
   "offcut_scan_tooltip": "算出这个结果中每张板材上还剩多少可用材料。在按下“保留”之前不会保存任何内容。",
   "offcut_scanning": "扫描中...",
   "offcut_found": "{n} 块余料，可用材料 {area} m2",
+  "offcut_last": "最后一张板: 可用 {w} x {h} mm",
   "offcut_keep": "保留",
   "offcut_keep_tooltip": "把这些余料保存到库中，以后的作业就能在上面排版，而不必开一张新板。",
   "offcut_name": "板材 {sheet} 的余料 ({w}x{h})",

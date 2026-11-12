@@ -87,6 +87,7 @@
   "offcut_scan_tooltip": "Calcula qué material aprovechable queda en cada chapa de este resultado. No se guarda nada hasta que pulse CONSERVAR.",
   "offcut_scanning": "analizando...",
   "offcut_found": "{n} retal(es), {area} m2 de material aprovechable",
+  "offcut_last": "última chapa: {w} x {h} mm aprovechables",
   "offcut_keep": "CONSERVAR",
   "offcut_keep_tooltip": "Guarda estos retales en la biblioteca para que un trabajo posterior pueda anidar sobre ellos en lugar de abrir una chapa nueva.",
   "offcut_name": "Retal de la chapa {sheet} ({w}x{h})",

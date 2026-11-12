@@ -230,6 +230,53 @@ fn repack_around_locked(
     Some(SheetPlacement { sheet_index: current.sheet_index, parts: out })
 }
 
+/// The usable offcut a sheet leaves: the largest axis-aligned rectangle in any
+/// of its free regions, in square millimetres. 0 when nothing is placed.
+///
+/// `parts_by_id` holds the outlines the nest placed, already padded by half the
+/// spacing, so the subtraction itself adds no clearance of its own.
+#[must_use]
+pub fn usable_offcut_area(sheet: &LayeredPolygon, placement: &SheetPlacement, parts_by_id: &HashMap<usize, LayeredPolygon>) -> f64 {
+    let placed: Vec<Vec<geometry::point::Point>> = placement
+        .parts
+        .iter()
+        .filter_map(|p| {
+            let rotated = rotate_layered_polygon(parts_by_id.get(&p.id)?, p.rotation);
+            Some(rotated.points.iter().map(|q| geometry::point::Point::new(q.x + p.placement.x, q.y + p.placement.y)).collect())
+        })
+        .collect();
+    geometry::remnant::sheet_remnants(&sheet.points, &placed, 0.0).iter().map(|r| r.usable.width * r.usable.height).fold(0.0, f64::max)
+}
+
+/// Re-packs one sheet's parts into a corner and keeps the result only if it
+/// leaves a **strictly larger** usable offcut. Meant for the last sheet of a
+/// nest, the one that is part-full and whose leftover goes back on the shelf.
+///
+/// `Gravity` rather than the run's own placement type: it closes the layout up
+/// on width first, which leaves the free material as one full-height strip -
+/// the shape an offcut is most useful in. Every part is re-placed through the
+/// normal NFP path and must fit, or nothing changes, so this can never drop a
+/// part or produce an overlap; it only ever moves the same parts.
+#[must_use]
+pub fn compact_for_offcut(
+    sheet: &LayeredPolygon,
+    current: &SheetPlacement,
+    parts_by_id: &HashMap<usize, LayeredPolygon>,
+    shape_ids: &HashMap<usize, usize>,
+    placement_config: &PlacementConfig,
+    cache: &NfpCache,
+    should_cancel: &(impl Fn() -> bool + Sync),
+) -> Option<SheetPlacement> {
+    if current.parts.is_empty() {
+        return None;
+    }
+    let gravity = PlacementConfig { placement_type: crate::placement::PlacementType::Gravity, ..placement_config.clone() };
+    let candidate = repack_around_locked(sheet, current, &[], parts_by_id, shape_ids, &gravity, cache, should_cancel)?;
+    (candidate.parts.len() == current.parts.len()
+        && usable_offcut_area(sheet, &candidate, parts_by_id) > usable_offcut_area(sheet, current, parts_by_id) + 1.0)
+        .then_some(candidate)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +455,35 @@ mod tests {
         let mut ids: Vec<usize> = winner.parts.iter().map(|p| p.id).collect();
         ids.sort_unstable();
         assert_eq!(ids, vec![0, 1, 2, 3], "repack must never invent or duplicate a part id");
+    }
+
+    /// Two squares parked in opposite corners split the free material into an
+    /// L; pushed together they leave one full-height strip. The pass must find
+    /// that, keep every part, and refuse a layout that is already compact.
+    #[test]
+    fn compacting_the_last_sheet_grows_its_offcut_and_keeps_every_part() {
+        let sheet = square(100.0);
+        let parts_by_id: HashMap<usize, LayeredPolygon> = HashMap::from([(0, square(30.0)), (1, square(30.0))]);
+        let scattered = SheetPlacement {
+            sheet_index: 0,
+            parts: vec![
+                PlacedPart { id: 0, placement: Placement { x: 0.0, y: 0.0 }, rotation: 0.0 },
+                PlacedPart { id: 1, placement: Placement { x: 70.0, y: 70.0 }, rotation: 0.0 },
+            ],
+        };
+        let before = usable_offcut_area(&sheet, &scattered, &parts_by_id);
+        let compacted = compact_for_offcut(&sheet, &scattered, &parts_by_id, &HashMap::new(), &placement_config(), &NfpCache::new(), &|| false)
+            .expect("two corners apart is not the biggest offcut");
+        let after = usable_offcut_area(&sheet, &compacted, &parts_by_id);
+        assert!(after > before, "offcut must grow: {before} -> {after}");
+        assert!(after >= 70.0 * 100.0 - 1.0, "one 70x100 strip is left: {after}");
+        let mut ids: Vec<usize> = compacted.parts.iter().map(|p| p.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![0, 1]);
+
+        assert!(
+            compact_for_offcut(&sheet, &compacted, &parts_by_id, &HashMap::new(), &placement_config(), &NfpCache::new(), &|| false).is_none(),
+            "an already compact sheet is left alone"
+        );
     }
 }

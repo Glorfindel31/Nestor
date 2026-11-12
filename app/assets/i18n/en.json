@@ -87,6 +87,7 @@
   "offcut_scan_tooltip": "Work out what usable material is left over on each sheet of this result. Nothing is saved until you press KEEP.",
   "offcut_scanning": "scanning...",
   "offcut_found": "{n} offcut(s), {area} m2 of usable material",
+  "offcut_last": "last sheet: {w} x {h} mm usable",
   "offcut_keep": "KEEP",
   "offcut_keep_tooltip": "Save these offcuts to the library so a later job can nest onto them instead of opening a new sheet.",
   "offcut_name": "Offcut sheet {sheet} ({w}x{h})",

@@ -87,6 +87,7 @@
   "offcut_scan_tooltip": "Tính xem mỗi tấm phôi trong kết quả này còn lại bao nhiêu vật liệu dùng được. Chưa lưu gì cho đến khi bạn nhấn GIỮ.",
   "offcut_scanning": "đang quét...",
   "offcut_found": "{n} phần thừa, {area} m2 vật liệu dùng được",
+  "offcut_last": "tấm cuối: {w} x {h} mm dùng được",
   "offcut_keep": "GIỮ",
   "offcut_keep_tooltip": "Lưu các phần thừa này vào thư viện để công việc sau có thể xếp lên chúng thay vì mở tấm mới.",
   "offcut_name": "Phần thừa tấm {sheet} ({w}x{h})",

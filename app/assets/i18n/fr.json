@@ -87,6 +87,7 @@
   "offcut_scan_tooltip": "Détermine quelle matière exploitable reste sur chaque tôle de ce résultat. Rien n'est enregistré tant que vous n'appuyez pas sur CONSERVER.",
   "offcut_scanning": "analyse...",
   "offcut_found": "{n} chute(s), {area} m2 de matière exploitable",
+  "offcut_last": "dernière tôle : {w} x {h} mm utilisables",
   "offcut_keep": "CONSERVER",
   "offcut_keep_tooltip": "Enregistre ces chutes dans la bibliothèque pour qu'un travail ultérieur puisse imbriquer dessus au lieu d'entamer une tôle neuve.",
   "offcut_name": "Chute de la tôle {sheet} ({w}x{h})",

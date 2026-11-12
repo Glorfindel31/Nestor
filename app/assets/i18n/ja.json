@@ -87,6 +87,7 @@
   "offcut_scan_tooltip": "この結果の各母材にどれだけ使える材料が残っているかを算出します。「保存」を押すまで何も保存されません。",
   "offcut_scanning": "調査中...",
   "offcut_found": "端材 {n} 点、使用可能な材料 {area} m2",
+  "offcut_last": "最終シート: 使用可能 {w} x {h} mm",
   "offcut_keep": "保存",
   "offcut_keep_tooltip": "これらの端材をライブラリに保存し、後のジョブが新しい母材を開けずにその上へネスティングできるようにします。",
   "offcut_name": "母材 {sheet} の端材 ({w}x{h})",

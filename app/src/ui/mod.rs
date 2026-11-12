@@ -901,6 +901,7 @@ impl App {
         self.snapshot = Some(Snapshot::from_history(&self.history[self.history_index]));
         self.consume_used_remnants();
         self.request_audit("a nest run");
+        library::scan(self);
     }
 
     /// Marks every library remnant that this run actually nested onto as
