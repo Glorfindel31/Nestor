@@ -1777,6 +1777,13 @@ fn prewarm_obstacle_nfps(parts: &[NestPart], config: &PlacementConfig, cache: &N
     });
 }
 
+/// Two sheets with the same outline (point for point, hole count included).
+/// Used by `place_parts` to skip a sheet identical to one that already
+/// fitted nothing.
+fn same_outline(a: &LayeredPolygon, b: &LayeredPolygon) -> bool {
+    a.points.len() == b.points.len() && a.children.len() == b.children.len() && a.points.iter().zip(&b.points).all(|(p, q)| p.x == q.x && p.y == q.y)
+}
+
 #[must_use]
 pub fn place_parts(
     sheets: &[LayeredPolygon],
@@ -1829,6 +1836,8 @@ pub fn place_parts(
 
     let mut cancelled_early = false;
     let mut sheet_idx = 0usize;
+    // Indices of sheets that came back with nothing placed - see the skip below.
+    let mut empty_sheets: Vec<usize> = Vec::new();
     while !parts.is_empty() {
         if sheet_idx >= sheets.len() {
             break;
@@ -1838,6 +1847,15 @@ pub fn place_parts(
             break;
         }
         let sheet = &sheets[sheet_idx];
+        // A sheet that fitted nothing fits nothing identical either: an empty
+        // sheet means no remaining part fits it alone, and the remaining set
+        // only shrinks. So 60 identical stock sheets are not re-tried one by
+        // one for a part too big for all of them.
+        if empty_sheets.iter().any(|&k| same_outline(&sheets[k], sheet)) {
+            sheet_idx += 1;
+            continue;
+        }
+        let (fitness_before, sheet_total_before, usable_total_before) = (fitness, total_sheet_area, total_usable_sheet_area);
         let sheet_src = sheet_source(sheet_idx);
         let sheet_area = polygon_area(&sheet.points).abs();
         let sheet_usable_area = polygon_material_area(sheet);
@@ -2670,10 +2688,20 @@ pub fn place_parts(
         parts = kept;
 
         if placed.is_empty() {
-            // Nothing fit on a freshly opened, empty sheet - something is
-            // wrong (part(s) genuinely too big); stop rather than looping
-            // forever opening empty sheets.
-            break;
+            // Nothing fit this sheet. Skip it rather than ending the nest: a
+            // small offcut row can sit before the stock sheets and fit no part,
+            // and stopping there used to leave every part unplaced. The skipped
+            // sheet leaves no trace in totals or fitness, and is remembered so
+            // identical sheets are skipped too (see `same_outline`).
+            if cancelled_early {
+                break;
+            }
+            fitness = fitness_before;
+            total_sheet_area = sheet_total_before;
+            total_usable_sheet_area = usable_total_before;
+            empty_sheets.push(sheet_idx);
+            sheet_idx += 1;
+            continue;
         }
 
         all_placements.push(SheetPlacement { sheet_index: sheet_idx, parts: placed_parts_out });
@@ -3626,5 +3654,39 @@ mod tests {
         let result = place_parts(&[sheet], parts, &on, &NfpCache::new(), &|| false, &|_, _| {}, &|_, _, _| {}).unwrap();
         assert_eq!(result.unplaced_count, 0);
         assert_eq!(result.placements.len(), 1, "all four still share the one sheet");
+    }
+
+    /// A sheet no part fits is skipped; the part lands on the next sheet
+    /// instead of the whole nest stopping at the small one.
+    #[test]
+    fn a_sheet_no_part_fits_is_skipped_not_the_end_of_the_nest() {
+        let sheets = [rect(0.0, 0.0, 10.0, 10.0), rect(0.0, 0.0, 100.0, 100.0)];
+        let parts = vec![NestPart { id: 0, source_id: 0, polygon: rect(0.0, 0.0, 20.0, 20.0), rotation: 0.0 }];
+        let result = place_parts(&sheets, parts, &config(PlacementType::Gravity), &NfpCache::new(), &|| false, &|_, _| {}, &|_, _, _| {}).unwrap();
+        assert_eq!(result.unplaced_count, 0);
+        assert_eq!(result.placements.len(), 1);
+        assert_eq!(result.placements[0].sheet_index, 1);
+    }
+
+    /// Fifty identical sheets that fit nothing are skipped in one step, not
+    /// re-tried one by one; the part still lands on the real sheet at the end.
+    #[test]
+    fn identical_empty_sheets_are_not_retried() {
+        let mut sheets = vec![rect(0.0, 0.0, 10.0, 10.0); 50];
+        sheets.push(rect(0.0, 0.0, 100.0, 100.0));
+        let parts = vec![NestPart { id: 0, source_id: 0, polygon: rect(0.0, 0.0, 20.0, 20.0), rotation: 0.0 }];
+        let result = place_parts(&sheets, parts, &config(PlacementType::Gravity), &NfpCache::new(), &|| false, &|_, _| {}, &|_, _, _| {}).unwrap();
+        assert_eq!(result.unplaced_count, 0);
+        assert_eq!(result.placements[0].sheet_index, 50);
+    }
+
+    /// The skipped sheet leaves no trace in the utilisation totals.
+    #[test]
+    fn a_skipped_sheet_leaves_no_trace_in_utilisation() {
+        let part = || vec![NestPart { id: 0, source_id: 0, polygon: rect(0.0, 0.0, 20.0, 20.0), rotation: 0.0 }];
+        let cfg = config(PlacementType::Gravity);
+        let with_small = place_parts(&[rect(0.0, 0.0, 10.0, 10.0), rect(0.0, 0.0, 100.0, 100.0)], part(), &cfg, &NfpCache::new(), &|| false, &|_, _| {}, &|_, _, _| {}).unwrap();
+        let alone = place_parts(&[rect(0.0, 0.0, 100.0, 100.0)], part(), &cfg, &NfpCache::new(), &|| false, &|_, _| {}, &|_, _, _| {}).unwrap();
+        assert!((with_small.utilisation - alone.utilisation).abs() < 1e-9);
     }
 }
