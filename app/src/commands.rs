@@ -23,7 +23,7 @@ use geometry::clearance::{prepare_part, prepare_sheet};
 use geometry::dxf_export::{PlacedShape, SheetLayout};
 use geometry::dxf_import::{rotate_layered_polygon, shift_layered_polygon, LayeredPolygon};
 use nesting::cache::NfpCache;
-use nesting::consolidation::{recompute_totals, refine_consolidation};
+use nesting::consolidation::{layout_fitness, recompute_totals, refine_consolidation};
 use nesting::dispatch;
 use nesting::ga::{is_better_nest, GaConfig, GeneticAlgorithm};
 use nesting::placement::{PlaceResult, PlacementConfig, PlacementType};
@@ -1724,6 +1724,13 @@ pub fn run_nest_with_progress(
         }
     }
 
+    // The GA scored the layout before the passes above moved parts; report the
+    // fitness of the layout actually returned. Nothing placed (cancelled
+    // before the first result) keeps its 0.
+    if !best.placements.is_empty() {
+        best.fitness = layout_fitness(&best.placements, &parts_by_id, &sheets, &best.unplaced_ids);
+    }
+
     let placements = to_placements_dto(best.placements);
     let mut history: Vec<NestSnapshotDto> = history
         .into_iter()
@@ -1744,6 +1751,7 @@ pub fn run_nest_with_progress(
     // the winner, so it carries the finished result.
     if let Some(last) = history.last_mut() {
         last.placements = placements.clone();
+        last.fitness = best.fitness;
         last.utilisation = best.utilisation;
         last.unplaced_count = best.unplaced_count;
         last.unplaced_ids = best.unplaced_ids.clone();

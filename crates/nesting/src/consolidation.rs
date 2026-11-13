@@ -335,6 +335,33 @@ pub fn recompute_totals(allplacements: &[SheetPlacement], parts_by_id: &HashMap<
     Totals { total_placed_area, total_usable_sheet_area, utilisation }
 }
 
+/// `place_parts`' fitness for a finished layout, so the number reported with
+/// a result describes *that* result. Consolidation, the cleanup repack, filler
+/// parts and the offcut compaction all move parts after the GA scored them, and
+/// the GA's own number went out with the edited layout unchanged.
+///
+/// Same terms as `place_parts`: each used sheet's area plus its leftover
+/// fraction, and `1e8 * area%` per unplaced part. **Minus** its last-part
+/// positioning tiebreak (`minwidth/sheet_area + minarea`), which is a property
+/// of the placement search, not of the layout, and cannot be recomputed from
+/// one - so this is lower than the GA's figure by at most that tiebreak.
+#[must_use]
+pub fn layout_fitness(allplacements: &[SheetPlacement], parts_by_id: &HashMap<usize, LayeredPolygon>, sheets: &[LayeredPolygon], unplaced_ids: &[usize]) -> f64 {
+    let mut fitness = 0.0;
+    let mut total_sheet_area = 0.0;
+    for entry in allplacements {
+        let sheet_area = area_of_sheet(entry.sheet_index, sheets);
+        let placed: f64 = entry.parts.iter().filter_map(|p| parts_by_id.get(&p.id)).map(polygon_material_area).sum();
+        total_sheet_area += sheet_area;
+        fitness += sheet_area + (polygon_material_area(&sheets[entry.sheet_index]) - placed).max(0.0) / sheet_area;
+    }
+    for id in unplaced_ids {
+        let area = parts_by_id.get(id).map_or(0.0, |p| polygon_area(&p.points).abs());
+        fitness += 100_000_000.0 * if total_sheet_area > 0.0 { area * 100.0 / total_sheet_area } else { 1.0 };
+    }
+    fitness
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,5 +470,24 @@ mod tests {
         assert!((totals.total_usable_sheet_area - 10000.0).abs() < 1e-6);
         assert!((totals.total_placed_area - (100.0 + 400.0)).abs() < 1e-6);
         assert!((totals.utilisation - 5.0).abs() < 1e-6);
+    }
+
+    /// One part per sheet leaves `place_parts` no positioning tiebreak to add,
+    /// so its fitness and `layout_fitness` of the same layout must agree
+    /// exactly - unplaced penalty included.
+    #[test]
+    fn layout_fitness_matches_place_parts_when_there_is_no_tiebreak() {
+        let sheets = vec![square(100.0), square(100.0)];
+        let parts = vec![
+            NestPart { id: 0, source_id: 0, polygon: square(80.0), rotation: 0.0 },
+            NestPart { id: 1, source_id: 1, polygon: square(70.0), rotation: 0.0 },
+            NestPart { id: 2, source_id: 2, polygon: square(200.0), rotation: 0.0 },
+        ];
+        let parts_by_id: HashMap<usize, LayeredPolygon> = parts.iter().map(|p| (p.id, p.polygon.clone())).collect();
+        let result = place_parts(&sheets, parts, &config(), &NfpCache::new(), &|| false, &|_, _| {}, &|_, _, _| {}).unwrap();
+        assert_eq!(result.placements.len(), 2, "80 and 70 can't share a 100 sheet");
+        assert_eq!(result.unplaced_ids, vec![2]);
+        let ours = layout_fitness(&result.placements, &parts_by_id, &sheets, &result.unplaced_ids);
+        assert!((ours - result.fitness).abs() < 1e-6 * result.fitness, "{ours} vs {}", result.fitness);
     }
 }
