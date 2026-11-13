@@ -267,21 +267,22 @@ pub struct ExpandedParts {
 /// should get - "no allowed angles at all" is never a useful request, and
 /// treating it as a constraint would make the part unplaceable.
 ///
-/// **Deduped at one degree, which is the resolution the NFP cache key
-/// actually distinguishes** (`cache_key::normalize_rotation` truncates to an
-/// integer, a preserved port behaviour). This used to dedupe at `1e-9`, nine
-/// decades finer, so an authored list containing both `22.5` and `22.7` kept
-/// two entries that then collided onto cache key `22` - whichever was
-/// computed first served its NFP to the other, and the part was placed
-/// against collision geometry for the wrong orientation. Angles under a
-/// degree apart are not separable by this engine, so collapsing them is
-/// honest where keeping both is silently wrong. Nothing the UI emits is
-/// affected (`RotRule` only ever produces multiples of 90); a hand-edited
-/// `config.json`/`shapes.json` is what reaches this.
+/// **Deduped at one millidegree, which is the resolution the NFP cache key
+/// actually distinguishes** (`cache_key::normalize_rotation`, millidegrees
+/// since it stopped truncating to whole degrees). Two authored angles that
+/// share a key would have one be served the other's NFP, so anything closer
+/// than that is collapsed; anything a millidegree or more apart is separable
+/// and kept. A wrap-around pair (`0` and `359.9999`) is the same angle, so the
+/// last one goes too. Nothing the UI emits is affected (`RotRule` only ever
+/// produces multiples of 90); a hand-edited `config.json`/`shapes.json` is
+/// what reaches this.
 fn normalize_angles(angles: &[f64]) -> Vec<f64> {
     let mut out: Vec<f64> = angles.iter().filter(|a| a.is_finite()).map(|a| a.rem_euclid(360.0)).collect();
     out.sort_by(f64::total_cmp);
-    out.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+    out.dedup_by(|a, b| (*a - *b).abs() < 1e-3);
+    if out.len() > 1 && (360.0 - (out[out.len() - 1] - out[0])).abs() < 1e-3 {
+        out.pop();
+    }
     out
 }
 
@@ -1360,15 +1361,18 @@ mod tests {
         ]
     }
 
-    /// `cache_key::normalize_rotation` truncates a rotation to an integer, so
-    /// two authored angles inside the same degree are one cache entry. Keeping
-    /// both meant the second was placed against the first's NFP.
+    /// `cache_key::normalize_rotation` keys rotations in millidegrees, so two
+    /// authored angles closer than a millidegree share one cache entry and
+    /// the second would be placed against the first's NFP. Angles further
+    /// apart than that are separable and must both survive.
     #[test]
     fn authored_angles_are_deduped_at_the_cache_keys_own_resolution() {
         use nesting::cache_key::normalize_rotation;
 
         let kept = normalize_angles(&[22.5, 22.7, 45.0]);
-        assert_eq!(kept, vec![22.5, 45.0], "22.7 is not separable from 22.5");
+        assert_eq!(kept, vec![22.5, 22.7, 45.0], "22.7 is separable from 22.5");
+        assert_eq!(normalize_angles(&[22.5, 22.5004]), vec![22.5], "under a millidegree apart is one key");
+        assert_eq!(normalize_angles(&[0.0, 359.9999]), vec![0.0], "wrap-around pair is one angle");
 
         let mut keys: Vec<i64> = kept.iter().copied().map(normalize_rotation).collect();
         let before = keys.len();

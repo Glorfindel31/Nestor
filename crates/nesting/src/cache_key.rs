@@ -15,15 +15,22 @@
 //! keep passing `0` for `a_rotation` on inner-NFP lookups, the same way both
 //! original implementations' callers did.
 
-/// Normalizes a rotation value to `[0, 360)`. Matches both original
-/// implementations exactly: `parseInt(rotation) || 0` (fall back to 0 for
-/// anything that doesn't parse as an integer, including NaN) then
-/// `((n % 360) + 360) % 360` (handles negative values correctly, unlike a
-/// plain `% 360`).
+/// Normalizes a rotation to millidegrees in `[0, 360_000)`, rounded to the
+/// nearest millidegree. A deliberate departure from the original's
+/// `parseInt(rotation)`, which truncated to whole degrees: the cache is shared
+/// across runs whose rotation grids differ (19 then 20 rotations), so whole
+/// degrees collided. 18.947 at 19 rotations and 18 at 20 rotations both keyed
+/// as 18 and each got the other's NFP. Millidegrees keep them apart. Rounding
+/// (not truncating) also folds float drift like `359.999_999_9` onto `0`
+/// instead of making it a separate entry. Non-finite input (NaN) maps to `0`,
+/// matching the original's `|| 0` fallback. The `>=` vs `>` rotation quirk
+/// lives in `placement::advance_rotation`, not here.
 #[must_use]
 pub fn normalize_rotation(rotation: f64) -> i64 {
-    let n = if rotation.is_finite() { rotation.trunc() as i64 } else { 0 };
-    ((n % 360) + 360) % 360
+    if !rotation.is_finite() {
+        return 0;
+    }
+    ((rotation * 1000.0).round() as i64).rem_euclid(360_000)
 }
 
 /// Which namespace a cache-key source id belongs to. The original encoded
@@ -67,13 +74,14 @@ impl SourceId {
 /// that is ~11 million allocations to look up six distinct values, since
 /// every lookup is a cache hit. Rotations are stored normalized, so
 /// geometrically identical angles still collide into one entry exactly as
-/// the string form did; `i16` because `normalize_rotation` returns `[0, 360)`.
+/// the string form did; `i32` because `normalize_rotation` returns millidegrees
+/// in `[0, 360_000)`, which does not fit in `i16`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct NfpKey {
     a: SourceId,
     b: SourceId,
-    a_rotation: i16,
-    b_rotation: i16,
+    a_rotation: i32,
+    b_rotation: i32,
     a_flipped: bool,
     b_flipped: bool,
 }
@@ -83,8 +91,8 @@ pub fn nfp_cache_key(a: SourceId, b: SourceId, a_rotation: f64, b_rotation: f64,
     NfpKey {
         a,
         b,
-        a_rotation: normalize_rotation(a_rotation) as i16,
-        b_rotation: normalize_rotation(b_rotation) as i16,
+        a_rotation: normalize_rotation(a_rotation) as i32,
+        b_rotation: normalize_rotation(b_rotation) as i32,
         a_flipped,
         b_flipped,
     }
@@ -96,7 +104,7 @@ mod tests {
 
     #[test]
     fn normalizes_a_plain_angle() {
-        assert_eq!(normalize_rotation(90.0), 90);
+        assert_eq!(normalize_rotation(90.0), 90_000);
     }
 
     #[test]
@@ -111,12 +119,23 @@ mod tests {
 
     #[test]
     fn normalizes_a_negative_rotation() {
-        assert_eq!(normalize_rotation(-90.0), 270);
+        assert_eq!(normalize_rotation(-90.0), 270_000);
     }
 
     #[test]
     fn non_finite_rotation_falls_back_to_zero() {
         assert_eq!(normalize_rotation(f64::NAN), 0);
+    }
+
+    #[test]
+    fn angles_a_fraction_of_a_degree_apart_get_distinct_keys() {
+        // 19 rotations vs 20 rotations: both used to key as 18
+        assert_ne!(normalize_rotation(360.0 / 19.0), normalize_rotation(18.0));
+    }
+
+    #[test]
+    fn float_drift_just_under_a_full_turn_folds_onto_zero() {
+        assert_eq!(normalize_rotation(359.999_999_9), 0);
     }
 
     #[test]
