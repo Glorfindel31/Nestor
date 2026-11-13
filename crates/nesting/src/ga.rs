@@ -251,15 +251,14 @@ impl GeneticAlgorithm {
         for i in 0..clone.placement.len() {
             if rng.gen::<f64>() < swap_chance {
                 let j = i + 1;
-                // Deliberately swaps only `placement`, not `rotation` -
-                // preserved exactly from the original, which has the same
-                // asymmetry. A part's rotation is tied to its *slot*
-                // through a swap, not carried along with the part into its
-                // new slot; each slot still gets its own independent
-                // rotation-reroll chance right below regardless of what
-                // just moved into it.
+                // The rotation goes with its part. The original swapped only
+                // `placement`, leaving each angle behind in its slot, so a
+                // swap silently re-rotated both parts - an angle drawn for one
+                // part's rule (or its mirror bit) landing on another's. The
+                // insert move below and `mate` already keep the pair together.
                 if j < clone.placement.len() {
                     clone.placement.swap(i, j);
+                    clone.rotation.swap(i, j);
                 }
             }
             if rng.gen::<f64>() < rotation_mutation_chance {
@@ -484,6 +483,24 @@ mod tests {
             for &r in &ind.rotation {
                 assert!((0.0..360.0).contains(&r));
                 assert_eq!((r / 90.0).round() * 90.0, r, "rotation {r} not on the 4-way grid");
+            }
+        }
+    }
+
+    /// Part `k` may only sit at `10 * k` degrees, so a reroll can only redraw
+    /// the angle it already has. Any mismatch is a swap that left a rotation
+    /// behind in its slot.
+    #[test]
+    fn a_swap_moves_the_rotation_with_its_part() {
+        let rules: std::collections::HashMap<usize, crate::placement::PartRule> = (0..8)
+            .map(|k| (k, crate::placement::PartRule { angles: vec![10.0 * k as f64], mirror: false, no_hole_nesting: false }))
+            .collect();
+        let cfg = GaConfig { population_size: 2, mutation_rate: 100.0, rotations: 4, mirror: false, part_rules: std::sync::Arc::new(rules) };
+        let ga = GeneticAlgorithm::new(adam(8), cfg, Vec::new(), 0);
+        for _ in 0..20 {
+            let mutant = ga.mutate(&ga.population[0]);
+            for (id, rotation) in mutant.placement.iter().zip(&mutant.rotation) {
+                assert_eq!(*rotation, 10.0 * *id as f64, "part {id} carries someone else's angle: {mutant:?}");
             }
         }
     }
