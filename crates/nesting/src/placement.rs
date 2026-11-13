@@ -2078,6 +2078,11 @@ pub fn place_parts(
                 on_part_placed(sheet_idx, &placed_part);
                 let part_area = polygon_area(&polygon.points).abs();
                 placed.push(PlacedObstacle { polygon: polygon.clone(), id: parts[i].id, source_id: parts[i].source_id, rotation, placement: position });
+                // Same as the generic first-part path: the second copy of a
+                // shape starts at the angle the first one took.
+                if config.placement_type == PlacementType::GravityCorrective {
+                    rotation_by_source.insert(parts[i].source_id, rotation);
+                }
                 parts[i] = NestPart { id: parts[i].id, source_id: parts[i].source_id, polygon, rotation };
 
                 if part_area >= config.dominant_part_area_threshold * sheet_area {
