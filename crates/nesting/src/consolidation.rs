@@ -344,7 +344,9 @@ pub fn recompute_totals(allplacements: &[SheetPlacement], parts_by_id: &HashMap<
 /// fraction, and `1e8 * area%` per unplaced part. **Minus** its last-part
 /// positioning tiebreak (`minwidth/sheet_area + minarea`), which is a property
 /// of the placement search, not of the layout, and cannot be recomputed from
-/// one - so this is lower than the GA's figure by at most that tiebreak.
+/// one - so this differs from the GA's figure by that tiebreak, in either
+/// direction (TightFit's is a negative contact score, so dropping it raises
+/// the number).
 #[must_use]
 pub fn layout_fitness(allplacements: &[SheetPlacement], parts_by_id: &HashMap<usize, LayeredPolygon>, sheets: &[LayeredPolygon], unplaced_ids: &[usize]) -> f64 {
     let mut fitness = 0.0;
