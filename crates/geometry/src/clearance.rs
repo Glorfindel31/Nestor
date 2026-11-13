@@ -53,6 +53,8 @@
 //! purely an internal detail of how placement decisions get made.
 
 use crate::clipper::offset_round;
+use crate::circular_nfp::Circle;
+use crate::dxf_import::LayeredPolygon;
 use crate::simplify::simplify;
 use crate::point::Point;
 use crate::polygon::{get_polygon_bounds, is_rectangle, polygon_area};
@@ -135,6 +137,35 @@ fn offset_clearance(polygon: &[Point], delta: f64) -> Option<Vec<Point>> {
     offset_round(polygon, delta).into_iter().max_by(|a, b| polygon_area(a).abs().total_cmp(&polygon_area(b).abs()))
 }
 
+/// Moves a closed ring outward by `delta` (inward when negative), whatever its
+/// winding. Returns every resulting ring, or none if it collapsed.
+///
+/// **Winding-independent on purpose.** Clipper's offset sign follows the
+/// ring's winding, and a hole does not promise a winding, so the first
+/// attempt may move the wrong way; if the area moved the wrong way it is
+/// recomputed with the sign flipped (same reason as
+/// `nesting::placement::small_part_sheet`).
+///
+/// **Every ring is kept, not just the largest.** A hole pinched in two by the
+/// shrink is two holes; keeping only the largest would turn the real hole
+/// into material for a sheet.
+fn offset_rings(ring: &[Point], delta: f64) -> Vec<Vec<Point>> {
+    if delta == 0.0 {
+        return vec![ring.to_vec()];
+    }
+    if ring.len() == 4 && is_rectangle(ring, None) {
+        return offset_rectangle_exact(ring, delta).into_iter().collect();
+    }
+    let area = polygon_area(ring).abs();
+    let total = |rings: &[Vec<Point>]| rings.iter().map(|r| polygon_area(r).abs()).sum::<f64>();
+    let mut rings = offset_round(ring, delta);
+    let moved_wrong_way = (delta > 0.0 && total(&rings) < area) || (delta < 0.0 && total(&rings) > area);
+    if moved_wrong_way {
+        rings = offset_round(ring, -delta);
+    }
+    rings.into_iter().filter(|r| r.len() >= 3 && polygon_area(r).abs() >= 1e-6).collect()
+}
+
 /// Prepares a sheet boundary for nesting: insets (or, when `spacing / 2 >
 /// margin`, slightly grows) it so a part padded by `prepare_part` ends up
 /// exactly `margin` from the sheet's true edge, independent of `spacing`.
@@ -192,6 +223,66 @@ pub fn prepare_part(part_outer: &[Point], spacing: f64) -> Option<Vec<Point>> {
         return Some(exact);
     }
     Some(simplified)
+}
+
+/// `circle` with its radius moved by `delta`, matching what the round-join
+/// offset did to its points. `None` once it shrinks to nothing.
+fn grow_circle(circle: Option<Circle>, delta: f64) -> Option<Circle> {
+    circle.map(|c| Circle { r: c.r + delta, ..c }).filter(|c| c.r > 0.0)
+}
+
+/// Pads a whole part - outline and holes - for nesting.
+///
+/// A part nested in a hole is padded by `spacing / 2` like any other part, so
+/// the hole has to give up `spacing / 2` too, or the two meet at half the
+/// spacing (measured 5mm at a spacing of 10). Islands of material inside a
+/// hole are parts in their own right and are padded recursively. The audit
+/// uses this same padding, so it now sees that shortfall too.
+///
+/// Holes and islands no longer match their own `is_circle`/`real_boundary`
+/// once offset, so those are cleared on everything that changed. At
+/// `spacing == 0.0` the part comes back unchanged.
+pub fn pad_part_polygon(part: &LayeredPolygon, spacing: f64) -> Option<LayeredPolygon> {
+    if spacing == 0.0 {
+        return Some(part.clone());
+    }
+    let points = prepare_part(&part.points, spacing)?;
+    let mut children = Vec::new();
+    for hole in &part.children {
+        let islands: Vec<LayeredPolygon> = hole.children.iter().filter_map(|island| pad_part_polygon(island, spacing)).collect();
+        let rings = offset_rings(&hole.points, -spacing / 2.0);
+        // A round hole stays round, just smaller - kept so `inner_nfp`'s
+        // disk-in-disk fast path still fires, now at the padded radii. (It
+        // used to fire at the *true* ones: a round part in a round hole was
+        // fitted with no spacing at all.)
+        let circle = if rings.len() == 1 { grow_circle(hole.is_circle, -spacing / 2.0) } else { None };
+        for ring in rings {
+            children.push(LayeredPolygon { points: ring, is_circle: circle, real_boundary: None, children: islands.clone(), ..hole.clone() });
+        }
+    }
+    Some(LayeredPolygon { points, is_circle: grow_circle(part.is_circle, spacing / 2.0), real_boundary: None, children, ..part.clone() })
+}
+
+/// Prepares a whole sheet - outline and holes - for nesting.
+///
+/// A sheet hole is an edge of the material just like the outline, so parts
+/// keep `margin` from it too. Parts are padded `spacing / 2`, so the hole
+/// grows by `margin - spacing / 2` (shrinks when that is negative) - the
+/// mirror image of `prepare_sheet`'s `spacing / 2 - margin`.
+///
+/// Islands inside a sheet hole are dropped: they are not material anyone
+/// nests on.
+pub fn prepare_sheet_polygon(sheet: &LayeredPolygon, margin: f64, spacing: f64) -> Option<LayeredPolygon> {
+    let points = prepare_sheet(&sheet.points, margin, spacing)?;
+    let mut children = Vec::new();
+    for hole in &sheet.children {
+        let rings = offset_rings(&hole.points, margin - spacing / 2.0);
+        let circle = if rings.len() == 1 { grow_circle(hole.is_circle, margin - spacing / 2.0) } else { None };
+        for ring in rings {
+            children.push(LayeredPolygon { points: ring, is_circle: circle, real_boundary: None, children: Vec::new(), ..hole.clone() });
+        }
+    }
+    Some(LayeredPolygon { points, is_circle: grow_circle(sheet.is_circle, spacing / 2.0 - margin), real_boundary: None, children, ..sheet.clone() })
 }
 
 /// Padded outlines with fewer vertices than this are returned exactly, never
@@ -441,5 +532,81 @@ mod tests {
         // join's own corner cut, but nowhere near the old miter blowup.
         assert!(w_growth < spacing * 1.5, "width grew by {w_growth}, expected roughly {spacing}");
         assert!(h_growth < spacing * 1.5, "height grew by {h_growth}, expected roughly {spacing}");
+    }
+
+    fn layered(points: Vec<Point>, children: Vec<LayeredPolygon>) -> LayeredPolygon {
+        LayeredPolygon { points, layer: String::new(), is_circle: None, children, texts: Vec::new(), real_boundary: None }
+    }
+
+    fn octagon(cx: f64, cy: f64, r: f64) -> Vec<Point> {
+        (0..8)
+            .map(|i| {
+                let t = f64::from(i) / 8.0 * std::f64::consts::TAU;
+                Point::new(cx + r * t.cos(), cy + r * t.sin())
+            })
+            .collect()
+    }
+
+    fn reversed(ring: &[Point]) -> Vec<Point> {
+        ring.iter().rev().copied().collect()
+    }
+
+    #[test]
+    fn pad_part_polygon_shrinks_a_rectangular_hole_for_either_winding() {
+        let square_hole = square(20.0, 20.0, 60.0);
+        for hole_points in [square_hole.clone(), reversed(&square_hole)] {
+            let part = layered(square(0.0, 0.0, 100.0), vec![layered(hole_points, vec![])]);
+            let padded = pad_part_polygon(&part, 10.0).expect("part should pad");
+
+            let outer = get_polygon_bounds(&padded.points).unwrap();
+            assert!((outer.x - -5.0).abs() < 1e-6 && (outer.x + outer.width - 105.0).abs() < 1e-6, "outer {outer:?}");
+            assert_eq!(padded.children.len(), 1);
+            let hole = get_polygon_bounds(&padded.children[0].points).unwrap();
+            assert!((hole.x - 25.0).abs() < 1e-6 && (hole.x + hole.width - 75.0).abs() < 1e-6, "hole {hole:?}");
+        }
+    }
+
+    #[test]
+    fn pad_part_polygon_shrinks_a_non_rectangular_hole_for_either_winding() {
+        let hole = octagon(50.0, 50.0, 30.0);
+        let original_area = polygon_area(&hole).abs();
+        for hole_points in [hole.clone(), reversed(&hole)] {
+            let part = layered(square(0.0, 0.0, 100.0), vec![layered(hole_points, vec![])]);
+            let padded = pad_part_polygon(&part, 10.0).expect("part should pad");
+
+            assert_eq!(padded.children.len(), 1, "an octagon hole of radius 30 must survive a 5mm shrink");
+            let shrunk_area = polygon_area(&padded.children[0].points).abs();
+            assert!(shrunk_area < original_area, "hole should shrink: {shrunk_area} vs {original_area}");
+        }
+    }
+
+    #[test]
+    fn a_hole_narrower_than_the_spacing_disappears() {
+        // 6mm hole, 5mm given up per side at spacing 10: nothing is left.
+        let part = layered(square(0.0, 0.0, 100.0), vec![layered(square(47.0, 47.0, 6.0), vec![])]);
+        let padded = pad_part_polygon(&part, 10.0).expect("part should pad");
+        assert!(padded.children.is_empty(), "a hole that collapses must be dropped, not kept as a sliver");
+    }
+
+    #[test]
+    fn zero_spacing_leaves_holes_untouched() {
+        let part = layered(square(0.0, 0.0, 100.0), vec![layered(square(20.0, 20.0, 60.0), vec![])]);
+        let padded = pad_part_polygon(&part, 0.0).expect("zero spacing must succeed");
+        assert_eq!(padded.points, part.points);
+        assert_eq!(padded.children.len(), part.children.len());
+        for (a, b) in padded.children.iter().zip(&part.children) {
+            assert_eq!(a.points, b.points);
+        }
+    }
+
+    #[test]
+    fn prepare_sheet_polygon_grows_a_hole_by_margin_minus_half_spacing() {
+        // Parts keep `margin` from a sheet hole: the hole grows by
+        // margin - spacing/2 = 10 - 3 = 7 on each side.
+        let sheet = layered(square(0.0, 0.0, 1000.0), vec![layered(square(400.0, 400.0, 100.0), vec![])]);
+        let prepared = prepare_sheet_polygon(&sheet, 10.0, 6.0).expect("sheet should prepare");
+        assert_eq!(prepared.children.len(), 1);
+        let hole = get_polygon_bounds(&prepared.children[0].points).unwrap();
+        assert!((hole.x - 393.0).abs() < 1e-6 && (hole.x + hole.width - 507.0).abs() < 1e-6, "hole {hole:?}");
     }
 }

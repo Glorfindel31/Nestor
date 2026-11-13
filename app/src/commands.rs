@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dxf::Drawing;
-use geometry::clearance::{prepare_part, prepare_sheet};
+use geometry::clearance::{pad_part_polygon, prepare_sheet_polygon};
 use geometry::dxf_export::{PlacedShape, SheetLayout};
 use geometry::dxf_import::{rotate_layered_polygon, shift_layered_polygon, LayeredPolygon};
 use nesting::cache::NfpCache;
@@ -509,16 +509,14 @@ pub fn repack_sheet(request: RepackSheetRequest) -> Result<RepackSheetResponse, 
     let spacing = request.config.effective_spacing();
 
     let true_sheet: LayeredPolygon = request.sheet.into();
-    let sheet_points = prepare_sheet(&true_sheet.points, margin, spacing).ok_or("margin/spacing leaves the sheet with no usable area")?;
-    let sheet = LayeredPolygon { points: sheet_points, real_boundary: None, ..true_sheet };
+    let sheet = prepare_sheet_polygon(&true_sheet, margin, spacing).ok_or("margin/spacing leaves the sheet with no usable area")?;
 
     let parts_by_id: HashMap<usize, LayeredPolygon> = request
         .parts_by_id
         .into_iter()
         .map(|(id, dto)| {
             let poly: LayeredPolygon = dto.into();
-            let points = prepare_part(&poly.points, spacing).ok_or("spacing leaves a part with no usable outline")?;
-            Ok((id, LayeredPolygon { points, real_boundary: None, ..poly }))
+            Ok((id, pad_part_polygon(&poly, spacing).ok_or("spacing leaves a part with no usable outline")?))
         })
         .collect::<Result<_, &str>>()?;
 
@@ -765,13 +763,11 @@ pub fn validate_placement(request: ValidatePlacementRequest) -> Result<ValidateP
     let spacing = request.config.effective_spacing();
 
     let true_sheet: LayeredPolygon = request.sheet.into();
-    let sheet_points = prepare_sheet(&true_sheet.points, margin, spacing).ok_or("margin/spacing leaves the sheet with no usable area")?;
-    let sheet = LayeredPolygon { points: sheet_points, real_boundary: None, ..true_sheet };
+    let sheet = prepare_sheet_polygon(&true_sheet, margin, spacing).ok_or("margin/spacing leaves the sheet with no usable area")?;
 
     let pad = |dto: PolygonDto| -> Result<LayeredPolygon, String> {
         let poly: LayeredPolygon = dto.into();
-        let points = prepare_part(&poly.points, spacing).ok_or_else(|| "spacing leaves a part with no usable outline".to_string())?;
-        Ok(LayeredPolygon { points, real_boundary: None, ..poly })
+        pad_part_polygon(&poly, spacing).ok_or_else(|| "spacing leaves a part with no usable outline".to_string())
     };
 
     let mut parts_by_id: HashMap<usize, LayeredPolygon> = HashMap::new();
@@ -1023,8 +1019,7 @@ pub fn audit_nest(request: crate::dto::AuditRequest) -> Result<crate::dto::Audit
     let mut resolved: HashMap<usize, (LayeredPolygon, LayeredPolygon)> = HashMap::new();
     for (id, dto) in request.parts_by_id {
         let poly: LayeredPolygon = dto.into();
-        let padded_points = prepare_part(&poly.points, spacing).ok_or_else(|| format!("spacing leaves part {id} with no usable outline"))?;
-        let padded = LayeredPolygon { points: padded_points, real_boundary: None, ..poly.clone() };
+        let padded = pad_part_polygon(&poly, spacing).ok_or_else(|| format!("spacing leaves part {id} with no usable outline"))?;
         resolved.insert(id, (poly, padded));
     }
 
@@ -1032,8 +1027,7 @@ pub fn audit_nest(request: crate::dto::AuditRequest) -> Result<crate::dto::Audit
     for placement in &request.placements {
         let dto = request.sheets.get(placement.sheet_index).ok_or_else(|| format!("placement references sheet {} which wasn't supplied", placement.sheet_index))?;
         let outline: LayeredPolygon = dto.clone().into();
-        let usable_points = prepare_sheet(&outline.points, margin, spacing).ok_or("margin/spacing leaves the sheet with no usable area")?;
-        let usable = LayeredPolygon { points: usable_points, real_boundary: None, ..outline.clone() };
+        let usable = prepare_sheet_polygon(&outline, margin, spacing).ok_or("margin/spacing leaves the sheet with no usable area")?;
 
         // A placement naming an id we weren't given is skipped rather than
         // failing the whole audit: the alternative is that one stale id makes
@@ -1165,8 +1159,7 @@ fn prepare_nest_inputs(request: RunNestRequest) -> Result<PreparedNestInputs, St
     let sheets: Vec<LayeredPolygon> = true_sheets
         .iter()
         .map(|sheet| {
-            let points = prepare_sheet(&sheet.points, margin, spacing).ok_or("margin/spacing leaves a sheet with no usable area")?;
-            Ok(LayeredPolygon { points, layer: sheet.layer.clone(), is_circle: sheet.is_circle, children: sheet.children.clone(), texts: sheet.texts.clone(), real_boundary: None })
+            prepare_sheet_polygon(sheet, margin, spacing).ok_or("margin/spacing leaves a sheet with no usable area")
         })
         .collect::<Result<_, &str>>()?;
 
@@ -1183,8 +1176,7 @@ fn prepare_nest_inputs(request: RunNestRequest) -> Result<PreparedNestInputs, St
     let parts_by_id: HashMap<usize, LayeredPolygon> = true_parts_by_id
         .iter()
         .map(|(&id, part)| {
-            let points = prepare_part(&part.points, spacing).ok_or("spacing leaves a part with no usable outline")?;
-            Ok((id, LayeredPolygon { points, layer: part.layer.clone(), is_circle: part.is_circle, children: part.children.clone(), texts: part.texts.clone(), real_boundary: None }))
+            Ok((id, pad_part_polygon(part, spacing).ok_or("spacing leaves a part with no usable outline")?))
         })
         .collect::<Result<_, &str>>()?;
 
@@ -2040,6 +2032,49 @@ mod tests {
         let filler = PartDto { filler: true, ..part(rect_dto(20.0, 50.0), 0) };
         let err = run_nest(RunNestRequest { sheets: vec![rect_dto(100.0, 100.0)], parts: vec![filler], config: config(1) }).expect_err("nothing to open a sheet");
         assert!(err.contains("filler"), "{err}");
+    }
+
+    /// A 100x100 frame with a 60x60 hole (20..80), the hole as its child.
+    fn frame_dto() -> PolygonDto {
+        let mut frame = square_dto(100.0);
+        let hole: Vec<PointDto> = [(20.0, 20.0), (80.0, 20.0), (80.0, 80.0), (20.0, 80.0)].iter().map(|&(x, y)| PointDto { x, y }).collect();
+        frame.children.push(PolygonDto::new(hole, "0".into(), None));
+        frame
+    }
+
+    /// A part nested in another part's hole used to sit spacing/2 from the
+    /// hole wall: only the outer ring was padded, the hole was copied as is.
+    #[test]
+    fn a_part_in_a_hole_keeps_the_full_spacing_from_its_wall() {
+        let spacing = 10.0;
+        let cfg = NestConfigDto { spacing, ..config(2) };
+        let response = run_nest(RunNestRequest { sheets: vec![square_dto(300.0)], parts: vec![part(frame_dto(), 1), part(square_dto(20.0), 1)], config: cfg }).expect("should nest");
+        assert_eq!(response.unplaced_count, 0);
+        let at = |id: usize| response.placements.iter().flat_map(|s| &s.parts).find(|p| p.id == id).map(|p| (p.x, p.y)).expect("placed");
+        let (frame_id, small_id) = if response.parts_by_id[&0].children.is_empty() { (1, 0) } else { (0, 1) };
+        let ((fx, fy), (sx, sy)) = (at(frame_id), at(small_id));
+        let (x, y) = (sx - fx, sy - fy);
+        assert!(x > 0.0 && x < 100.0 && y > 0.0 && y < 100.0, "the small part should go in the hole (it fits: 40 > 20), or this proves nothing: at {x},{y}");
+        let gap = (x - 20.0).min(y - 20.0).min(80.0 - (x + 20.0)).min(80.0 - (y + 20.0));
+        assert!(gap >= spacing - 1e-6, "{gap}mm to the hole wall at spacing {spacing}");
+    }
+
+    /// The audit pads with the same helper, so a hole shortfall is a warning.
+    #[test]
+    fn the_audit_warns_about_a_part_too_close_to_a_hole_wall() {
+        let placements = vec![SheetPlacementDto {
+            sheet_index: 0,
+            parts: vec![PlacedPartDto { id: 0, x: 0.0, y: 0.0, rotation: 0.0, locked: false }, PlacedPartDto { id: 1, x: 25.0, y: 25.0, rotation: 0.0, locked: false }],
+        }];
+        let report = audit_nest(crate::dto::AuditRequest {
+            sheets: vec![square_dto(300.0)],
+            placements,
+            parts_by_id: HashMap::from([(0, frame_dto()), (1, square_dto(20.0))]),
+            config: NestConfigDto { spacing: 10.0, ..config(2) },
+        })
+        .expect("audit should run");
+        assert!(report.issues.iter().any(|i| i.kind == "below_spacing" && i.part_ids.contains(&1)), "5mm from the hole wall at spacing 10: {:?}", report.issues);
+        assert_eq!(report.fatal_count, 0, "too close is not an overlap: {:?}", report.issues);
     }
 
     #[test]
