@@ -202,6 +202,16 @@ pub fn refine_consolidation(
                     if allplacements[target_pos].sheet_index == source_sheet_index {
                         continue;
                     }
+                    // Only downhill: a part moves to a sheet at least as full
+                    // as the one it leaves. Moving it to a sparser one never
+                    // empties a sheet - it just fills the sparse one (usually
+                    // the last, whose leftover is the offcut) from a sheet
+                    // that was going to be cut anyway. The original app did
+                    // exactly that.
+                    let fill = |e: &SheetPlacement| placed_area_of(e, parts_by_id) / area_of_sheet(e.sheet_index, sheets).max(1e-9);
+                    if fill(&allplacements[target_pos]) < fill(&allplacements[source_pos]) {
+                        continue;
+                    }
 
                     // Cheap pre-filter before any real NFP/Clipper work -
                     // skip a sheet whose remaining estimated area can't

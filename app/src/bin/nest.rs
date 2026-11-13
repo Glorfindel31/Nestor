@@ -314,7 +314,21 @@ fn run() -> Result<bool, String> {
         eprintln!("nest: wrote {out}");
     }
 
-    report(&opts, &response, &audit, elapsed, &labels, &quantities);
+    // The last sheet's usable offcut (largest free rectangle), which
+    // `repack::compact_for_offcut` exists to grow - utilisation cannot show it.
+    let last_offcut = match response.placements.last() {
+        Some(last) => commands::compute_remnants(rustynesting::dto::RemnantRequest {
+            sheets: sheets.clone(),
+            placements: vec![last.clone()],
+            parts_by_id: response.parts_by_id.clone(),
+            config: opts.config.clone(),
+        })?
+        .iter()
+        .map(|r| (r.usable_width, r.usable_height))
+        .fold((0.0, 0.0), |a, b| if b.0 * b.1 > a.0 * a.1 { b } else { a }),
+        None => (0.0, 0.0),
+    };
+    report(&opts, &response, &audit, elapsed, &labels, &quantities, last_offcut);
     // NEST_PROFILE=1 dumps the placement hot-path phase timers to stderr, so
     // --json stays diffable.
     if nesting::profile::enabled() {
@@ -422,7 +436,7 @@ fn per_sheet_mix(response: &rustynesting::dto::RunNestResponse, quantities: &[us
         .collect()
 }
 
-fn report(opts: &Options, response: &rustynesting::dto::RunNestResponse, audit: &rustynesting::dto::AuditReportDto, elapsed: std::time::Duration, labels: &[String], quantities: &[usize]) {
+fn report(opts: &Options, response: &rustynesting::dto::RunNestResponse, audit: &rustynesting::dto::AuditReportDto, elapsed: std::time::Duration, labels: &[String], quantities: &[usize], last_offcut: (f64, f64)) {
     let sheet_area = opts.sheet.0 * opts.sheet.1;
     let sheets = per_sheet(response, sheet_area);
     let best = sheets.iter().copied().fold(0.0_f64, f64::max);
@@ -445,13 +459,15 @@ fn report(opts: &Options, response: &rustynesting::dto::RunNestResponse, audit: 
             .join(",");
         let label_list = labels.iter().map(|l| format!("\"{}\"", l.replace('\\', "\\\\").replace('"', "\\\""))).collect::<Vec<_>>().join(",");
         println!(
-            "{{\"sheets\":{},\"placed\":{placed},\"unplaced\":{},\"utilisation\":{:.4},\"best_sheet\":{best:.4},\"mean_sheet\":{mean:.4},\"fitness\":{:.4},\"audit\":\"{}\",\"seconds\":{:.3},\"per_sheet\":[{per}],\"per_sheet_parts\":[{per_parts}],\"labels\":[{label_list}],\"per_sheet_mix\":[{mix}]}}",
+            "{{\"sheets\":{},\"placed\":{placed},\"unplaced\":{},\"utilisation\":{:.4},\"best_sheet\":{best:.4},\"mean_sheet\":{mean:.4},\"fitness\":{:.4},\"audit\":\"{}\",\"seconds\":{:.3},\"last_offcut\":[{:.1},{:.1}],\"per_sheet\":[{per}],\"per_sheet_parts\":[{per_parts}],\"labels\":[{label_list}],\"per_sheet_mix\":[{mix}]}}",
             response.placements.len(),
             response.unplaced_count,
             response.utilisation,
             response.fitness,
             verdict(audit),
             elapsed.as_secs_f64(),
+            last_offcut.0,
+            last_offcut.1,
         );
     } else {
         println!("sheets used   {}", response.placements.len());
@@ -461,6 +477,7 @@ fn report(opts: &Options, response: &rustynesting::dto::RunNestResponse, audit: 
         println!("best sheet    {best:.2}%");
         println!("mean sheet    {mean:.2}%");
         println!("audit         {}", verdict(audit));
+        println!("last offcut   {:.0} x {:.0} mm", last_offcut.0, last_offcut.1);
         if labels.len() > 1 {
             println!("
 sheet  parts  util    composition");

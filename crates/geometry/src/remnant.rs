@@ -155,127 +155,185 @@ pub fn sheet_remnants(sheet: &[Point], placed: &[PlacedOutline], spacing: f64) -
 }
 
 /// Largest axis-aligned rectangle fitting inside `polygon`.
-///
-/// ponytail: a coordinate-sweep approximation, not the exact algorithm. It
-/// takes the distinct X and Y values of the polygon's own vertices as candidate
-/// edges and tests each resulting box for containment. For the shapes this
-/// actually sees - a rectangular sheet with rectangular-ish bites taken out of
-/// it - the optimal rectangle's edges lie on vertex coordinates, so this is
-/// exact in practice; for a curved outline it under-reports slightly, which is
-/// the safe direction for a number someone is going to cut against.
-///
-/// O(n^4) in the vertex count, hence the cap: this runs once per remnant, not
-/// in any loop, and a remnant with hundreds of vertices is a sliver nobody is
-/// going to use anyway. Upgrade to the proper largest-rectangle-in-polygon
-/// algorithm only if that ever stops being true.
 #[must_use]
 pub fn largest_inscribed_rect(polygon: &[Point]) -> Option<Bounds> {
     largest_inscribed_rect_with_holes(polygon, &[])
 }
 
-/// As `largest_inscribed_rect`, but the rectangle must also miss every hole.
+/// Largest axis-aligned rectangle inside `polygon` and clear of every hole.
 ///
-/// **A hole is rejected by its bounding box, not its outline.** That
-/// under-reports a little - a rectangle tucked into the corner beside a
-/// triangular part is refused because it overlaps that part's box - and
-/// under-reporting is the only safe direction for a number someone is going to
-/// cut against. The exact test is a polygon intersection per candidate box,
-/// and there are tens of thousands of candidates.
+/// **Never larger than the truth.** The region is first rasterised on a grid
+/// of `GRID` cells along its long side, and a cell only counts as free when no
+/// boundary edge touches it and its centre is inside - so the best block of
+/// free cells is real material. Each side of that block is then pushed out by
+/// binary search against an exact test (no edge crosses the open rectangle),
+/// which recovers all but a sliver of the last cell.
 ///
-/// The old vertex cap returned the polygon's own bounding box for anything
-/// complicated, which is the *unsafe* direction and is where "usable
-/// 2440 x 1220" came from on a sheet that was two thirds full. Now the
-/// candidate coordinates are thinned instead, so the search stays bounded
-/// without ever claiming material that is not there.
+/// The coordinate sweep this replaced sampled nine points per candidate and
+/// accepted points *on* the boundary, so it reported rectangles straight
+/// through a slot or a curved bite - "1000 x 981" on a sheet with a 300mm
+/// part in the corner - and thinned its candidates by index, which on a
+/// curved outline dropped exactly the coordinate that bounds the real strip.
+/// Both are numbers someone cuts against, and both moved the last-sheet
+/// compaction (`nesting::repack::compact_for_offcut`) the wrong way.
+///
+/// ponytail: O(rows x edges + cells touched by edges). Raise `GRID`, or move
+/// to an exact maximal-empty-rectangle algorithm, if a label ever needs to be
+/// sub-millimetre on a huge sheet.
 #[must_use]
 pub fn largest_inscribed_rect_with_holes(polygon: &[Point], holes: &[Vec<Point>]) -> Option<Bounds> {
-    /// Most distinct candidate coordinates per axis. The sweep is O(n^4).
-    const MAX_COORDS: usize = 26;
+    const GRID: usize = 200;
     let bounds = get_polygon_bounds(polygon)?;
-    let hole_boxes: Vec<Bounds> = holes.iter().filter_map(|h| get_polygon_bounds(h)).collect();
-
-    let mut xs: Vec<f64> = polygon.iter().map(|p| p.x).collect();
-    let mut ys: Vec<f64> = polygon.iter().map(|p| p.y).collect();
-    // A usable rectangle very often stops exactly at a hole's edge, so those
-    // edges have to be candidates or the sweep cannot find it.
-    for b in &hole_boxes {
-        xs.push(b.x);
-        xs.push(b.x + b.width);
-        ys.push(b.y);
-        ys.push(b.y + b.height);
+    let cell = bounds.width.max(bounds.height) / GRID as f64;
+    if !(cell > 0.0) {
+        return None;
     }
-    dedup_sorted(&mut xs);
-    dedup_sorted(&mut ys);
-    thin(&mut xs, MAX_COORDS);
-    thin(&mut ys, MAX_COORDS);
+    let nx = ((bounds.width / cell).ceil() as usize).max(1);
+    let ny = ((bounds.height / cell).ceil() as usize).max(1);
+    let rings: Vec<&[Point]> = std::iter::once(polygon).chain(holes.iter().map(Vec::as_slice)).filter(|r| r.len() >= 3).collect();
+    let edges: Vec<(Point, Point)> = rings.iter().flat_map(|r| r.iter().zip(r.iter().cycle().skip(1)).map(|(a, b)| (*a, *b))).collect();
+    let cell_box = |i: usize, j: usize| Bounds { x: bounds.x + i as f64 * cell, y: bounds.y + j as f64 * cell, width: cell, height: cell };
 
-    let clear_of_holes = |r: &Bounds| {
-        hole_boxes.iter().all(|h| {
-            r.x + r.width <= h.x + 1e-9 || h.x + h.width <= r.x + 1e-9 || r.y + r.height <= h.y + 1e-9 || h.y + h.height <= r.y + 1e-9
-        })
-    };
-
-    let mut best: Option<Bounds> = None;
-    for i in 0..xs.len().saturating_sub(1) {
-        for j in (i + 1)..xs.len() {
-            for k in 0..ys.len().saturating_sub(1) {
-                for l in (k + 1)..ys.len() {
-                    let candidate = Bounds { x: xs[i], y: ys[k], width: xs[j] - xs[i], height: ys[l] - ys[k] };
-                    // Cheap reject before the containment test, which is the
-                    // expensive part of this loop.
-                    if best.as_ref().is_some_and(|b| b.width * b.height >= candidate.width * candidate.height) {
-                        continue;
-                    }
-                    if clear_of_holes(&candidate) && rect_inside(&candidate, polygon) {
-                        best = Some(candidate);
-                    }
+    // A cell any edge touches is not free, whatever side its centre is on.
+    let mut free = vec![true; nx * ny];
+    let index = |v: f64, origin: f64, n: usize| (((v - origin) / cell).floor().max(0.0) as usize).min(n - 1);
+    for (a, b) in &edges {
+        let (i0, i1) = (index(a.x.min(b.x) - 1e-9, bounds.x, nx), index(a.x.max(b.x) + 1e-9, bounds.x, nx));
+        let (j0, j1) = (index(a.y.min(b.y) - 1e-9, bounds.y, ny), index(a.y.max(b.y) + 1e-9, bounds.y, ny));
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                if free[j * nx + i] && segment_hits_box(*a, *b, &cell_box(i, j), 0.0) {
+                    free[j * nx + i] = false;
                 }
             }
         }
     }
-    let _ = bounds;
-    best
-}
-
-/// Keeps at most `max` values, spread evenly, ends always included.
-fn thin(v: &mut Vec<f64>, max: usize) {
-    if v.len() <= max || max < 2 {
-        return;
+    // The rest are wholly in or wholly out: one even-odd scanline per row.
+    for j in 0..ny {
+        let y = bounds.y + (j as f64 + 0.5) * cell;
+        let mut crossings: Vec<f64> =
+            edges.iter().filter(|(a, b)| (a.y > y) != (b.y > y)).map(|(a, b)| a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x)).collect();
+        crossings.sort_by(f64::total_cmp);
+        let mut passed = 0;
+        for i in 0..nx {
+            let x = bounds.x + (i as f64 + 0.5) * cell;
+            while passed < crossings.len() && crossings[passed] < x {
+                passed += 1;
+            }
+            if passed % 2 == 0 {
+                free[j * nx + i] = false;
+            }
+        }
     }
-    let last = v.len() - 1;
-    *v = (0..max).map(|i| v[i * last / (max - 1)]).collect();
-    v.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+
+    // Largest all-free block of cells: a histogram per row, scanned with a stack.
+    let mut heights = vec![0usize; nx];
+    let mut best: Option<(usize, usize, usize, usize)> = None; // (i0, i1, j0, j1), exclusive ends
+    let mut best_area = 0;
+    for j in 0..ny {
+        for i in 0..nx {
+            heights[i] = if free[j * nx + i] { heights[i] + 1 } else { 0 };
+        }
+        let mut stack: Vec<usize> = Vec::new();
+        for i in 0..=nx {
+            let h = if i < nx { heights[i] } else { 0 };
+            while let Some(&top) = stack.last() {
+                if heights[top] < h {
+                    break;
+                }
+                stack.pop();
+                let left = stack.last().map_or(0, |&s| s + 1);
+                let area = heights[top] * (i - left);
+                if area > best_area {
+                    best_area = area;
+                    best = Some((left, i, j + 1 - heights[top], j + 1));
+                }
+            }
+            stack.push(i);
+        }
+    }
+    let (i0, i1, j0, j1) = best?;
+    let mut rect = Bounds {
+        x: bounds.x + i0 as f64 * cell,
+        y: bounds.y + j0 as f64 * cell,
+        width: (i1 - i0) as f64 * cell,
+        height: (j1 - j0) as f64 * cell,
+    };
+
+    // Push each side out as far as the exact test allows, at most a cell.
+    let grown = |r: &Bounds, side: usize, d: f64| match side {
+        0 => Bounds { x: r.x - d, width: r.width + d, ..*r },
+        1 => Bounds { width: r.width + d, ..*r },
+        2 => Bounds { y: r.y - d, height: r.height + d, ..*r },
+        _ => Bounds { height: r.height + d, ..*r },
+    };
+    if !rect_is_free(&rect, &edges, &rings) {
+        return Some(rect);
+    }
+    // Which side goes first matters (a side pushed into a curve can pin its
+    // neighbour), so try across-then-up and up-then-across and keep the larger.
+    let refine = |order: [usize; 4]| {
+        let mut r = rect;
+        for _ in 0..2 {
+            for side in order {
+                let (mut lo, mut hi) = (0.0, cell);
+                for _ in 0..40 {
+                    let mid = (lo + hi) / 2.0;
+                    if rect_is_free(&grown(&r, side, mid), &edges, &rings) {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                r = grown(&r, side, lo);
+            }
+        }
+        // The exact test lets a side sit within 1e-9 of an edge; give it back
+        // so the answer never ends past the boundary it stopped at.
+        Bounds { x: r.x + 1e-8, y: r.y + 1e-8, width: r.width - 2e-8, height: r.height - 2e-8 }
+    };
+    let (a, b) = (refine([0, 1, 2, 3]), refine([2, 3, 0, 1]));
+    rect = if a.width * a.height >= b.width * b.height { a } else { b };
+    Some(rect)
 }
 
-fn dedup_sorted(v: &mut Vec<f64>) {
-    v.sort_by(f64::total_cmp);
-    v.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+/// Whether segment `a`-`b` touches `r` grown by `pad` on every side (Liang-Barsky).
+fn segment_hits_box(a: Point, b: Point, r: &Bounds, pad: f64) -> bool {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
+    for (p, q) in [(-dx, a.x - (r.x - pad)), (dx, r.x + r.width + pad - a.x), (-dy, a.y - (r.y - pad)), (dy, r.y + r.height + pad - a.y)] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return false;
+            }
+        } else {
+            let t = q / p;
+            if p < 0.0 {
+                t0 = t0.max(t);
+            } else {
+                t1 = t1.min(t);
+            }
+            if t0 > t1 {
+                return false;
+            }
+        }
+    }
+    true
 }
 
-/// Whether a rectangle lies entirely within `polygon`.
-///
-/// Tests the rectangle's corners *and* the midpoints of its edges. Corners
-/// alone are not enough: a C-shaped region can contain all four corners of a
-/// box while its notch cuts straight through the middle of an edge, and
-/// reporting that as usable material is exactly the error that gets someone
-/// cutting into thin air.
-fn rect_inside(rect: &Bounds, polygon: &[Point]) -> bool {
-    let (x0, y0) = (rect.x, rect.y);
-    let (x1, y1) = (rect.x + rect.width, rect.y + rect.height);
-    let (mx, my) = (x0 + rect.width / 2.0, y0 + rect.height / 2.0);
-    [
-        (x0, y0),
-        (x1, y0),
-        (x1, y1),
-        (x0, y1),
-        (mx, y0),
-        (mx, y1),
-        (x0, my),
-        (x1, my),
-        (mx, my),
-    ]
-    .iter()
-    .all(|&(x, y)| crate::polygon::point_in_polygon(Point::new(x, y), polygon, Point::new(0.0, 0.0), None) != Some(false))
+/// Exact: no boundary edge enters the open rectangle, and its centre is inside
+/// the region (even-odd over every ring, so holes count as outside).
+fn rect_is_free(r: &Bounds, edges: &[(Point, Point)], rings: &[&[Point]]) -> bool {
+    if edges.iter().any(|(a, b)| segment_hits_box(*a, *b, r, -1e-9)) {
+        return false;
+    }
+    let (cx, cy) = (r.x + r.width / 2.0, r.y + r.height / 2.0);
+    let crossings = rings
+        .iter()
+        .flat_map(|ring| ring.iter().zip(ring.iter().cycle().skip(1)))
+        .filter(|(a, b)| (a.y > cy) != (b.y > cy) && cx < a.x + (cy - a.y) / (b.y - a.y) * (b.x - a.x))
+        .count();
+    crossings % 2 == 1
 }
 
 #[cfg(test)]
@@ -398,5 +456,61 @@ mod tests {
     fn the_inscribed_rect_of_a_plain_rectangle_is_itself() {
         let r = largest_inscribed_rect(&rect(10.0, 20.0, 30.0, 40.0)).expect("has bounds");
         assert!((r.width - 30.0).abs() < 1e-6 && (r.height - 40.0).abs() < 1e-6, "{r:?}");
+    }
+
+    /// The slot is a notch cut from the top edge. The rectangle may sit beside
+    /// it or above it, never across it, and the 61 x 100 right-hand part is the
+    /// answer.
+    #[test]
+    fn the_inscribed_rect_does_not_cross_a_slot() {
+        let slot = vec![
+            Point::new(0.0, 0.0),
+            Point::new(37.0, 0.0),
+            Point::new(37.0, 80.0),
+            Point::new(39.0, 80.0),
+            Point::new(39.0, 0.0),
+            Point::new(100.0, 0.0),
+            Point::new(100.0, 100.0),
+            Point::new(0.0, 100.0),
+        ];
+        let r = largest_inscribed_rect(&slot).expect("has bounds");
+        let crosses = r.x < 39.0 && r.x + r.width > 37.0 && r.y < 80.0;
+        assert!(!crosses, "rect runs through the slot: {r:?}");
+        assert!(r.width * r.height >= 61.0 * 100.0 - 100.0, "must find the 61x100 part, got {r:?}");
+    }
+
+    /// A quarter-disc bite out of the corner. Every corner of the answer must
+    /// lie outside the disc, and the answer must be close to the 700 x 1000
+    /// rectangle beside it.
+    #[test]
+    fn the_inscribed_rect_does_not_cross_a_curve() {
+        let mut poly = vec![Point::new(1000.0, 0.0), Point::new(1000.0, 1000.0), Point::new(0.0, 1000.0)];
+        for k in 0..=200 {
+            let t = std::f64::consts::FRAC_PI_2 * k as f64 / 200.0;
+            poly.push(Point::new(300.0 * t.sin(), 300.0 * t.cos()));
+        }
+        let r = largest_inscribed_rect(&poly).expect("has bounds");
+        assert!(r.width * r.height >= 700_000.0 - 2_000.0, "expected ~700000mm2, got {r:?}");
+        for (x, y) in [(r.x, r.y), (r.x + r.width, r.y), (r.x, r.y + r.height), (r.x + r.width, r.y + r.height)] {
+            // 0.01: the bite is 200 chords, which sag ~0.002mm inside the true arc.
+            assert!(x.hypot(y) >= 300.0 - 0.01, "corner ({x}, {y}) is inside the bite: {r:?}");
+        }
+    }
+
+    /// A hole in the middle of a square. The answer must miss the hole box and
+    /// still be a 40 x 100 strip beside it, not the 0 it would be if the hole
+    /// were ignored and the sweep kept colliding with it.
+    #[test]
+    fn the_inscribed_rect_misses_a_hole() {
+        let r = largest_inscribed_rect_with_holes(&rect(0.0, 0.0, 100.0, 100.0), &[rect(40.0, 40.0, 20.0, 20.0)]).expect("has bounds");
+        let overlaps = r.x < 60.0 && r.x + r.width > 40.0 && r.y < 60.0 && r.y + r.height > 40.0;
+        assert!(!overlaps, "rect overlaps the hole: {r:?}");
+        assert!(r.width * r.height >= 40.0 * 100.0 - 100.0, "expected a 40x100 strip beside the hole, got {r:?}");
+    }
+
+    #[test]
+    fn a_plain_rectangle_is_found_to_full_size() {
+        let r = largest_inscribed_rect(&rect(0.0, 0.0, 100.0, 50.0)).expect("has bounds");
+        assert!(r.width >= 99.99 && r.height >= 49.99, "{r:?}");
     }
 }

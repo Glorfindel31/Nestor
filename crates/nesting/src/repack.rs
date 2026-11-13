@@ -29,8 +29,8 @@ use crate::cache::NfpCache;
 use crate::dispatch;
 use crate::ga::{GaConfig, GeneticAlgorithm};
 use crate::placement::{
-    place_on_sheet, place_parts, rotation_steps, NestPart, PlaceResult, PlacedObstacle, PlacedPart, PlacementConfig,
-    SheetPlacement,
+    place_on_sheet, place_parts, rotation_steps, NestPart, PartRule, PlaceResult, PlacedObstacle, PlacedPart, Placement,
+    PlacementConfig, SheetPlacement,
 };
 
 /// Same shape as `ga::is_better_nest` (unplaced count first, tie-broken by
@@ -239,15 +239,70 @@ pub fn usable_offcut_area(sheet: &LayeredPolygon, placement: &SheetPlacement, pa
     geometry::remnant::sheet_remnants(&sheet.points, &placed, 0.0).iter().map(|r| r.usable.width * r.usable.height).fold(0.0, f64::max)
 }
 
+/// Cache identity for the turned sheet, so its inner NFPs never collide with the real sheet's.
+const TURNED_SHEET_BIT: usize = 1 << 41;
+
+/// `repack_around_locked` run on the whole world turned a quarter turn (CCW),
+/// then turned back. Gravity closes up on the turned width, so the free strip
+/// lands along the top of the real sheet instead of the right. Part rotation
+/// rules are turned with the world so grain-locked parts keep their real angle.
+fn compact_turned(
+    sheet: &LayeredPolygon,
+    current: &SheetPlacement,
+    parts_by_id: &HashMap<usize, LayeredPolygon>,
+    shape_ids: &HashMap<usize, usize>,
+    gravity: &PlacementConfig,
+    cache: &NfpCache,
+    should_cancel: &(impl Fn() -> bool + Sync),
+) -> Option<SheetPlacement> {
+    let turned_sheet = rotate_layered_polygon(sheet, 90.0);
+    let turned_current = SheetPlacement {
+        sheet_index: current.sheet_index | TURNED_SHEET_BIT,
+        parts: current
+            .parts
+            .iter()
+            .map(|p| PlacedPart {
+                id: p.id,
+                placement: Placement { x: -p.placement.y, y: p.placement.x },
+                rotation: (p.rotation + 90.0).rem_euclid(360.0),
+            })
+            .collect(),
+    };
+    let turned_cfg = PlacementConfig {
+        part_rules: std::sync::Arc::new(
+            gravity
+                .part_rules
+                .iter()
+                .map(|(&id, rule)| (id, PartRule { angles: rule.angles.iter().map(|a| (a + 90.0).rem_euclid(360.0)).collect(), ..rule.clone() }))
+                .collect(),
+        ),
+        ..gravity.clone()
+    };
+    let out = repack_around_locked(&turned_sheet, &turned_current, &[], parts_by_id, shape_ids, &turned_cfg, cache, should_cancel)?;
+    Some(SheetPlacement {
+        sheet_index: current.sheet_index,
+        parts: out
+            .parts
+            .iter()
+            .map(|p| PlacedPart {
+                id: p.id,
+                placement: Placement { x: p.placement.y, y: -p.placement.x },
+                rotation: (p.rotation - 90.0).rem_euclid(360.0),
+            })
+            .collect(),
+    })
+}
+
 /// Re-packs one sheet's parts into a corner and keeps the result only if it
 /// leaves a **strictly larger** usable offcut. Meant for the last sheet of a
 /// nest, the one that is part-full and whose leftover goes back on the shelf.
 ///
-/// `Gravity` rather than the run's own placement type: it closes the layout up
-/// on width first, which leaves the free material as one full-height strip -
-/// the shape an offcut is most useful in. Every part is re-placed through the
-/// normal NFP path and must fit, or nothing changes, so this can never drop a
-/// part or produce an overlap; it only ever moves the same parts.
+/// Tries `Gravity` on the sheet as drawn (narrow in X: free strip on the right,
+/// full height) and turned a quarter turn (narrow in Y: free strip along the
+/// top, full width), and keeps whichever leaves the bigger usable offcut. Every
+/// part is re-placed through the normal NFP path and must fit, or that
+/// candidate is dropped, so this can never drop a part or produce an overlap;
+/// it only ever moves the same parts.
 #[must_use]
 pub fn compact_for_offcut(
     sheet: &LayeredPolygon,
@@ -262,10 +317,17 @@ pub fn compact_for_offcut(
         return None;
     }
     let gravity = PlacementConfig { placement_type: crate::placement::PlacementType::Gravity, ..placement_config.clone() };
-    let candidate = repack_around_locked(sheet, current, &[], parts_by_id, shape_ids, &gravity, cache, should_cancel)?;
-    (candidate.parts.len() == current.parts.len()
-        && usable_offcut_area(sheet, &candidate, parts_by_id) > usable_offcut_area(sheet, current, parts_by_id) + 1.0)
-        .then_some(candidate)
+    let baseline = usable_offcut_area(sheet, current, parts_by_id);
+    let as_drawn = repack_around_locked(sheet, current, &[], parts_by_id, shape_ids, &gravity, cache, should_cancel);
+    let turned = compact_turned(sheet, current, parts_by_id, shape_ids, &gravity, cache, should_cancel);
+    [as_drawn, turned]
+        .into_iter()
+        .flatten()
+        .filter(|candidate| candidate.parts.len() == current.parts.len())
+        .map(|candidate| (usable_offcut_area(sheet, &candidate, parts_by_id), candidate))
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .filter(|(area, _)| *area > baseline + 1.0)
+        .map(|(_, candidate)| candidate)
 }
 
 #[cfg(test)]
@@ -477,5 +539,41 @@ mod tests {
             compact_for_offcut(&sheet, &compacted, &parts_by_id, &HashMap::new(), &placement_config(), &NfpCache::new(), &|| false).is_none(),
             "an already compact sheet is left alone"
         );
+    }
+
+    /// Scattered parts that leave the full-width strip as the biggest offcut:
+    /// the turned candidate has to be the one that finds it, and every part
+    /// must still sit inside the sheet, unrotated, without overlapping.
+    #[test]
+    fn compacting_finds_the_full_width_strip_when_that_is_bigger() {
+        // 210, not 200: two 100mm parts end to end along an exactly-200mm side
+        // have zero slack, and the NFP subtraction drops a zero-width position.
+        let sheet = rect(210.0, 100.0);
+        let parts_by_id: HashMap<usize, LayeredPolygon> = HashMap::from([(0, rect(100.0, 30.0)), (1, rect(100.0, 30.0))]);
+        let scattered = SheetPlacement {
+            sheet_index: 0,
+            parts: vec![
+                PlacedPart { id: 0, placement: Placement { x: 0.0, y: 0.0 }, rotation: 0.0 },
+                PlacedPart { id: 1, placement: Placement { x: 100.0, y: 70.0 }, rotation: 0.0 },
+            ],
+        };
+        let cfg = PlacementConfig { rotations: 1, ..placement_config() };
+        let compacted = compact_for_offcut(&sheet, &scattered, &parts_by_id, &HashMap::new(), &cfg, &NfpCache::new(), &|| false)
+            .expect("the full-width strip is bigger than what the scattered layout leaves");
+
+        let after = usable_offcut_area(&sheet, &compacted, &parts_by_id);
+        assert!(after >= 210.0 * 70.0 - 1.0, "full-width strip left: {after}");
+        let mut ids: Vec<usize> = compacted.parts.iter().map(|p| p.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![0, 1]);
+        for p in &compacted.parts {
+            assert!((p.rotation.rem_euclid(360.0)).min(360.0 - p.rotation.rem_euclid(360.0)) < 1e-9, "rotation drifted to {}", p.rotation);
+            assert!(p.placement.x >= -1e-6 && p.placement.y >= -1e-6, "part {} off the sheet at ({}, {})", p.id, p.placement.x, p.placement.y);
+            assert!(p.placement.x + 100.0 <= 210.0 + 1e-6 && p.placement.y + 30.0 <= 100.0 + 1e-6, "part {} off the sheet at ({}, {})", p.id, p.placement.x, p.placement.y);
+        }
+        let a = &compacted.parts[0].placement;
+        let b = &compacted.parts[1].placement;
+        let overlap = a.x < b.x + 100.0 - 1e-6 && b.x < a.x + 100.0 - 1e-6 && a.y < b.y + 30.0 - 1e-6 && b.y < a.y + 30.0 - 1e-6;
+        assert!(!overlap, "parts overlap: ({}, {}) and ({}, {})", a.x, a.y, b.x, b.y);
     }
 }
