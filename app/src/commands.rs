@@ -1222,6 +1222,15 @@ fn to_placements_dto(placements: Vec<nesting::placement::SheetPlacement>) -> Vec
 /// that does not set them. Plain linear growth, not anything self-tuning:
 /// simple and predictable beats clever, and now a shop that disagrees can just
 /// say so instead of waiting for a rebuild.
+/// The GA seed for one run of a multi-run job. Run 0 keeps `seed`, so a
+/// single-run job is bit-identical to before. Every run used to get the same
+/// seed, so with the escalation knobs off runs 2..N replayed run 1 exactly.
+/// Spread by a large odd constant rather than `+ run_index`: the GA draws
+/// `seed, seed + 1, ...` itself, so neighbouring seeds would share streams.
+fn run_seed(seed: u64, run_index: usize) -> u64 {
+    seed.wrapping_add((run_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
 fn escalated_run_config(scales: RunScales, base_ga_config: &GaConfig, base_generations: usize, run_index: usize, total_runs: usize) -> (GaConfig, usize) {
     let rotations = base_ga_config.rotations + scales.rotations.growth(run_index);
     let ga_config = GaConfig {
@@ -1416,7 +1425,7 @@ pub fn run_nest_with_progress(
             generations: generations_for_run,
         });
 
-        let mut ga = GeneticAlgorithm::new(adam.clone(), run_ga_config.clone(), Vec::new(), seed);
+        let mut ga = GeneticAlgorithm::new(adam.clone(), run_ga_config.clone(), Vec::new(), run_seed(seed, run_index));
 
         // Deliberately not a `move` closure: `on_progress`/`on_individual_placed`
         // (mutable/shared borrows of the outer function's own parameters) need
@@ -2031,6 +2040,17 @@ mod tests {
         let filler = PartDto { filler: true, ..part(rect_dto(20.0, 50.0), 0) };
         let err = run_nest(RunNestRequest { sheets: vec![rect_dto(100.0, 100.0)], parts: vec![filler], config: config(1) }).expect_err("nothing to open a sheet");
         assert!(err.contains("filler"), "{err}");
+    }
+
+    #[test]
+    fn each_run_gets_its_own_seed_and_run_zero_keeps_the_callers() {
+        assert_eq!(run_seed(7, 0), 7, "a single-run job must stay bit-identical");
+        let seeds: Vec<u64> = (0..4).map(|run| run_seed(7, run)).collect();
+        for (i, a) in seeds.iter().enumerate() {
+            for b in &seeds[i + 1..] {
+                assert!(a.abs_diff(*b) > 1_000_000, "runs share an RNG stream: {seeds:?}");
+            }
+        }
     }
 
     #[test]
